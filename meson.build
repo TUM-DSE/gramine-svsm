@@ -42,6 +42,7 @@ endif
 direct = get_option('direct') == 'enabled'
 sgx = get_option('sgx') == 'enabled'
 skeleton = get_option('skeleton') == 'enabled'
+svsm = get_option('svsm') == 'enabled'
 
 dcap = get_option('dcap') == 'enabled'
 ubsan = get_option('ubsan') == 'enabled'

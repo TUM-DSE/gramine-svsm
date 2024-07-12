@@ -5,6 +5,8 @@ option('sgx', type: 'combo', choices: ['disabled', 'enabled'],
     description: 'Build and install gramine-sgx (aka Linux-SGX)')
 option('skeleton', type: 'combo', choices: ['disabled', 'enabled'],
     description: 'Build skeleton PAL')
+option('svsm', type: 'combo', choices: ['disabled', 'enabled'],
+    description: 'Built svsm PAL')
 
 option('libc', type: 'combo', choices: ['none', 'glibc', 'musl'],
     value: 'glibc', description: 'Choose (patched) libc that is to be built into runtime directory')
