@@ -100,6 +100,8 @@ install -t %{buildroot}/%{_licensedir}/%{name} LICENSE*.txt
 %dir %{_libdir}/%{name}/sgx
 %{_libdir}/%{name}/sgx/libpal.so
 %{_libdir}/%{name}/sgx/loader
+%{_libdir}/%{name}/svsm/libpal.so
+%{_libdir}/%{name}/svsm/loader
 
 %{_libdir}/%{name}/libsysdb.so
 

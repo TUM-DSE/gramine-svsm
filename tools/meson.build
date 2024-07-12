@@ -32,6 +32,27 @@ if direct
     )
 endif
 
+if svsm
+    hostpalpath_svsm = get_option('prefix') / pkglibdir / 'svsm'
+    custom_target('gramine-svsm',
+        command: [meson_render_script_prog,
+            '--mode', '755',
+            common_render_defines,
+            '-D', 'SGX=0',
+            '-D', 'HOST_PAL_PATH=@0@'.format(hostpalpath_svsm),
+            '-D', 'LIBPAL_PATH=@0@'.format(hostpalpath_svsm / 'libpal.so'),
+            '-D', 'PAL_CMD=@0@'.format(hostpalpath_svsm / 'loader'),
+            '-D', 'CONFIG_SGX_DRIVER=',
+            '@INPUT@',
+            '@OUTPUT@',
+        ],
+        input: 'gramine.in',
+        output: 'gramine-svsm',
+        install: true,
+        install_dir: get_option('bindir'),
+    )
+endif
+
 if sgx
     subdir('sgx')
 

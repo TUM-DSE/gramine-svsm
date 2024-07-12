@@ -78,10 +78,9 @@ libpal_svsm = shared_library('pal',
 libpal_svsm_dep = declare_dependency(
     link_with: libpal_svsm,
 )
-
 if debug
     custom_target('libpal.so.map',
-        input: libpal_svsm,
+        input: libpal_direct,
         command: gen_symbol_map_cmd,
         capture: true,
         output: 'libpal.so.map',
@@ -89,4 +88,10 @@ if debug
         install: true,
         install_dir: pkglibdir / 'svsm',
     )
+
 endif
+
+meson.add_install_script('/bin/sh', '-c',
+    'ln -sf libpal.so "$MESON_INSTALL_DESTDIR_PREFIX"/@0@'.format(
+        pkglibdir / 'svsm/loader'))
+
