@@ -25,6 +25,7 @@ libpal_svsm = shared_library('pal',
     'pal_sockets.c',
     'pal_streams.c',
     'pal_threading.c',
+    'arch/x86_64/pal_start.S',
     pal_common_sources,
 
     include_directories: [
@@ -74,6 +75,7 @@ libpal_svsm = shared_library('pal',
     install: true,
     install_dir: pkglibdir / 'svsm',
 )
+
 
 libpal_svsm_dep = declare_dependency(
     link_with: libpal_svsm,
