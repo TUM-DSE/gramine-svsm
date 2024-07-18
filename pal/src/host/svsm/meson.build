@@ -47,6 +47,7 @@ libpal_svsm = shared_library('pal',
 
     link_args: [
         '-nostdlib',
+        '-nodefaultlibs',
 
         # For PAL symbol resolution, we use old-style hash (DT_HASH) table instead of the
         # default GNU hash (DT_GNU_HASH) table -- to figure out the number of dynamic symbols in
@@ -82,7 +83,7 @@ libpal_svsm_dep = declare_dependency(
 )
 if debug
     custom_target('libpal.so.map',
-        input: libpal_direct,
+        input: libpal_svsm,
         command: gen_symbol_map_cmd,
         capture: true,
         output: 'libpal.so.map',
