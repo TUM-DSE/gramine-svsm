@@ -60,5 +60,9 @@
     * via ops pointer
 * `_PalThreadYieldExecution()`
 * `_PalThreadExit()`
+* `_PalProcessExit()`
 
 > *Note on ops pointer*: `handle_ops` struct contains pointers to specific file or directory functions. Some of the `_Pal` functions already call the appropriate ops. Just the functions/function pointers need to be implemented/set.
+
+
+
