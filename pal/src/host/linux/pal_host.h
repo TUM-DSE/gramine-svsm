@@ -36,6 +36,8 @@ typedef struct {
             PAL_IDX fd;
             char* realpath;
             bool seekable; /* regular files are seekable, FIFO pipes are not */
+			bool is_embedded;
+			int embedded_file_idx;
         } file;
 
         struct {

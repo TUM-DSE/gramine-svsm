@@ -16,6 +16,8 @@
 #include "path_utils.h"
 #include "stat.h"
 
+#include "embedded_files.h"
+
 static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum pal_access access,
                      pal_share_flags_t share, enum pal_create_mode create,
                      pal_stream_options_t options) {
@@ -23,6 +25,17 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
     int fd = -1;
     PAL_HANDLE hdl = NULL;
     char* path = NULL;
+
+	// check if trying to read test.txt
+	if (strstr(uri, "test.txt")) {
+    	hdl = calloc(1, HANDLE_SIZE(file));
+		init_handle_hdr(hdl, PAL_TYPE_FILE);
+    	hdl->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
+		hdl->file.is_embedded = true;		
+		hdl->file.embedded_file_idx = (size_t) TEST_FILE;
+    	*handle = hdl;
+		return 0;
+	}
 
     if (strcmp(type, URI_TYPE_FILE))
         return -PAL_ERROR_INVAL;
@@ -85,6 +98,15 @@ fail:
 
 static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buffer) {
     int64_t ret;
+
+	//TODO: For now assume memcpy doesn't fail
+	if(handle->file.is_embedded) {
+		size_t file_size = embedded_files[handle->file.embedded_file_idx].size;
+		ret = count > file_size ? file_size : count;
+		memcpy(buffer, embedded_files[handle->file.embedded_file_idx].file, ret);
+		return ret;
+	}
+
     if (handle->file.seekable) {
         ret = DO_SYSCALL(pread64, handle->file.fd, buffer, count, offset);
     } else {
