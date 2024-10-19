@@ -39,6 +39,10 @@ _fs_base = (
         Required('type'): 'untrusted_shm',
         Required('uri'): _uri,
     },
+    {
+        Required('type'): 'pseudo',
+        Required('uri'): _uri,
+    },
 )
 
 _fs_root = Any(*_fs_base)

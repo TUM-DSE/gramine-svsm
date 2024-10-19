@@ -80,6 +80,9 @@ int init_fs(void) {
     if ((ret = init_etcfs()) < 0)
         goto err;
 
+    if ((ret = init_libfs()) < 0)
+        goto err;
+
     return 0;
 
 err:
