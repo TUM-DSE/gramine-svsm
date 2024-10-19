@@ -145,6 +145,8 @@ struct pseudo_node {
              */
             int (*load)(struct libos_dentry* dent, char** out_data, size_t* out_size);
 
+            bool no_free;
+
             /*
              * Invoked on every write operation.
              *
@@ -263,3 +265,5 @@ int sys_print_as_bitmask(char* buf, size_t buf_size, size_t count,
 
 /* etcfs */
 int init_etcfs(void);
+
+int init_libfs(void);

@@ -464,9 +464,11 @@ static int pseudo_close(struct libos_handle* hdl) {
     struct pseudo_node* node = hdl->inode->data;
     switch (node->type) {
         case PSEUDO_STR: {
-            lock(&hdl->lock);
-            mem_file_destroy(&hdl->info.str.mem);
-            unlock(&hdl->lock);
+            if (! node->str.no_free) {
+                lock(&hdl->lock);
+                mem_file_destroy(&hdl->info.str.mem);
+                unlock(&hdl->lock);
+            }
             return 0;
         }
 
@@ -595,6 +597,7 @@ struct libos_fs_ops pseudo_fs_ops = {
     .close    = &pseudo_close,
     .flush    = &pseudo_flush,
     .poll     = &pseudo_poll,
+    .mmap     = &generic_emulated_mmap,
 };
 
 struct libos_d_ops pseudo_d_ops = {
