@@ -3,11 +3,11 @@
 
 # Python3 manifest example
 
-libos.entrypoint = "{{ entrypoint }}"
+libos.entrypoint = "/python/python3"
 
 loader.log_level = "{{ log_level }}"
 
-loader.env.LD_LIBRARY_PATH = "/lib:/lib:{{ arch_libdir }}:/usr/{{ arch_libdir }}"
+loader.env.LD_LIBRARY_PATH = "/lib"
 
 # Python's NumPy spawns as many threads as there are CPU cores, and each thread
 # consumes a chunk of memory, so on large machines 1G enclave size may be not enough.
@@ -18,39 +18,16 @@ loader.insecure__use_cmdline_argv = true
 
 sys.enable_sigterm_injection = true
 
+fs.root.type = "tmpfs"
 fs.mounts = [
-  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
-  { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
-  { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+  { path = "/scripts", uri = "file:scripts" },
+  { type = "pseudo", path = "/lib", uri = "lib" },
+  { type = "pseudo", path = "/python", uri = "python" },
+
 {% for path in python.get_sys_path(entrypoint) %}
   { path = "{{ path }}", uri = "file:{{ path }}" },
 {% endfor %}
-  { path = "{{ entrypoint }}", uri = "file:{{ entrypoint }}" },
-  { path = "/etc/hosts", uri = "file:helper-files/hosts" },
-
-  { type = "tmpfs", path = "/tmp" },
 ]
 
 sys.stack.size = "2M"
 sys.enable_extra_runtime_domain_names_conf = true
-
-sgx.debug = true
-sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
-sgx.enclave_size = "1G"
-sgx.max_threads = {{ '1' if env.get('EDMM', '0') == '1' else '32' }}
-
-sgx.remote_attestation = "{{ ra_type }}"
-sgx.ra_client_spid = "{{ ra_client_spid }}"
-sgx.ra_client_linkable = {{ 'true' if ra_client_linkable == '1' else 'false' }}
-
-sgx.trusted_files = [
-  "file:{{ entrypoint }}",
-  "file:{{ gramine.runtimedir() }}/",
-  "file:{{ arch_libdir }}/",
-  "file:/usr/{{ arch_libdir }}/",
-{% for path in python.get_sys_path(entrypoint) %}
-  "file:{{ path }}{{ '/' if path.is_dir() else '' }}",
-{% endfor %}
-  "file:scripts/",
-  "file:helper-files/",
-]
