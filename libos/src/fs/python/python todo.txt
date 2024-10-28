@@ -1,0 +1,2 @@
+execute this command:
+xxd -i python > python.c
