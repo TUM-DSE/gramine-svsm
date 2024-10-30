@@ -177,10 +177,13 @@ gen_symbol_map_cmd = [
 # at offset 0x8.
 if host_machine.cpu_family() == 'x86_64'
     cflags_custom_stack_protector = [
-        '-fstack-protector-strong',
-        '-mstack-protector-guard=tls',
-        '-mstack-protector-guard-reg=%gs',
-        '-mstack-protector-guard-offset=8',
+        #'-fstack-protector-strong',
+        #'-mstack-protector-guard=tls',
+        #'-mstack-protector-guard-reg=%gs',
+        #'-mstack-protector-guard-offset=8',
+        # For now we work without stack protection
+        # TODO: Enable stack protection again
+        '-fcf-protection=none'
     ]
 else
     cflags_custom_stack_protector = [
