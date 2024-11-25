@@ -9,6 +9,7 @@
 #include "pal.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "pal_monitor_call.h"
 
 int _PalSendHandle(PAL_HANDLE target_process, PAL_HANDLE cargo) {
     return -PAL_ERROR_NOTIMPLEMENTED;
@@ -23,5 +24,11 @@ int _PalInitDebugStream(const char* path) {
 }
 
 int _PalDebugLog(const void* buf, size_t size) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+
+    const uint8_t* log_string = buf;
+    for(size_t i = 0; i < size; i++){
+        pal_svsm_debug_putc(log_string[i]);
+    }
+    pal_svsm_debug_putc(0);
+    return 0;
 }

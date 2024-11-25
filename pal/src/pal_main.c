@@ -189,6 +189,7 @@ static int build_envs(const char** orig_envp, bool propagate, const char*** out_
 
     /* First, go through original variables and copy the ones that we're going to use (because of
      * `propagate`, or because passthrough is specified for that variable in manifest). */
+    if(orig_envp != NULL)
     for (const char** orig_env = orig_envp; *orig_env; orig_env++) {
         char* orig_env_key_end = strchr(*orig_env, '=');
         if (!orig_env_key_end)

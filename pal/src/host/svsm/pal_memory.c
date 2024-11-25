@@ -9,9 +9,10 @@
 #include "pal.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "pal_monitor_call.h"
 
 int _PalVirtualMemoryAlloc(void* addr, uint64_t size, pal_prot_flags_t prot) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    return pal_svsm_virt_alloc(addr, size, prot);
 }
 
 int _PalVirtualMemoryFree(void* addr, uint64_t size) {

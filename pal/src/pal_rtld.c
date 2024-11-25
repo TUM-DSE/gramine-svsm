@@ -568,23 +568,23 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
             goto out;
         }
     }
-
+    //__asm__ volatile("mov $9999, %rax; cpuid");
     /* adjust shared object's virtual addresses (p_vaddr) to actual virtual addresses in memory */
     g_entrypoint_map.l_entry = g_entrypoint_map.l_entry + g_entrypoint_map.l_base_diff;
     g_entrypoint_map.l_ld = (elf_dyn_t*)((elf_addr_t)g_entrypoint_map.l_ld +
                                          g_entrypoint_map.l_base_diff);
-
+    __asm__ volatile("mov $29999, %rax; cpuid");
     ret = verify_dynamic_entries(&g_entrypoint_map);
     if (ret < 0)
         goto out;
-
+    __asm__ volatile("mov $19999, %rax; cpuid");
     ret = find_string_and_symbol_tables(g_entrypoint_map.l_map_start, g_entrypoint_map.l_base_diff,
                                         &g_entrypoint_map.string_table,
                                         &g_entrypoint_map.symbol_table,
                                         &g_entrypoint_map.symbol_table_cnt);
     if (ret < 0)
         goto out;
-
+    //__asm__ volatile("mov $999999, %rax; cpuid");
     /* zero out the unused parts of loaded segments and perform relocations on loaded segments
      * (need to first change memory permissions to writable and then revert permissions back) */
     for (size_t i = 0; i < loadcmds_cnt; i++) {
@@ -642,21 +642,23 @@ int load_entrypoint(const char* uri) {
     int ret;
     PAL_HANDLE handle;
 
-    char buf[1024]; /* must be enough to hold ELF header and all its program headers */
+    //char buf[1024]; /* must be enough to hold ELF header and all its program headers */
     ret = _PalStreamOpen(&handle, uri, PAL_ACCESS_RDONLY, /*share_flags=*/0, PAL_CREATE_NEVER,
                          /*options=*/0);
     if (ret < 0)
         return ret;
 
-    ret = _PalStreamRead(handle, 0, sizeof(buf), buf);
-    if (ret < 0) {
-        log_error("Reading ELF file failed");
-        goto out;
-    }
+    //ret = _PalStreamRead(handle, 0, sizeof(buf), buf);
+    //if (ret < 0) {
+    //    log_error("Reading ELF file failed");
+    //    goto out;
+    //}
+    ret = 1024;
+    char* buf = (void*)0x18000000000;
 
     size_t bytes_read = (size_t)ret;
 
-    elf_ehdr_t* ehdr = (elf_ehdr_t*)&buf;
+    elf_ehdr_t* ehdr = (elf_ehdr_t*)buf;
     if (bytes_read < sizeof(elf_ehdr_t)) {
         log_error("ELF file is too small (cannot read the ELF header)");
         ret = -PAL_ERROR_INVAL;

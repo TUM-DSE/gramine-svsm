@@ -10,13 +10,54 @@
 #include "pal.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "pal_monitor_call.h"
 
 int _PalSystemTimeQuery(uint64_t* out_usec) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+   // TODO: Get real time from guest maybe?
+   // For now it is just the clock cycles
+   uint32_t lo, hi;
+   __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+   *out_usec = ((uint64_t)hi << 32 | lo);
+   return 0;
 }
 
 int _PalRandomBitsRead(void* buffer, size_t size) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    uint8_t rnd_num[4];
+    int success = 1;
+    int retry_max = 10;
+    uint8_t* buf = buffer;
+
+    for(size_t i = 0; i < size;){
+        int retry = 0;
+        while (retry < retry_max) {
+            // Gets a 32-bit random number
+            __asm__ volatile (
+                "mov $0, %%ebx\n\t"
+                "rdseed %%eax\n\t"
+                "jc .done\n\t"
+                "mov $1, %%ebx\n\t"
+                ".done:\n\t"
+                : "=a" (rnd_num), "=b" (success));
+            if(success == 0){
+                break;
+            }
+            retry++;
+        }
+        if(success != 0) {
+            // Reached max retries here
+            pal_svsm_fail("This should not happen",0);
+        }
+
+        for(size_t j = 0; j < 4; j++){
+            buf[i] = rnd_num[j];
+            i++;
+            if(i == size)
+                break;
+        }
+
+    }
+
+    return 0;
 }
 
 int _PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr) {

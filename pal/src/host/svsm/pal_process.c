@@ -13,6 +13,7 @@
 #include "pal.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "pal_monitor_call.h"
 
 int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
                       size_t reserved_mem_ranges_len, PAL_HANDLE* out_handle) {
@@ -20,6 +21,7 @@ int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
 }
 
 noreturn void _PalProcessExit(int exitcode) {
+    pal_svsm_exit(-1);
     die_or_inf_loop();
 }
 
