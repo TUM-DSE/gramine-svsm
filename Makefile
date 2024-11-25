@@ -12,3 +12,6 @@ run:
 
 container:
 	docker run --privileged -v ${PWD}:/gramine -w /gramine -it gramine-build-container
+
+build_external:
+	docker run --privileged -v ${PWD}:/gramine -w /gramine -it gramine-build-container make
