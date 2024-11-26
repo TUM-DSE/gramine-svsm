@@ -18,12 +18,13 @@ void extended_monitor_call(struct monitor_call_data* data) {
     // since the Monitor receives the whole
     // VMSA regardless
     __asm__ volatile(
-        "mov %0, %%r8\r\n"
-        "mov %1, %%r9\r\n"
+        "mov %4, %%r8\r\n"
+        "mov %5, %%r9\r\n"
         vc_injection
         : "+a" (data->rax), "+b" (data->rbx),
           "+c" (data->rcx), "+d" (data->rdx)
-        :: "r8", "r9"
+        : "r" (data->r8), "r" (data->r9)
+        : "r8", "r9"
         );
 
 }
@@ -76,6 +77,8 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
     data.rdx = flags;
     data.r8 = fd;
     data.r9 = offset;
+    //__asm__ volatile("mov %0, %%rax; cpuid":: "r"(offset));
+    //__asm__ volatile("mov $69, %rax; cpuid");
 
     extended_monitor_call(&data);
 

@@ -327,7 +327,7 @@ static int verify_dynamic_entries(struct link_map* map) {
     if (needed_offset_found) {
         const char* needed = string_table + needed_offset;
         if (strcmp(needed, g_pal_soname) != 0) {
-            log_error("Unexpected DT_NEEDED (must be name of the PAL library)");
+            log_error("Unexpected DT_NEEDED (must be name of the PAL library) %s != %s",needed, g_pal_soname);
             return -PAL_ERROR_DENIED;
         }
     }
@@ -573,7 +573,7 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
     g_entrypoint_map.l_entry = g_entrypoint_map.l_entry + g_entrypoint_map.l_base_diff;
     g_entrypoint_map.l_ld = (elf_dyn_t*)((elf_addr_t)g_entrypoint_map.l_ld +
                                          g_entrypoint_map.l_base_diff);
-    __asm__ volatile("mov $29999, %rax; cpuid");
+    //__asm__ volatile("mov $29999, %rax; cpuid");
     ret = verify_dynamic_entries(&g_entrypoint_map);
     if (ret < 0)
         goto out;
