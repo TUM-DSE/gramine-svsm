@@ -310,6 +310,9 @@ static int verify_dynamic_entries(struct link_map* map) {
                 log_error("Unsupported relocation type DT_RELR; you may need to rebuild Gramine "
                           "with `-Wl,-z,nopack-relative-relocs` linker option");
                 return -PAL_ERROR_DENIED;
+            case DT_RUNPATH:
+                /* TODO: Check if this can be ignored */
+                break;
             default:
                 log_error("Unrecognized dynamic entry (DT_*) %ld", dynamic_section_entry->d_tag);
                 return -PAL_ERROR_DENIED;
@@ -577,7 +580,7 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
     ret = verify_dynamic_entries(&g_entrypoint_map);
     if (ret < 0)
         goto out;
-    __asm__ volatile("mov $19999, %rax; cpuid");
+    ////__asm__ volatile("mov $19999, %rax; cpuid");
     ret = find_string_and_symbol_tables(g_entrypoint_map.l_map_start, g_entrypoint_map.l_base_diff,
                                         &g_entrypoint_map.string_table,
                                         &g_entrypoint_map.symbol_table,
