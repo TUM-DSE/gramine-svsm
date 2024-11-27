@@ -51,6 +51,12 @@ noreturn void pal_svsm_main(void)
     if(ret < 0)
         pal_svsm_fail("_PalSystemTimeQuery() failed: ", ret);
 
+    ret = setup_pal_binary();
+    if(ret < 0){
+        INIT_FAIL("Pal reallocation failed %d", ret);
+    }
+
+
     call_init_array();//TODO: Call init array here
     //See: call_init_array in Linux version
 
