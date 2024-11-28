@@ -1,5 +1,6 @@
 cflags_libos = [
-    '-fPIC',
+    #'-fPIC',
+    '-static',
     # TODO: check whether all standard functions implemented in Gramine match their APIs and remove
     # this
     '-ffreestanding',
