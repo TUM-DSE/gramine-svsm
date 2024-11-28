@@ -25,7 +25,7 @@ int _PalVirtualMemoryProtect(void* addr, uint64_t size, pal_prot_flags_t prot) {
 }
 
 unsigned long _PalMemoryQuota(void) {
-    return 0;
+    return g_pal_public_state.memory_address_end - g_pal_public_state.memory_address_start;
 }
 
 void pal_read_next_reserved_range(uintptr_t last_range_start, uintptr_t* out_next_range_start,
