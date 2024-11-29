@@ -601,8 +601,8 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
 
         /* zero out uninitialized but allocated part of the loaded segment (note that part of
          * segment allocated via _PalVirtualMemoryAlloc() is already zeroed out) */
-        if (ALLOC_ALIGN_UP(c->data_end) > c->data_end)
-            memset((void*)c->data_end, 0, ALLOC_ALIGN_UP(c->data_end) - c->data_end);
+        //if (ALLOC_ALIGN_UP(c->data_end) > c->data_end)
+        //    memset((void*)c->data_end, 0, ALLOC_ALIGN_UP(c->data_end) - c->data_end);
     }
 
     ret = perform_relocations(&g_entrypoint_map);
