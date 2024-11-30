@@ -8,9 +8,22 @@
 #include "assert.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "spinlock.h"
 
 int _PalEventCreate(PAL_HANDLE* handle_ptr, bool init_signaled, bool auto_clear) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    PAL_HANDLE handle = calloc(1, HANDLE_SIZE(event));
+    if (!handle) {
+        return -PAL_ERROR_NOMEM;
+    }
+
+    init_handle_hdr(handle, PAL_TYPE_EVENT);
+    spinlock_init(&handle->event.lock);
+    handle->event.auto_clear = auto_clear;
+    handle->event.waiters_cnt = 0;
+    __atomic_store_n(&handle->event.signaled, init_signaled ? 1 : 0, __ATOMIC_RELEASE);
+
+    *handle_ptr = handle;
+    return 0;
 }
 
 void _PalEventSet(PAL_HANDLE handle) {

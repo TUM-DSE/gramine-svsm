@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <stdint.h>
+#include "spinlock.h"
 #ifndef IN_PAL
 #error "cannot be included outside PAL"
 #endif
@@ -34,4 +36,10 @@ typedef struct {
      * Note that this is just a hint, not a requirement. You can check the Linux PAL for a sample
      * implementation.
      */
+    struct {
+        spinlock_t lock;
+        uint32_t waiters_cnt;
+        uint32_t signaled;
+        bool auto_clear;
+    } event;
 }* PAL_HANDLE;
