@@ -77,10 +77,18 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
     data.rdx = flags;
     data.r8 = fd;
     data.r9 = offset;
-    //__asm__ volatile("mov %0, %%rax; cpuid":: "r"(offset));
-    //__asm__ volatile("mov $69, %rax; cpuid");
 
     extended_monitor_call(&data);
 
     return (void*)data.rcx;
+}
+
+int pal_svsm_set_tcb(PAL_TCB* tcb) {
+  struct monitor_call_data data;
+  data.rax = 6;
+  data.rbx = (uint64_t)tcb;
+
+  monitor_call(&data);
+
+  return 0;
 }

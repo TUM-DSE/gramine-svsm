@@ -44,7 +44,16 @@ noreturn void pal_svsm_main(void)
 	__UNUSED(environments);
 	__UNUSED(callback);
 
-    call_init_array();
+    /* we don't yet have a TCB in the GS register, but GCC's stack protector will look for a canary
+     * at gs:[0x8] in functions called below, so let's install a dummy TCB with a default canary */
+    PAL_SVSM_TCB dummy_tcb_for_stack_protector = { 0 };
+    dummy_tcb_for_stack_protector.common.self = &dummy_tcb_for_stack_protector.common;
+    ret = pal_svsm_set_tcb(&dummy_tcb_for_stack_protector.common);
+    if (ret < 0) {
+        /* We failed to install a TCB (and haven't applied relocations yet), so no other code will
+         * work anyway */
+        pal_svsm_fail("pal_svsm_set_tcb() failed: ", ret);;
+    }
 
     uint64_t start_time;
     ret = _PalSystemTimeQuery(&start_time);
@@ -57,8 +66,7 @@ noreturn void pal_svsm_main(void)
     }
 
 
-    call_init_array();//TODO: Call init array here
-    //See: call_init_array in Linux version
+    call_init_array();
 
     g_pal_public_state.alloc_align = MONITOR_PAGE_SIZE;
     assert(IS_POWER_OF_2(g_pal_public_state.alloc_align)); //Not required since the page size is fixed
