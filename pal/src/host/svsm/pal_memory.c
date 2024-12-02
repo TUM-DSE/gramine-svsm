@@ -16,12 +16,13 @@ int _PalVirtualMemoryAlloc(void* addr, uint64_t size, pal_prot_flags_t prot) {
 }
 
 int _PalVirtualMemoryFree(void* addr, uint64_t size) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    // TODO
+    return 0;
 }
 
 int _PalVirtualMemoryProtect(void* addr, uint64_t size, pal_prot_flags_t prot) {
+    // TODO
     return 0;
-    return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
 unsigned long _PalMemoryQuota(void) {
