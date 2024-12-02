@@ -11,15 +11,29 @@
 #include "pal_internal.h"
 
 static int pipe_listen(PAL_HANDLE* handle, const char* name, pal_stream_options_t options) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    PAL_HANDLE hdl = calloc(1, HANDLE_SIZE(pipe));
+
+    init_handle_hdr(hdl, PAL_TYPE_PIPESRV);
+
+    *handle = hdl;
+    return 0;
+
+
 }
 
 static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client, pal_stream_options_t options) {
+    return 0;
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
 static int pipe_connect(PAL_HANDLE* handle, const char* name, pal_stream_options_t options) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+
+    PAL_HANDLE hdl = calloc(1, HANDLE_SIZE(pipe));
+
+    init_handle_hdr(hdl, PAL_TYPE_PIPE);
+
+    *handle = hdl;
+    return 0;
 }
 
 static int pipe_open(PAL_HANDLE* handle, const char* type, const char* uri, enum pal_access access,
@@ -50,6 +64,7 @@ static void pipe_destroy(PAL_HANDLE handle) {
 
 /* 'delete' operation of pipe stream. */
 static int pipe_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
+    return 0;
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
