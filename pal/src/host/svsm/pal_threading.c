@@ -33,10 +33,13 @@ int _PalThreadResume(PAL_HANDLE thread_handle) {
 }
 
 int _PalThreadSetCpuAffinity(PAL_HANDLE thread, unsigned long* cpu_mask, size_t cpu_mask_len) {
+    return 0;
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
 int _PalThreadGetCpuAffinity(PAL_HANDLE thread, unsigned long* cpu_mask, size_t cpu_mask_len) {
+    *cpu_mask = 1;
+    return 0;
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
