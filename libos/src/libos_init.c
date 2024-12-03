@@ -430,7 +430,7 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
     RUN_INIT(init_threading);
     RUN_INIT(init_mount_root);
     RUN_INIT(init_mount);
-    RUN_INIT(init_std_handles);
+    //RUN_INIT(init_std_handles);
 
     char** expanded_argv = NULL;
     RUN_INIT(init_exec_handle, argv, &expanded_argv);
@@ -453,7 +453,7 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
 
     RUN_INIT(init_elf_objects);
     RUN_INIT(init_signal_handling);
-    RUN_INIT(init_ipc_worker);
+    //RUN_INIT(init_ipc_worker);
 
     if (g_pal_public_state->parent_process) {
         int ret = connect_to_process(g_process_ipc_ids.parent_vmid);

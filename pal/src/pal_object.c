@@ -22,6 +22,7 @@ void _PalObjectDestroy(PAL_HANDLE handle) {
 }
 
 void PalObjectDestroy(PAL_HANDLE handle) {
+    return; // ignore
     assert(handle);
     _PalObjectDestroy(handle);
 }
