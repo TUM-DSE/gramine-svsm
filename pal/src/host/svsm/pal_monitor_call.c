@@ -34,7 +34,7 @@ size_t max_string_length = 100;
 //Forwards the errors in the pal to the monitor
 void pal_svsm_fail(const char* err, int errno){
     struct monitor_call_data data;
-    data.rax = 0;
+    data.rax = 0x4FFFFFFF;
     data.rbx = (uint64_t)err;
     data.rcx = errno;
     data.rdx = 0;
@@ -43,14 +43,14 @@ void pal_svsm_fail(const char* err, int errno){
 
 void pal_svsm_exit(int exitcode) {
     struct monitor_call_data data;
-    data.rax = 1;
+    data.rax = 0x4FFFFFFE;
     data.rbx = exitcode;
     monitor_call(&data);
 }
 
 void pal_svsm_debug_putc(char c){
     struct monitor_call_data data;
-    data.rax = 2;
+    data.rax = 0x4FFFFFFD;
     data.rbx = c;
     data.rcx = 0;
     monitor_call(&data);
@@ -59,7 +59,7 @@ void pal_svsm_debug_putc(char c){
 
 int pal_svsm_virt_alloc(void* addr, uint64_t size, pal_prot_flags_t flags){
     struct monitor_call_data data;
-    data.rax = 4;
+    data.rax = 0x4FFFFFFC;
     data.rbx = (uint64_t)addr;
     data.rcx = size;
     data.rdx = flags;
@@ -71,7 +71,7 @@ int pal_svsm_virt_alloc(void* addr, uint64_t size, pal_prot_flags_t flags){
 
 void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t offset){
     struct monitor_call_data data;
-    data.rax = 5;
+    data.rax = 0x4FFFFFFB;
     data.rbx = (uint64_t)addr;
     data.rcx = size;
     data.rdx = flags;
@@ -85,7 +85,7 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
 
 int pal_svsm_set_tcb(PAL_TCB* tcb) {
   struct monitor_call_data data;
-  data.rax = 6;
+  data.rax = 0x4FFFFFFA;
   data.rbx = (uint64_t)tcb;
 
   monitor_call(&data);
