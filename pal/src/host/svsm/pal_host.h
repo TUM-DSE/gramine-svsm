@@ -42,4 +42,18 @@ typedef struct {
         uint32_t signaled;
         bool auto_clear;
     } event;
+
+    struct {
+        PAL_IDX fd;
+    } console;
+
 }* PAL_HANDLE;
+
+/* These two flags indicate whether the underlying host fd of `PAL_HANDLE` is readable and/or
+ * writable respectively. If none of these is set, then the handle has no host-level fd. */
+#define PAL_HANDLE_FD_READABLE  1
+#define PAL_HANDLE_FD_WRITABLE  2
+/* Set if an error was seen on this handle. */
+#define PAL_HANDLE_FD_ERROR     4
+/* Set if a hang-up was seen on this handle. */
+#define PAL_HANDLE_FD_HANG_UP   8
