@@ -65,6 +65,16 @@ int _PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr) {
 }
 
 int _PalSegmentBaseSet(enum pal_segment_reg reg, uintptr_t addr) {
+    switch (reg) {
+        case PAL_SEGMENT_FS:
+            wrfsbase((uint64_t)addr);
+            return 0;
+        case PAL_SEGMENT_GS:
+            /* GS is internally used, deny any access to it */
+            return -PAL_ERROR_DENIED;
+        default:
+            return -PAL_ERROR_INVAL;
+    }
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
