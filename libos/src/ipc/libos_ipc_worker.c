@@ -409,6 +409,11 @@ int init_ipc_worker(void) {
 }
 
 void terminate_ipc_worker(void) {
+    if (!g_worker_thread) {
+        log_debug("No IPC worker thread to terminate");
+        return;
+    }
+
     set_pollable_event(&g_worker_thread->pollable_event);
 
     while (__atomic_load_n(&g_clear_on_worker_exit, __ATOMIC_ACQUIRE)) {
