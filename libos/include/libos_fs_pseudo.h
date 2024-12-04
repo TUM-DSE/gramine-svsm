@@ -267,3 +267,4 @@ int sys_print_as_bitmask(char* buf, size_t buf_size, size_t count,
 int init_etcfs(void);
 
 int init_libfs(void);
+int init_pythonfs(void);

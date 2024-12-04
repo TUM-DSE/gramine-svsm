@@ -40,6 +40,7 @@ libos_sources = files(
     'fs/proc/info.c',
     'fs/proc/ipc_thread.c',
     'fs/proc/thread.c',
+    'fs/python/fs.c',
     'fs/shm/fs.c',
     'fs/socket/fs.c',
     'fs/sys/cache_info.c',
