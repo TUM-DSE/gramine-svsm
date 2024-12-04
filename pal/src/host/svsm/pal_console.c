@@ -48,8 +48,16 @@ static int64_t console_read(PAL_HANDLE handle, uint64_t offset, uint64_t size, v
 }
 
 static int64_t console_write(PAL_HANDLE handle, uint64_t offset, uint64_t size, const void* buffer) {
-    log_error("attempting console_write");
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    assert(handle->hdr.type == PAL_TYPE_CONSOLE);
+    if (offset)
+        return -PAL_ERROR_INVAL;
+    if (!(handle->flags & PAL_HANDLE_FD_WRITABLE))
+        return -PAL_ERROR_DENIED;
+
+    // NOTE: we need to set log level to debug to see the output
+    log_debug("[PAL] [Console Output]: %.*s", (int)size, (const char*)buffer);
+    int ret = size; // fixme: assume all bytes are written
+    return ret;
 }
 
 static void console_destroy(PAL_HANDLE handle) {
