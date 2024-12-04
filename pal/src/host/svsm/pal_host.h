@@ -42,4 +42,9 @@ typedef struct {
         uint32_t signaled;
         bool auto_clear;
     } event;
+
+    struct {
+        PAL_IDX fd;
+    } console;
+
 }* PAL_HANDLE;
