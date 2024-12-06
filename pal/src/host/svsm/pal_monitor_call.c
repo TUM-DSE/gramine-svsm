@@ -80,7 +80,10 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
 
     extended_monitor_call(&data);
 
-    return (void*)data.rcx;
+    if (data.rcx == 0)
+        return addr;
+
+    return NULL;
 }
 
 int pal_svsm_set_tcb(PAL_TCB* tcb) {
