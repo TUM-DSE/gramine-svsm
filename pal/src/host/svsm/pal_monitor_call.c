@@ -92,3 +92,15 @@ int pal_svsm_set_tcb(PAL_TCB* tcb) {
 
   return 0;
 }
+
+int pal_svsm_mprotect(void* addr, uint64_t size, pal_prot_flags_t flags){
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFF9;
+    data.rbx = (uint64_t)addr;
+    data.rcx = size;
+    data.rdx = flags;
+
+    monitor_call(&data);
+
+    return data.rcx;
+}
