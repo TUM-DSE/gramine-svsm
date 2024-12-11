@@ -2,27 +2,27 @@
 #include "libos_fs_pseudo.h"
 
 #include "ld.c"
-#include "helloworld.c"
-#include "nop.c"
-#include "nop_static.c"
-#include "cpuid.c"
-#include "cpuid_static.c"
+// #include "helloworld.c"
+// #include "nop.c"
+// #include "nop_static.c"
+// #include "cpuid.c"
+// #include "cpuid_static.c"
 
 #include "libc.c"
 #include "libm.c"
 #include "libz.c"
 #include "libexpat.c"
-#include "libblas.c"
+// #include "libblas.c"
 #include "libgcc_s.c"
-#include "liblapack.c"
-#include "libgfortran.c"
+// #include "liblapack.c"
+// #include "libgfortran.c"
 #include "libffi.c"
 #include "libstdc++.c"
 #include "libcrypt.c"
 #include "libpthread.c"
 #include "libdl.c"
-#include "librt.c"
-#include "libutil.c"
+// #include "librt.c"
+// #include "libutil.c"
 #include "libuuid.c"
 #include "libbz2.c"
 #include "libgdbm.c"
@@ -32,8 +32,11 @@
 #include "liblzma.c"
 #include "libsqlite3.c"
 
-#include "../python/python.c"
-#include "../python/stdlib.c"
+// for igraph benchmarks
+#include "igraph.c"
+#include "libgomp.c"
+#include "liblzma-004595ca.c"
+#include "libxml2.c"
 
 
 #define __DEFINE_LIBOS_FS_PSEUDO_NODE(name, data, size) \
@@ -67,14 +70,13 @@ static int libc(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     return 0;
 }
 
+/*
 __DEFINE_LIBOS_FS_PSEUDO_NODE(helloworld_, helloworld, helloworld_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(nop_, nop, nop_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(nop_static_, nop_static, nop_static_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(cpuid__, cpuid_, cpuid_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(cpuid_static_, cpuid_static, cpuid_static_len)
-
-__DEFINE_LIBOS_FS_PSEUDO_NODE(python_, python, python_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(stdlib_, python311_zip, python311_zip_len)
+*/
 
 static int libm(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
@@ -97,12 +99,14 @@ static int libexpat(struct libos_dentry* dent, char** out_data, size_t* out_size
     return 0;
 }
 
+/*
 static int libblas(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
     *out_data = (char*) libblas_so_3;
     *out_size = libblas_so_3_len;
     return 0;
 }
+*/
 
 static int libgcc_s(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
@@ -111,6 +115,7 @@ static int libgcc_s(struct libos_dentry* dent, char** out_data, size_t* out_size
     return 0;
 }
 
+/*
 static int liblapack(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
     *out_data = (char*) liblapack_so_3;
@@ -124,6 +129,7 @@ static int libgfortran(struct libos_dentry* dent, char** out_data, size_t* out_s
     *out_size = libgfortran_so_5_len;
     return 0;
 }
+*/
 
 static int libffi(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
@@ -160,6 +166,7 @@ static int libdl(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     return 0;
 }
 
+/*
 static int librt(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
     *out_data = (char*) librt_so_1;
@@ -173,6 +180,7 @@ static int libutil(struct libos_dentry* dent, char** out_data, size_t* out_size)
     *out_size = libutil_so_1_len;
     return 0;
 }
+*/
 
 static int libuuid(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
@@ -230,27 +238,25 @@ static int libsqlite3(struct libos_dentry* dent, char** out_data, size_t* out_si
     return 0;
 }
 
+__DEFINE_LIBOS_FS_PSEUDO_NODE(igraph, igraph_so_3, igraph_so_3_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libgomp, libgomp_so_1, libgomp_so_1_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(liblzma_004595ca, liblzma_004595ca_so_5_2_2, liblzma_004595ca_so_5_2_2_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libxml2, libxml2_so_2, libxml2_so_2_len)
+
+
 int init_libfs(void) {
     struct pseudo_node* root = pseudo_add_root_dir("lib");
 
     struct pseudo_node* node = pseudo_add_str(root, "ld-linux-x86-64.so.2", &ld);
     node->str.no_free = true;
 
-    //node = pseudo_add_str(root, "libc.so.6", &libc);
-    //node->str.no_free = true;
-
+    /*
     __ADD_NODE("helloworld", helloworld_, helloworld_len);
     __ADD_NODE("nop", nop_, nop_len);
     __ADD_NODE("nop_static", nop_static_, nop_static_len);
     __ADD_NODE("cpuid_", cpuid__, cpuid_len);
     __ADD_NODE("cpuid_static", cpuid_static_, cpuid_static_len);
-
-    __ADD_NODE("python", python_, python_len);
-    __ADD_NODE("stdlib.zip", stdlib_, python311_zip_len);
-
-    // ld-linux-x86-64.so.2 is the loader for dynamically linked executables
-    //struct pseudo_node* node = pseudo_add_str(root, "ld-linux-x86-64.so.2", &ld);
-    //node->str.no_free = true;
+    */
 
     // libc.so.6 is the C standard library
     node = pseudo_add_str(root, "libc.so.6", &libc);
@@ -268,14 +274,17 @@ int init_libfs(void) {
     node = pseudo_add_str(root, "libexpat.so.1", &libexpat);
     node->str.no_free = true;
 
+    /*
     // libblas.so.3 is needed by numpy?
     node = pseudo_add_str(root, "libblas.so.3", &libblas);
     node->str.no_free = true;
+    */
 
     // libgcc_s.so.1 is needed by numpy?
     node = pseudo_add_str(root, "libgcc_s.so.1", &libgcc_s);
     node->str.no_free = true;
 
+    /*
     // liblapack.so.3 is needed by numpy?
     node = pseudo_add_str(root, "liblapack.so.3", &liblapack);
     node->str.no_free = true;
@@ -283,6 +292,7 @@ int init_libfs(void) {
     // libgfortran.so.5 is needed by numpy?
     node = pseudo_add_str(root, "libgfortran.so.5", &libgfortran);
     node->str.no_free = true;
+    */
 
     // libffi.so.8 is needed by python
     node = pseudo_add_str(root, "libffi.so.8", &libffi);
@@ -304,6 +314,7 @@ int init_libfs(void) {
     node = pseudo_add_str(root, "libdl.so.2", &libdl);
     node->str.no_free = true;
 
+    /*
     // librt.so.1 is needed for python?
     node = pseudo_add_str(root, "librt.so.1", &librt);
     node->str.no_free = true;
@@ -311,6 +322,7 @@ int init_libfs(void) {
     // libutil.so.1 is needed for python?
     node = pseudo_add_str(root, "libutil.so.1", &libutil);
     node->str.no_free = true;
+    */
 
     // libuuid.so.1 is needed for python
     node = pseudo_add_str(root, "libuuid.so.1", &libuuid);
@@ -343,6 +355,11 @@ int init_libfs(void) {
     // libsqlite3.so.0 is needed for python
     node = pseudo_add_str(root, "libsqlite3.so.0", &libsqlite3);
     node->str.no_free = true;
+
+    __ADD_NODE("_igraph.abi3.so", igraph, 0);
+    __ADD_NODE("libgomp-a34b3233.so.1.0.0", libgomp, 0);
+    __ADD_NODE("liblzma-004595ca.so.5.2.2", liblzma_004595ca, 0);
+    __ADD_NODE("libxml2-3998bec4.so.2.9.1", libxml2, 0);
 
     return 0;
 }
