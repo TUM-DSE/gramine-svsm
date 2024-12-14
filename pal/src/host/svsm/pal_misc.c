@@ -61,6 +61,16 @@ int _PalRandomBitsRead(void* buffer, size_t size) {
 }
 
 int _PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr) {
+    switch (reg) {
+        case PAL_SEGMENT_FS:
+            *addr = (uintptr_t)rdfsbase();
+            return 0;
+        case PAL_SEGMENT_GS:
+            /* GS is internally used, deny any access to it */
+            return -PAL_ERROR_DENIED;
+        default:
+            return -PAL_ERROR_INVAL;
+    }
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
