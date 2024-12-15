@@ -4,7 +4,7 @@
 
 #include "python.c"
 #include "stdlib.c"
-#include "dependencies_igraph.c"
+#include "dependencies.c"
 
 static int python_bin(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);

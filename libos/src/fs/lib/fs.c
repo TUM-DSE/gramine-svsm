@@ -32,12 +32,6 @@
 #include "liblzma.c"
 #include "libsqlite3.c"
 
-// for igraph benchmarks
-#include "igraph.c"
-#include "libgomp.c"
-#include "liblzma-004595ca.c"
-#include "libxml2.c"
-
 
 #define __DEFINE_LIBOS_FS_PSEUDO_NODE(name, data, size) \
     static int name(struct libos_dentry* dent, char** out_data, size_t* out_size) { \
@@ -101,10 +95,6 @@ __DEFINE_LIBOS_FS_PSEUDO_NODE(libcrypto, libcrypto_so_3, libcrypto_so_3_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(liblzma, liblzma_so_5, liblzma_so_5_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libsqlite3, libsqlite3_so_0, libsqlite3_so_0_len)
 
-__DEFINE_LIBOS_FS_PSEUDO_NODE(igraph, igraph_so_3, igraph_so_3_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(libgomp, libgomp_so_1, libgomp_so_1_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(liblzma_004595ca, liblzma_004595ca_so_5_2_2, liblzma_004595ca_so_5_2_2_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(libxml2, libxml2_so_2, libxml2_so_2_len)
 
 
 int init_libfs(void) {
@@ -195,11 +185,6 @@ int init_libfs(void) {
 
     // libsqlite3.so.0 is needed for python
     __ADD_NODE("libsqlite3.so.0", libsqlite3, 0);
-
-    __ADD_NODE("_igraph.abi3.so", igraph, 0);
-    __ADD_NODE("libgomp-a34b3233.so.1.0.0", libgomp, 0);
-    __ADD_NODE("liblzma-004595ca.so.5.2.2", liblzma_004595ca, 0);
-    __ADD_NODE("libxml2-3998bec4.so.2.9.1", libxml2, 0);
 
     return 0;
 }
