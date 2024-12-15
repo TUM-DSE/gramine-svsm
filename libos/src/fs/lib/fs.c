@@ -54,12 +54,7 @@
     do {} while (0)
 
 
-static int ld(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) ld_linux_x86_64_so_2;
-    *out_size = ld_linux_x86_64_so_2_len;
-    return 0;
-}
+__DEFINE_LIBOS_FS_PSEUDO_NODE(ld, ld_linux_x86_64_so_2, ld_linux_x86_64_so_2_len)
 
 static int libc(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
@@ -77,166 +72,34 @@ __DEFINE_LIBOS_FS_PSEUDO_NODE(nop_static_, nop_static, nop_static_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(cpuid__, cpuid_, cpuid_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(cpuid_static_, cpuid_static, cpuid_static_len)
 */
-
-static int libm(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libm_so_6;
-    *out_size = libm_so_6_len;
-    return 0;
-}
-
-static int libz(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libz_so_1;
-    *out_size = libz_so_1_len;
-    return 0;
-}
-
-static int libexpat(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libexpat_so_1;
-    *out_size = libexpat_so_1_len;
-    return 0;
-}
-
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libm, libm_so_6, libm_so_6_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libz, libz_so_1, libz_so_1_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libexpat, libexpat_so_1, libexpat_so_1_len)
 /*
-static int libblas(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libblas_so_3;
-    *out_size = libblas_so_3_len;
-    return 0;
-}
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libblas, libblas_so_3, libblas_so_3_len)
 */
-
-static int libgcc_s(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libgcc_s_so_1;
-    *out_size = libgcc_s_so_1_len;
-    return 0;
-}
-
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libgcc_s, libgcc_s_so_1, libgcc_s_so_1_len)
 /*
-static int liblapack(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) liblapack_so_3;
-    *out_size = liblapack_so_3_len;
-    return 0;
-}
-
-static int libgfortran(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libgfortran_so_5;
-    *out_size = libgfortran_so_5_len;
-    return 0;
-}
+__DEFINE_LIBOS_FS_PSEUDO_NODE(liblapack, liblapack_so_3, liblapack_so_3_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libgfortran, libgfortran_so_5, libgfortran_so_5_len)
 */
-
-static int libffi(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libffi_so_8;
-    *out_size = libffi_so_8_len;
-    return 0;
-}
-
-static int libstdcpp(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libstdc___so_6;
-    *out_size = libstdc___so_6_len;
-    return 0;
-}
-
-static int libcrypt(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libcrypt_so_1;
-    *out_size = libcrypt_so_1_len;
-    return 0;
-}
-
-static int libpthread(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libpthread_so_0;
-    *out_size = libpthread_so_0_len;
-    return 0;
-}
-
-static int libdl(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libdl_so_2;
-    *out_size = libdl_so_2_len;
-    return 0;
-}
-
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libffi, libffi_so_8, libffi_so_8_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libstdcpp, libstdc___so_6, libstdc___so_6_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libcrypt, libcrypt_so_1, libcrypt_so_1_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libpthread, libpthread_so_0, libpthread_so_0_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libdl, libdl_so_2, libdl_so_2_len)
 /*
-static int librt(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) librt_so_1;
-    *out_size = librt_so_1_len;
-    return 0;
-}
-
-static int libutil(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libutil_so_1;
-    *out_size = libutil_so_1_len;
-    return 0;
-}
+__DEFINE_LIBOS_FS_PSEUDO_NODE(librt, librt_so_1, librt_so_1_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libutil, libutil_so_1, libutil_so_1_len)
 */
-
-static int libuuid(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libuuid_so_1;
-    *out_size = libuuid_so_1_len;
-    return 0;
-}
-
-static int libbz2(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libbz2_so_1_0;
-    *out_size = libbz2_so_1_0_len;
-    return 0;
-}
-
-static int libgdbm(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libgdbm_so_6;
-    *out_size = libgdbm_so_6_len;
-    return 0;
-}
-
-static int libgdbm_compat(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libgdbm_compat_so_4;
-    *out_size = libgdbm_compat_so_4_len;
-    return 0;
-}
-
-static int libssl(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libssl_so_3;
-    *out_size = libssl_so_3_len;
-    return 0;
-}
-
-static int libcrypto(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libcrypto_so_3;
-    *out_size = libcrypto_so_3_len;
-    return 0;
-}
-
-static int liblzma(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) liblzma_so_5;
-    *out_size = liblzma_so_5_len;
-    return 0;
-}
-
-static int libsqlite3(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-    *out_data = (char*) libsqlite3_so_0;
-    *out_size = libsqlite3_so_0_len;
-    return 0;
-}
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libuuid, libuuid_so_1, libuuid_so_1_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libbz2, libbz2_so_1_0, libbz2_so_1_0_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libgdbm, libgdbm_so_6, libgdbm_so_6_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libgdbm_compat, libgdbm_compat_so_4, libgdbm_compat_so_4_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libssl, libssl_so_3, libssl_so_3_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libcrypto, libcrypto_so_3, libcrypto_so_3_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(liblzma, liblzma_so_5, liblzma_so_5_len)
+__DEFINE_LIBOS_FS_PSEUDO_NODE(libsqlite3, libsqlite3_so_0, libsqlite3_so_0_len)
 
 __DEFINE_LIBOS_FS_PSEUDO_NODE(igraph, igraph_so_3, igraph_so_3_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libgomp, libgomp_so_1, libgomp_so_1_len)
@@ -259,102 +122,79 @@ int init_libfs(void) {
     */
 
     // libc.so.6 is the C standard library
-    node = pseudo_add_str(root, "libc.so.6", &libc);
-    node->str.no_free = true;
+    __ADD_NODE("libc.so.6", libc, 0);
 
     // libm.so.6 is needed for python
-    node = pseudo_add_str(root, "libm.so.6", &libm);
-    node->str.no_free = true;
+    __ADD_NODE("libm.so.6", libm, 0);
 
     // libz.so.1 is needed for python
-    node = pseudo_add_str(root, "libz.so.1", &libz);
-    node->str.no_free = true;
+    __ADD_NODE("libz.so.1", libz, 0);
 
     // libexpat.so.1 is needed for python
-    node = pseudo_add_str(root, "libexpat.so.1", &libexpat);
-    node->str.no_free = true;
+    __ADD_NODE("libexpat.so.1", libexpat, 0);
 
     /*
     // libblas.so.3 is needed by numpy?
-    node = pseudo_add_str(root, "libblas.so.3", &libblas);
-    node->str.no_free = true;
+    __ADD_NODE("libblas.so.3", libblas, 0);
     */
 
     // libgcc_s.so.1 is needed by numpy?
-    node = pseudo_add_str(root, "libgcc_s.so.1", &libgcc_s);
-    node->str.no_free = true;
+    __ADD_NODE("libgcc_s.so.1", libgcc_s, 0);
 
     /*
     // liblapack.so.3 is needed by numpy?
-    node = pseudo_add_str(root, "liblapack.so.3", &liblapack);
-    node->str.no_free = true;
+    __ADD_NODE("liblapack.so.3", liblapack, 0);
 
     // libgfortran.so.5 is needed by numpy?
-    node = pseudo_add_str(root, "libgfortran.so.5", &libgfortran);
-    node->str.no_free = true;
+    __ADD_NODE("libgfortran.so.5", libgfortran, 0);
     */
 
     // libffi.so.8 is needed by python
-    node = pseudo_add_str(root, "libffi.so.8", &libffi);
-    node->str.no_free = true;
+    __ADD_NODE("libffi.so.8", libffi, 0);
 
     // libstdc++.so.6 is needed by scipy?
-    node = pseudo_add_str(root, "libstdc++.so.6", &libstdcpp);
-    node->str.no_free = true;
+    __ADD_NODE("libstdc++.so.6", libstdcpp, 0);
 
     // libcrypt.so.1 is needed for python?
-    node = pseudo_add_str(root, "libcrypt.so.1", &libcrypt);
-    node->str.no_free = true;
+    __ADD_NODE("libcrypt.so.1", libcrypt, 0);
 
     // libpthread.so.0 is needed for python?
-    node = pseudo_add_str(root, "libpthread.so.0", &libpthread);
-    node->str.no_free = true;
+    __ADD_NODE("libpthread.so.0", libpthread, 0);
 
     // libdl.so.2 is needed for python?
-    node = pseudo_add_str(root, "libdl.so.2", &libdl);
-    node->str.no_free = true;
+    __ADD_NODE("libdl.so.2", libdl, 0);
 
     /*
     // librt.so.1 is needed for python?
-    node = pseudo_add_str(root, "librt.so.1", &librt);
-    node->str.no_free = true;
+    __ADD_NODE("librt.so.1", librt, 0);
 
     // libutil.so.1 is needed for python?
-    node = pseudo_add_str(root, "libutil.so.1", &libutil);
-    node->str.no_free = true;
+    __ADD_NODE("libutil.so.1", libutil, 0);
     */
 
     // libuuid.so.1 is needed for python
-    node = pseudo_add_str(root, "libuuid.so.1", &libuuid);
-    node->str.no_free = true;
+    __ADD_NODE("libuuid.so.1", libuuid, 0);
 
     // libbz2.so.1.0 is needed for python
-    node = pseudo_add_str(root, "libbz2.so.1.0", &libbz2);
-    node->str.no_free = true;
+    __ADD_NODE("libbz2.so.1.0", libbz2, 0);
 
     // libgdbm.so.6 is needed for python
-    node = pseudo_add_str(root, "libgdbm.so.6", &libgdbm);
-    node->str.no_free = true;
+    __ADD_NODE("libgdbm.so.6", libgdbm, 0);
 
     // libgdbm_compat.so.4 is needed for python
-    node = pseudo_add_str(root, "libgdbm_compat.so.4", &libgdbm_compat);
-    node->str.no_free = true;
+    __ADD_NODE("libgdbm_compat.so.4", libgdbm_compat, 0);
 
     // libssl.so.3 is needed for python
-    node = pseudo_add_str(root, "libssl.so.3", &libssl);
-    node->str.no_free = true;
+    __ADD_NODE("libssl.so.3", libssl, 0);
 
     // libcrypto.so.3 is needed for python
-    node = pseudo_add_str(root, "libcrypto.so.3", &libcrypto);
-    node->str.no_free = true;
+    __ADD_NODE("libcrypto.so.3", libcrypto, 0);
 
     // liblzma.so.5 is needed for python
-    node = pseudo_add_str(root, "liblzma.so.5", &liblzma);
-    node->str.no_free = true;
+    __ADD_NODE("liblzma.so.5", liblzma, 0);
 
     // libsqlite3.so.0 is needed for python
-    node = pseudo_add_str(root, "libsqlite3.so.0", &libsqlite3);
-    node->str.no_free = true;
+    __ADD_NODE("libsqlite3.so.0", libsqlite3, 0);
 
     __ADD_NODE("_igraph.abi3.so", igraph, 0);
     __ADD_NODE("libgomp-a34b3233.so.1.0.0", libgomp, 0);
