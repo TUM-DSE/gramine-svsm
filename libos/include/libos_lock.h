@@ -14,9 +14,7 @@
 #include "pal.h"
 
 static inline bool lock_created(struct libos_lock* l) {
-    (void)l;
-    return true;
-    //return l->lock != NULL;
+    return l->lock != NULL;
 }
 
 static inline void clear_lock(struct libos_lock* l) {
@@ -35,18 +33,18 @@ static inline void destroy_lock(struct libos_lock* l) {
 }
 
 static inline void lock(struct libos_lock* l) {
-    //assert(l->lock);
-    //while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
+    assert(l->lock);
+
+    while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
         /* nop */;
 
     l->owner = get_cur_tid();
 }
 
 static inline void unlock(struct libos_lock* l) {
-    (void)l;
-    //assert(l->lock);
-    //l->owner = 0;
-    //PalEventSet(l->lock);
+    assert(l->lock);
+    l->owner = 0;
+    PalEventSet(l->lock);
 }
 
 #ifdef DEBUG
