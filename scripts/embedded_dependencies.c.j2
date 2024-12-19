@@ -1,0 +1,27 @@
+#include "libos_fs_pseudo.h"
+
+void init_dependencies(struct pseudo_node* root);
+
+{% for file in files %}
+const unsigned char {{ file.var_name }}[] = { {{ file.byte_array }} };
+const unsigned int {{ file.var_name }}_len = {{ file.length }};
+
+static int {{ file.writer_name }}(struct libos_dentry* dent, char** out_data, size_t* out_size) {
+    __UNUSED(dent);
+    *out_data = (char*) {{ file.var_name }};
+    *out_size = {{ file.var_name }}_len;
+    return 0;
+}
+{% endfor %}
+
+void init_dependencies(struct pseudo_node* root) {
+    struct pseudo_node* node;
+
+    {% for dir in dirs -%}
+    struct pseudo_node* {{ dir.node_name }} = pseudo_add_dir({{ dir.parent_node }}, "{{ dir.name }}");
+    {% endfor %}
+    {% for file in files %}
+    node = pseudo_add_str({{ file.parent_node }}, "{{ file.name }}", &{{ file.writer_name }});
+    node->str.no_free = true;
+    {% endfor %}
+}

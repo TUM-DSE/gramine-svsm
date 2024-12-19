@@ -1,0 +1,1 @@
+python3 scripts/dependencies_zip_generator.py deps/210.thumbnailer_code/site-packages/ "libos/src/fs/python/dependencies_thumbnailer.c"

@@ -4,7 +4,12 @@
 
 #include "python.c"
 #include "stdlib.c"
-#include "dependencies.c"
+
+// #include "dependencies_dynamic-html.c"
+#include "dependencies_thumbnailer.c"
+// #include "dependencies_image-recognition.c"
+// #include "dependencies_igraph.c"
+// #include "dependencies_dna-visualisation.c"
 
 static int python_bin(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
@@ -24,16 +29,6 @@ static int stdlib(struct libos_dentry* dent, char** out_data, size_t* out_size) 
     return 0;
 }
 
-static int dependencies(struct libos_dentry* dent, char** out_data, size_t* out_size) {
-    __UNUSED(dent);
-
-    *out_data = (char*) dependencies_zip;
-    *out_size = dependencies_zip_len;
-
-    return 0;
-}
-
-
 
 int init_pythonfs(void) {
     struct pseudo_node* root = pseudo_add_root_dir("python");
@@ -45,8 +40,7 @@ int init_pythonfs(void) {
     node = pseudo_add_str(root, "stdlib.zip", &stdlib);
     node->str.no_free = true;
 
-    node = pseudo_add_str(root, "dependencies.zip", &dependencies);
-    node->str.no_free = true;
+    init_dependencies(pseudo_add_dir(root, "dependencies"));
 
     return 0;
 }
