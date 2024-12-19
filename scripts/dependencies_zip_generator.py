@@ -41,6 +41,8 @@ def generate_embedded_files_with_templates(folder_path, output_c_file):
     with open(output_c_file, "w") as output_file:
         output_file.write(template.render(files=files, dirs=dirs))
 
+    print(f"Total: {len(dirs) + len(files)}")
+
 if __name__ == "__main__":
     folder_path = sys.argv[1]
     output_c_file = sys.argv[2]
