@@ -266,4 +266,4 @@ int sys_print_as_bitmask(char* buf, size_t buf_size, size_t count,
 /* etcfs */
 int init_etcfs(void);
 
-int init_libfs(void);
+#include "libos_fs_pseudo_static.h"
