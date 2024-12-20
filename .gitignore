@@ -49,3 +49,6 @@ TAGS
 cscope.*
 ncscope.*
 *cscope*
+
+#static files
+libos/src/fs/static/*
