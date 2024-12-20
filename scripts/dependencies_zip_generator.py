@@ -12,15 +12,15 @@ def generate_embedded_files_with_templates(folder_path, output_c_file):
         subdirs[:] = [d for d in subdirs if os.listdir(os.path.join(root, d))]
 
         rel_root = os.path.relpath(root, folder_path)
-        parent_node = root_node if rel_root == "." else "_".join(rel_root.split(os.sep)).replace(".", "_").replace("-", "_")
+        parent_node = root_node if rel_root == "." else "__".join(rel_root.split(os.sep)).replace(".", "_").replace("-", "_").replace("+", "__")
 
         for subdir in subdirs:
-            dir_node_name = "_".join(os.path.relpath(os.path.join(root, subdir), folder_path).split(os.sep)).replace(".", "_").replace("-", "_")
+            dir_node_name = "__".join(os.path.relpath(os.path.join(root, subdir), folder_path).split(os.sep)).replace(".", "_").replace("-", "_").replace("+", "_")
             dirs.append({"node_name": dir_node_name, "parent_node": parent_node, "name": subdir})
 
         for filename in filenames:
             file_path = os.path.join(root, filename)
-            var_name = "_".join(os.path.relpath(file_path, folder_path).split(os.sep)).replace(".", "_").replace("-", "_")
+            var_name = "__".join(os.path.relpath(file_path, folder_path).split(os.sep)).replace(".", "_").replace("-", "_").replace("+", "__")
             writer_name = f"{var_name}_writer"
 
             with open(file_path, "rb") as f:
