@@ -107,3 +107,13 @@ int pal_svsm_mprotect(void* addr, uint64_t size, pal_prot_flags_t flags){
 
     return data.rcx;
 }
+
+int pal_svsm_guest_request(pal_svsm_guest_request_type_t type, void *arg, size_t size) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFF7;
+    data.rbx = (int)type;
+    data.rcx = (uint64_t)arg;
+    data.rdx = size;
+    monitor_call(&data);
+    return data.rcx;
+}

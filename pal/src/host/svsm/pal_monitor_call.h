@@ -2,6 +2,7 @@
 #define PAL_MONITOR_CALL_H_
 #include <stdint.h>
 #include "pal.h"
+
 struct monitor_call_data {
     uint64_t rax;
     uint64_t rbx;
@@ -22,5 +23,20 @@ int pal_svsm_mprotect(void* addr, uint64_t size, pal_prot_flags_t prot);
 void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t offset);
 int pal_svsm_set_tcb(PAL_TCB* tcb);
 
+typedef enum {
+    PAL_SVSM_GUEST_REQUEST_FILEATTR=0,
+} pal_svsm_guest_request_type_t;
+
+struct pal_svsm_guest_request_arg {
+    union {
+        struct {
+            char path[256];
+            uint64_t size;
+            uint32_t mode;
+        } fileattr;
+    };
+};
+
+int pal_svsm_guest_request(pal_svsm_guest_request_type_t type, void *arg, size_t size);
 
 #endif // PAL_MONITOR_CALL_H_
