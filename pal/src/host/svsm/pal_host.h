@@ -36,16 +36,24 @@ typedef struct {
      * Note that this is just a hint, not a requirement. You can check the Linux PAL for a sample
      * implementation.
      */
-    struct {
-        spinlock_t lock;
-        uint32_t waiters_cnt;
-        uint32_t signaled;
-        bool auto_clear;
-    } event;
+    union {
+        struct {
+            spinlock_t lock;
+            uint32_t waiters_cnt;
+            uint32_t signaled;
+            bool auto_clear;
+        } event;
 
-    struct {
-        PAL_IDX fd;
-    } console;
+        struct {
+            PAL_IDX fd;
+        } console;
+
+        struct {
+            PAL_IDX fd;
+            char* realpath;
+            bool seekable; /* regular files are seekable, FIFO pipes are not */
+        } file;
+    };
 
 }* PAL_HANDLE;
 

@@ -10,8 +10,13 @@
 #include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
+#include "pal_rtld.h"
+#include "toml.h"
+#include "toml_utils.h"
 
 #include <string.h>
+
+#define LIBOS_FD ((PAL_IDX)-2)
 
 static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum pal_access access,
                      pal_share_flags_t share, enum pal_create_mode create,
@@ -19,24 +24,81 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
     log_debug("[PAL] file_open: type=%s, uri=%s, access=%d, share=%d, create=%d, options=%d\n", type,
               uri, access, share, create, options);
 
-    // TODO: Initilize the handle with required information
+    if (access != PAL_ACCESS_RDONLY) {
+        log_error("[PAL] file_open: access=%d is not supported\n", access);
+        return -PAL_ERROR_NOTIMPLEMENTED;
+    }
+    if (create) {
+        log_error("[PAL] file_open: create=%d is not supported\n", create);
+        return -PAL_ERROR_NOTIMPLEMENTED;
+    }
+
+    if (strcmp(type, URI_TYPE_FILE))
+        return -PAL_ERROR_INVAL;
+
     PAL_HANDLE hdl = calloc(1, HANDLE_SIZE(file));
     init_handle_hdr(hdl, PAL_TYPE_FILE);
+
+    // Check if the requested file is the entrypoint of the loader
+    toml_table_t* manifest_loader = toml_table_in(g_pal_public_state.manifest_root, "loader");
+    assert(manifest_loader);
+    char* entrypoint_name = NULL;
+    int ret = toml_string_in(manifest_loader, "entrypoint", &entrypoint_name);
+    assert(ret == 0);
+    if (strstartswith(entrypoint_name, URI_PREFIX_FILE)){
+        entrypoint_name += URI_PREFIX_FILE_LEN;
+    }
+    log_debug("[PAL] file_open: entrypoint_name=%s\n", entrypoint_name);
+    if(!strcmp(uri, entrypoint_name)) {
+        log_debug("[PAL] open etnrypoint of the loader\n");
+        // XXX: pal/src/pal_rtld.c:load_entrypoint() open the libos file to
+        // read. The file is already loaded into the pre-defined address at
+        // the boot time, so we return a handle with a special fd
+        hdl->file.fd = LIBOS_FD;
+        hdl->flags |= PAL_HANDLE_FD_READABLE;
+        *handle = hdl;
+        return 0;
+    }
+
+    struct pal_svsm_guest_request_arg arg = {};
+
+    unsigned len = strlen(uri);
+    if (len >= sizeof(arg.open.path))
+        return -PAL_ERROR_INVAL;
+    memcpy(arg.open.path, uri, len + 1);
+    log_debug("[PAL] file_open: path=%s\n", arg.fileattr.path);
+
+    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_OPEN, (void *)&arg.open, sizeof(arg.open));
+
+    if (arg.open.fd == (PAL_IDX)-1) {
+        log_error("[PAL] file_open: failed to open file\n");
+        return -PAL_ERROR_INVAL;
+    }
+
+    hdl->file.fd = arg.open.fd;
+    hdl->file.seekable = 1; // XXX: for now only consider regular file
+    hdl->file.realpath = strdup(uri);
+    hdl->flags |= PAL_HANDLE_FD_READABLE;
     *handle = hdl;
 
+    log_debug("[PAL] file_open: fd=%d, seekable=%d, realpath=%s\n", hdl->file.fd, hdl->file.seekable,
+              hdl->file.realpath);
+
     return 0;
-    //return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
 static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buffer) {
-    // TODO: Use handle to identify file, currently only the LibOS is loaded
-    static uint8_t* libos_start = (void*)0x18000000000;
-    uint8_t* buf = buffer;
-    for(int i = 0; i < 0; i++){
-        buf[i] = libos_start[offset+i];
+    log_debug("[PAL] file_read: offset=%lu, count=%lu\n", offset, count);
+    if (handle->file.fd == LIBOS_FD) {
+        // XXX: libos file
+        static uint8_t* libos_start = (void*)0x18000000000;
+        uint8_t* buf = buffer;
+        for(int i = 0; i < 0; i++){
+            buf[i] = libos_start[offset+i];
+        }
+        return count;
     }
-    return count;
-    //return -PAL_ERROR_NOTIMPLEMENTED;
+    return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
 static int64_t file_write(PAL_HANDLE handle, uint64_t offset, uint64_t count, const void* buffer) {
