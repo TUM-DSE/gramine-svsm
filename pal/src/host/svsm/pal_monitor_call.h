@@ -26,6 +26,7 @@ int pal_svsm_set_tcb(PAL_TCB* tcb);
 typedef enum {
     PAL_SVSM_GUEST_REQUEST_FILEATTR=0,
     PAL_SVSM_GUEST_REQUEST_OPEN,
+    PAL_SVSM_GUEST_REQUEST_READ,
 } pal_svsm_guest_request_type_t;
 
 struct pal_svsm_guest_request_arg {
@@ -39,6 +40,12 @@ struct pal_svsm_guest_request_arg {
             char path[256];
             uint32_t fd;
         } open;
+        struct {
+            char buf[1024];
+            uint64_t count;
+            uint64_t offset;
+            uint32_t fd;
+        } read;
     };
 };
 

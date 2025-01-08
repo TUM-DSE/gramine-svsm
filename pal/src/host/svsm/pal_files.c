@@ -16,7 +16,8 @@
 
 #include <string.h>
 
-#define LIBOS_FD ((PAL_IDX)-2)
+#define FD_ERROR ((PAL_IDX)-1)
+#define FD_LIBOS ((PAL_IDX)-2)
 
 static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum pal_access access,
                      pal_share_flags_t share, enum pal_create_mode create,
@@ -54,7 +55,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
         // XXX: pal/src/pal_rtld.c:load_entrypoint() open the libos file to
         // read. The file is already loaded into the pre-defined address at
         // the boot time, so we return a handle with a special fd
-        hdl->file.fd = LIBOS_FD;
+        hdl->file.fd = FD_LIBOS;
         hdl->flags |= PAL_HANDLE_FD_READABLE;
         *handle = hdl;
         return 0;
@@ -70,7 +71,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
 
     pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_OPEN, (void *)&arg.open, sizeof(arg.open));
 
-    if (arg.open.fd == (PAL_IDX)-1) {
+    if (arg.open.fd == FD_ERROR) {
         log_error("[PAL] file_open: failed to open file\n");
         return -PAL_ERROR_INVAL;
     }
@@ -89,7 +90,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
 
 static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buffer) {
     log_debug("[PAL] file_read: offset=%lu, count=%lu\n", offset, count);
-    if (handle->file.fd == LIBOS_FD) {
+    if (handle->file.fd == FD_LIBOS) {
         // XXX: libos file
         static uint8_t* libos_start = (void*)0x18000000000;
         uint8_t* buf = buffer;
@@ -98,7 +99,27 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
         }
         return count;
     }
-    return -PAL_ERROR_NOTIMPLEMENTED;
+
+    struct pal_svsm_guest_request_arg arg = {};
+    arg.read.fd = handle->file.fd;
+    arg.read.offset = offset;
+    arg.read.count = count;
+
+    // FIXME: currently we use arg.read.buf as a read buffer but this is small
+    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+
+    if (arg.read.count == 0) {
+        log_error("[PAL] file_read: failed to read file\n");
+        return -PAL_ERROR_INVAL;
+    }
+
+    assert(arg.read.count <= count);
+
+    memcpy(buffer, arg.read.buf, arg.read.count);
+
+    log_debug("[PAL] file_read: read %lu bytes\n", arg.read.count);
+
+    return arg.read.count;
 }
 
 static int64_t file_write(PAL_HANDLE handle, uint64_t offset, uint64_t count, const void* buffer) {
