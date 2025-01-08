@@ -75,7 +75,7 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
     data.rbx = (uint64_t)addr;
     data.rcx = size;
     data.rdx = flags;
-    data.r8 = fd;
+    data.r8 = (uint64_t)(int64_t)fd;
     data.r9 = offset;
 
     extended_monitor_call(&data);

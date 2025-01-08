@@ -118,6 +118,13 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
     memcpy(buffer, arg.read.buf, arg.read.count);
 
     log_debug("[PAL] file_read: read %lu bytes\n", arg.read.count);
+#if 0
+    int i = 0;
+    for (i = 0; i < 64; i++) {
+        log_debug("%02x ", ((char*)arg.read.buf)[i]);
+    }
+    log_debug("\n");
+#endif
 
     return arg.read.count;
 }
@@ -137,13 +144,13 @@ static int file_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
 static int file_map(PAL_HANDLE handle, void* addr, pal_prot_flags_t prot, uint64_t offset,
                     uint64_t size) {
 
-    // TODO: Use handle to identify file
+    log_debug("[PAL] file_map: fd=%d, addr=%p, prot=%d, offset=%lu, size=%lu\n", handle->file.fd, addr, prot, offset, size);
 
-    void* ret = pal_svsm_mmap(addr, size, prot, prot, 0, offset);
+    void* ret = pal_svsm_mmap(addr, size, prot, prot, handle->file.fd, offset);
     if(!ret)
         return -1;
-    return 0;
 
+    return 0;
 }
 
 static int file_setlength(PAL_HANDLE handle, uint64_t length) {
