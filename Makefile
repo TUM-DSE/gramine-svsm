@@ -2,8 +2,10 @@
 .PHONY: build run
 .DEFAULT_GOAL: build
 
+BUILD_MODE?=debug
+
 build:
-	./build.sh
+	MODE=${BUILD_MODE} ./build.sh
 	ninja -C build/
 	ninja -C build/ install
 
@@ -14,4 +16,4 @@ container:
 	docker run --privileged -v ${PWD}:/gramine -w /gramine -it gramine-build-container
 
 build_external:
-	docker run --privileged -v ${PWD}:/gramine -w /gramine -it gramine-build-container make
+	docker run --privileged -v ${PWD}:/gramine -w /gramine -it gramine-build-container make "BUILD_MODE=${BUILD_MODE}"

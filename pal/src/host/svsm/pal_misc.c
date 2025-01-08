@@ -34,9 +34,9 @@ int _PalRandomBitsRead(void* buffer, size_t size) {
             __asm__ volatile (
                 "mov $0, %%ebx\n\t"
                 "rdseed %%eax\n\t"
-                "jc .done\n\t"
+                "jc 1f\n\t"
                 "mov $1, %%ebx\n\t"
-                ".done:\n\t"
+                "1:\n\t"
                 : "=a" (rnd_num), "=b" (success));
             if(success == 0){
                 break;
