@@ -134,7 +134,13 @@ static int64_t file_write(PAL_HANDLE handle, uint64_t offset, uint64_t count, co
 }
 
 static void file_destroy(PAL_HANDLE handle) {
-    /* noop */
+    assert(handle);
+    assert(handle->hdr.type == PAL_TYPE_FILE);
+
+    // TODO: close fd on the host side
+
+    free(handle->file.realpath);
+    free(handle);
 }
 
 static int file_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
@@ -225,8 +231,16 @@ static int64_t dir_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void
 }
 
 static void dir_destroy(PAL_HANDLE handle) {
+    assert(handle);
+    assert(handle->hdr.type == PAL_TYPE_DIR);
+
     log_debug("[PAL] dir_destroy: handle=%p\n", handle);
-    /* noop */
+
+    // TODO: close fd on the host side
+
+    free(handle->dir.buf);
+    free(handle->dir.realpath);
+    free(handle);
 }
 
 static int dir_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
