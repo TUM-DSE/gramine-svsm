@@ -177,6 +177,10 @@ static int file_attrquery(const char* type, const char* uri, PAL_STREAM_ATTR* at
 
     pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_FILEATTR, (void *)&arg.fileattr, sizeof(arg.fileattr));
 
+    if (arg.fileattr.ret != 0) {
+        return -PAL_ERROR_INVAL;
+    }
+
     attr->nonblocking = false;
     attr->share_flags = arg.fileattr.mode & PAL_SHARE_MASK;
 #define S_IFREG 0100000

@@ -35,6 +35,7 @@ struct pal_svsm_guest_request_arg {
             char path[256];
             uint64_t size;
             uint32_t mode;
+            int32_t ret;
         } fileattr;
         struct {
             char path[256];
