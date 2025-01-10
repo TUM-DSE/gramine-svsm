@@ -53,6 +53,13 @@ typedef struct {
             char* realpath;
             bool seekable; /* regular files are seekable, FIFO pipes are not */
         } file;
+
+        struct {
+            PAL_IDX fd;
+            char* realpath;
+            char* buf;
+            bool endofstream;
+        } dir;
     };
 
 }* PAL_HANDLE;
