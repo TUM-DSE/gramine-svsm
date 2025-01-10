@@ -94,7 +94,7 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
         // XXX: libos file
         static uint8_t* libos_start = (void*)0x18000000000;
         uint8_t* buf = buffer;
-        for(int i = 0; i < 0; i++){
+        for(unsigned long i = 0; i < count; i++){
             buf[i] = libos_start[offset+i];
         }
         return count;
