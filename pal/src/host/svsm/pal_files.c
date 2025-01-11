@@ -11,6 +11,8 @@
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
 #include "pal_rtld.h"
+#include "pal_tf.h"
+#include "list.h"
 #include "toml.h"
 #include "toml_utils.h"
 
@@ -81,16 +83,75 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
     hdl->file.seekable = 1; // XXX: for now only consider regular file
     hdl->file.realpath = strdup(uri);
     hdl->flags |= PAL_HANDLE_FD_READABLE;
-    *handle = hdl;
+
+    // Check if the file is allowed or trusted
+    struct trusted_file* tf = NULL;
+
+    if (!(options & PAL_OPTION_PASSTHROUGH)) {
+        tf = get_trusted_or_allowed_file(hdl->file.realpath);
+        if (!tf) {
+            if (get_file_check_policy() != FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG) {
+                log_warning("Disallowing access to file '%s'; file is not trusted or allowed.",
+                            hdl->file.realpath);
+                ret = -PAL_ERROR_DENIED;
+                goto out;
+            }
+            log_warning("Allowing access to unknown file '%s' due to file_check_policy settings.",
+                        hdl->file.realpath);
+        }
+    }
+
+    if (tf && !tf->allowed && ((access == PAL_ACCESS_RDWR)
+                || (access == PAL_ACCESS_WRONLY))) {
+        log_error("Disallowing create/write/append to a trusted file '%s'", hdl->file.realpath);
+        ret = -PAL_ERROR_DENIED;
+        goto out;
+    }
+
+    if (tf) {
+        /* now we can learn the size of the trusted file */
+        struct pal_svsm_guest_request_arg arg = {};
+
+        unsigned len = strlen(uri);
+        if (len >= sizeof(arg.fileattr.path)) {
+            ret = -PAL_ERROR_INVAL;
+            goto out;
+        }
+        memcpy(arg.fileattr.path, uri, len + 1);
+
+        pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_FILEATTR, (void *)&arg.fileattr, sizeof(arg.fileattr));
+
+        if (arg.fileattr.ret < 0) {
+            ret = -PAL_ERROR_INVAL;
+            goto out;
+        }
+        tf->size = arg.fileattr.size;
+
+        void* chunk_hashes = NULL;
+        ret = load_trusted_or_allowed_file(tf, hdl, /*create=*/ 0, &chunk_hashes);
+        if (ret < 0)
+            goto out;
+
+        hdl->file.chunk_hashes = chunk_hashes;
+        hdl->file.size = tf->size;
+    }
 
     log_debug("[PAL] file_open: fd=%d, seekable=%d, realpath=%s\n", hdl->file.fd, hdl->file.seekable,
               hdl->file.realpath);
 
-    return 0;
+    *handle = hdl;
+    ret = 0;
+out:
+    if (ret < 0) {
+        free(hdl->file.realpath);
+        free(hdl);
+    }
+    return ret;
 }
 
 static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buffer) {
     log_debug("[PAL] file_read: offset=%lu, count=%lu\n", offset, count);
+
     if (handle->file.fd == FD_LIBOS) {
         // XXX: libos file
         static uint8_t* libos_start = (void*)0x18000000000;
@@ -101,33 +162,43 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
         return count;
     }
 
-    struct pal_svsm_guest_request_arg arg = {};
-    arg.read.fd = handle->file.fd;
-    arg.read.offset = offset;
-    arg.read.count = count;
+    if (!handle->file.chunk_hashes) {
+        // Allowed or passthrough file
 
-    // FIXME: currently we use arg.read.buf as a read buffer but this is small
-    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+        struct pal_svsm_guest_request_arg arg = {};
+        arg.read.fd = handle->file.fd;
+        arg.read.offset = offset;
+        arg.read.count = count;
 
-    if (arg.read.count == 0) {
-        log_error("[PAL] file_read: failed to read file\n");
-        return -PAL_ERROR_INVAL;
+        // TODO: use more bigger buffer to read
+        pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+
+        if (arg.read.count == 0) {
+            log_error("[PAL] file_read: failed to read file\n");
+            return -PAL_ERROR_INVAL;
+        }
+
+        assert(arg.read.count <= count);
+        memcpy(buffer, arg.read.buf, arg.read.count);
+
+        return arg.read.count;
     }
 
-    assert(arg.read.count <= count);
+    // Trusted file
+    uint64_t file_size = handle->file.size;
+    if (offset >= file_size)
+        return 0;
 
-    memcpy(buffer, arg.read.buf, arg.read.count);
+    int64_t end = MIN(offset + count, file_size);
+    int64_t aligned_offset = ALIGN_DOWN(offset, TRUSTED_CHUNK_SIZE);
+    int64_t aligned_end    = ALIGN_UP(end, TRUSTED_CHUNK_SIZE);
 
-    log_debug("[PAL] file_read: read %lu bytes\n", arg.read.count);
-#if 0
-    int i = 0;
-    for (i = 0; i < 64; i++) {
-        log_debug("%02x ", ((char*)arg.read.buf)[i]);
-    }
-    log_debug("\n");
-#endif
+    int ret = copy_and_verify_trusted_file(handle, buffer, aligned_offset, aligned_end, offset, end,
+                                       handle->file.chunk_hashes, file_size);
+    if (ret < 0)
+        return ret;
 
-    return arg.read.count;
+    return end - offset;
 }
 
 static int64_t file_write(PAL_HANDLE handle, uint64_t offset, uint64_t count, const void* buffer) {

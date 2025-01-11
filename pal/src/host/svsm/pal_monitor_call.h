@@ -49,7 +49,9 @@ struct pal_svsm_guest_request_arg {
             uint32_t fd;
         } read;
     };
-};
+} __attribute__((aligned(2048))); // align so that the struct is not split between pages
+                                  // (this is to simplify page table handling
+                                  // in the monitor)
 
 int pal_svsm_guest_request(pal_svsm_guest_request_type_t type, void *arg, size_t size);
 
