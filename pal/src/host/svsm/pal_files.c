@@ -94,7 +94,7 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
         // XXX: libos file
         static uint8_t* libos_start = (void*)0x18000000000;
         uint8_t* buf = buffer;
-        for(int i = 0; i < 0; i++){
+        for(unsigned long i = 0; i < count; i++){
             buf[i] = libos_start[offset+i];
         }
         return count;
@@ -134,7 +134,13 @@ static int64_t file_write(PAL_HANDLE handle, uint64_t offset, uint64_t count, co
 }
 
 static void file_destroy(PAL_HANDLE handle) {
-    /* noop */
+    assert(handle);
+    assert(handle->hdr.type == PAL_TYPE_FILE);
+
+    // TODO: close fd on the host side
+
+    free(handle->file.realpath);
+    free(handle);
 }
 
 static int file_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
@@ -177,6 +183,10 @@ static int file_attrquery(const char* type, const char* uri, PAL_STREAM_ATTR* at
 
     pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_FILEATTR, (void *)&arg.fileattr, sizeof(arg.fileattr));
 
+    if (arg.fileattr.ret != 0) {
+        return -PAL_ERROR_INVAL;
+    }
+
     attr->nonblocking = false;
     attr->share_flags = arg.fileattr.mode & PAL_SHARE_MASK;
 #define S_IFREG 0100000
@@ -212,17 +222,93 @@ static int dir_open(PAL_HANDLE* handle, const char* type, const char* uri, enum 
                     pal_stream_options_t options) {
     log_debug("[PAL] dir_open: type=%s, uri=%s, access=%d, share=%d, create=%d, options=%d\n", type,
               uri, access, share, create, options);
-    return -PAL_ERROR_NOTIMPLEMENTED;
+
+    __UNUSED(access);
+    assert(create != PAL_CREATE_IGNORED);
+
+    if (create == PAL_CREATE_TRY || create == PAL_CREATE_ALWAYS) {
+        log_debug("[PAL] dir_open: create=%d is not supported\n", create);
+        return -PAL_ERROR_NOTIMPLEMENTED;
+    }
+
+    if (strcmp(type, URI_TYPE_DIR))
+        return -PAL_ERROR_INVAL;
+
+    struct pal_svsm_guest_request_arg arg = {};
+
+    unsigned len = strlen(uri);
+    if (len >= sizeof(arg.open.path))
+        return -PAL_ERROR_INVAL;
+    memcpy(arg.open.path, uri, len + 1);
+
+    // TODO: On the host side, open the path with O_DIRECTORY flag
+    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_OPEN, (void *)&arg.open, sizeof(arg.open));
+
+    if (arg.open.fd == FD_ERROR) {
+        log_error("[PAL] file_open: failed to open file\n");
+        return -PAL_ERROR_INVAL;
+    }
+
+    PAL_HANDLE hdl = calloc(1, HANDLE_SIZE(dir));
+    if (!hdl) {
+        // TODO: close the fd
+        // DO_SYSCALL(close, fd);
+        return -PAL_ERROR_NOMEM;
+    }
+
+    init_handle_hdr(hdl, PAL_TYPE_DIR);
+
+    hdl->dir.fd = arg.open.fd;
+    hdl->dir.realpath = strdup(uri);
+    hdl->dir.buf = NULL;
+    hdl->dir.endofstream = 0;
+    hdl->flags |= PAL_HANDLE_FD_READABLE;
+    *handle = hdl;
+
+    return 0;
 }
 
+// The buffer will be filled with null-terminated names of the directory
+// entries
 static int64_t dir_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buf) {
     log_debug("[PAL] dir_read: offset=%lu, count=%lu\n", offset, count);
-    return -PAL_ERROR_NOTIMPLEMENTED;
+
+    if (offset) {
+        return -PAL_ERROR_INVAL;
+    }
+
+    if (handle->dir.endofstream) {
+        return 0;
+    }
+
+    struct pal_svsm_guest_request_arg arg = {};
+    arg.read.fd = handle->file.fd;
+    arg.read.offset = (uint64_t)-1; // indicating dir read
+    arg.read.count = count;
+
+    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+
+    assert(arg.read.count <= count);
+    memcpy(buf, arg.read.buf, arg.read.count);
+
+    if (arg.read.count == 0) {
+        handle->dir.endofstream = 1;
+    }
+
+    return arg.read.count;
 }
 
 static void dir_destroy(PAL_HANDLE handle) {
+    assert(handle);
+    assert(handle->hdr.type == PAL_TYPE_DIR);
+
     log_debug("[PAL] dir_destroy: handle=%p\n", handle);
-    /* noop */
+
+    // TODO: close fd on the host side
+
+    free(handle->dir.buf);
+    free(handle->dir.realpath);
+    free(handle);
 }
 
 static int dir_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
