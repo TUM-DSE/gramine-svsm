@@ -43,8 +43,14 @@ static int read_whole_buf(struct pal_handle* handle, void* buf, uint64_t size, u
 
         read_size = arg.read.count;
 
+        if (read_size == (uint64_t)-1)
+            return -PAL_ERROR_INVAL; /* read error */
+
         if (read_size == 0)
             return -PAL_ERROR_INVAL; /* unexpected EOF */
+
+        if (read_size > sizeof(arg.read.buf))
+            return -PAL_ERROR_INVAL; /* unexpecgted read size */
 
         memcpy((uint8_t*)buf + bytes_read, arg.read.buf, read_size);
 

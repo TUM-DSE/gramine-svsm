@@ -173,7 +173,7 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
         // TODO: use more bigger buffer to read
         pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
 
-        if (arg.read.count == 0) {
+        if (arg.read.count == (uint64_t)(-1)) {
             log_error("[PAL] file_read: failed to read file\n");
             return -PAL_ERROR_INVAL;
         }
