@@ -21,6 +21,26 @@
 #define FD_ERROR ((PAL_IDX)-1)
 #define FD_LIBOS ((PAL_IDX)-2)
 
+bool g_pal_preload_file = 0;
+
+static int get_file_size(const char* uri, uint64_t* size) {
+    struct pal_svsm_guest_request_arg arg = {};
+
+    unsigned len = strlen(uri);
+    if (len >= sizeof(arg.fileattr.path))
+        return -PAL_ERROR_INVAL;
+    memcpy(arg.fileattr.path, uri, len + 1);
+
+    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_FILEATTR, (void *)&arg.fileattr, sizeof(arg.fileattr));
+
+    if (arg.fileattr.ret < 0) {
+        return -PAL_ERROR_INVAL;
+    }
+
+    *size = arg.fileattr.size;
+    return 0;
+}
+
 static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum pal_access access,
                      pal_share_flags_t share, enum pal_create_mode create,
                      pal_stream_options_t options) {
@@ -84,6 +104,48 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
     hdl->file.realpath = strdup(uri);
     hdl->flags |= PAL_HANDLE_FD_READABLE;
 
+    g_pal_preload_file = 0; // TODO: make it configurable
+    if (g_pal_preload_file) {
+        // Load the entire file into memory for access optimization
+        log_debug("[PAL] file_open: preload file\n");
+
+        // get the file size
+        int ret;
+        ret = get_file_size(uri, &hdl->file.size);
+        assert(ret == 0);
+
+        // allocate memory for the file
+        hdl->file.ptr = malloc(hdl->file.size);
+        if (!hdl->file.ptr) {
+            log_error("[PAL] file_open: failed to allocate memory for file\n");
+            return -PAL_ERROR_NOMEM;
+        }
+
+        // issue read request to load the file
+        uint64_t offset = 0;
+        uint64_t bufsize = sizeof(arg.read.buf);
+        log_debug("[PAL] file_open: preload file: size=%lu\n", hdl->file.size);
+        for (offset = 0; offset < hdl->file.size; offset += bufsize) {
+            arg.read.fd = hdl->file.fd;
+            arg.read.offset = offset;
+            uint64_t read_size = MIN(bufsize, hdl->file.size - offset);
+            arg.read.count = read_size;
+
+            pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+
+            if (arg.read.count == (uint64_t)(-1)) {
+                log_error("[PAL] file_open: failed to read file\n");
+                return -PAL_ERROR_INVAL;
+            }
+            if (arg.read.count != read_size) {
+                log_error("[PAL] file_open: failed to read file: unexpected read count: %lu\n", arg.read.count);
+                return -PAL_ERROR_INVAL;
+            }
+
+            memcpy(hdl->file.ptr + offset, arg.read.buf, arg.read.count);
+        }
+    }
+
     // Check if the file is allowed or trusted
     struct trusted_file* tf = NULL;
 
@@ -110,30 +172,23 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
 
     if (tf) {
         /* now we can learn the size of the trusted file */
-        struct pal_svsm_guest_request_arg arg = {};
-
-        unsigned len = strlen(uri);
-        if (len >= sizeof(arg.fileattr.path)) {
-            ret = -PAL_ERROR_INVAL;
-            goto out;
+        if (hdl->file.size != 0) {
+            // we have already queried the file size
+            tf->size = hdl->file.size;
+        } else {
+            // get the file size
+            ret = get_file_size(uri, &hdl->file.size);
+            assert(ret == 0);
+            tf->size = hdl->file.size;
         }
-        memcpy(arg.fileattr.path, uri, len + 1);
 
-        pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_FILEATTR, (void *)&arg.fileattr, sizeof(arg.fileattr));
-
-        if (arg.fileattr.ret < 0) {
-            ret = -PAL_ERROR_INVAL;
-            goto out;
-        }
-        tf->size = arg.fileattr.size;
-
+        // Calculate the hashes of the file
         void* chunk_hashes = NULL;
         ret = load_trusted_or_allowed_file(tf, hdl, /*create=*/ 0, &chunk_hashes);
         if (ret < 0)
             goto out;
 
         hdl->file.chunk_hashes = chunk_hashes;
-        hdl->file.size = tf->size;
     }
 
     log_debug("[PAL] file_open: fd=%d, seekable=%d, realpath=%s\n", hdl->file.fd, hdl->file.seekable,
@@ -164,6 +219,16 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
 
     if (!handle->file.chunk_hashes) {
         // Allowed or passthrough file
+
+        if (handle->file.ptr != NULL && handle->file.size != 0) {
+            // The file is already loaded into memory
+            assert(offset < handle->file.size);
+            int copy_size = MIN(count, handle->file.size - offset);
+            memcpy(buffer, handle->file.ptr + offset, copy_size);
+            return copy_size;
+        }
+
+        // File is not loaded into memory
 
         struct pal_svsm_guest_request_arg arg = {};
         arg.read.fd = handle->file.fd;
@@ -223,6 +288,10 @@ static int file_map(PAL_HANDLE handle, void* addr, pal_prot_flags_t prot, uint64
                     uint64_t size) {
 
     log_debug("[PAL] file_map: fd=%d, addr=%p, prot=%d, offset=%lu, size=%lu\n", handle->file.fd, addr, prot, offset, size);
+
+    if (!(prot & PAL_PROT_WRITECOPY) && (prot & PAL_PROT_WRITE)) {
+        return -PAL_ERROR_DENIED;
+    }
 
     void* ret = pal_svsm_mmap(addr, size, prot, prot, handle->file.fd, offset);
     if(!ret)

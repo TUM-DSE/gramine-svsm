@@ -31,6 +31,14 @@ static int g_file_check_policy = FILE_CHECK_POLICY_STRICT;
 static int register_file(const char* uri, const char* hash_str, bool check_duplicates);
 
 static int read_whole_buf(struct pal_handle* handle, void* buf, uint64_t size, uint64_t offset) {
+
+   if (handle->file.ptr != NULL && handle->file.size != 0) {
+       // The file is already loaded into memory
+       assert(handle->file.size >= offset + size);
+       memcpy(buf, (uint8_t*)handle->file.ptr + offset, size);
+       return size;
+    }
+
     uint64_t bytes_read = 0;
     while (bytes_read < size) {
         uint64_t read_size = 0;

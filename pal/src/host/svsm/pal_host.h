@@ -52,8 +52,9 @@ typedef struct pal_handle {
             PAL_IDX fd;
             char* realpath;
             bool seekable; /* regular files are seekable, FIFO pipes are not */
-            // below fields are for trusted files
-            size_t size;
+            void *ptr; // pointer to the file data
+            size_t size; // size of the file
+            // for trusted files
             void * chunk_hashes; // array of hashes of file
                                  // chunks
         } file;
@@ -76,3 +77,5 @@ typedef struct pal_handle {
 #define PAL_HANDLE_FD_ERROR     4
 /* Set if a hang-up was seen on this handle. */
 #define PAL_HANDLE_FD_HANG_UP   8
+
+extern bool g_pal_preload_file;
