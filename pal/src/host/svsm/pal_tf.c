@@ -32,24 +32,52 @@ static int register_file(const char* uri, const char* hash_str, bool check_dupli
 
 static int read_whole_buf(struct pal_handle* handle, void* buf, uint64_t size, uint64_t offset) {
 
-   if (handle->file.ptr != NULL && handle->file.size != 0) {
+    log_debug("read_whole_buf: buf=%p, size=%lu, offset=%lu", buf, size, offset);
+
+    if (handle->file.ptr) {
        // The file is already loaded into memory
+       log_debug("read_whole_buf: file is already loaded into memory: ptr=%p", handle->file.ptr);
        assert(handle->file.size >= offset + size);
        memcpy(buf, (uint8_t*)handle->file.ptr + offset, size);
        return size;
     }
 
+    // populate the buffer
     uint64_t bytes_read = 0;
+    static void* read_buffer = NULL;
+    static uint64_t buffer_size = 4096 * 1024; // 4MB
+    if (!read_buffer) {
+        read_buffer = malloc(buffer_size);
+        if (!read_buffer) {
+            return -PAL_ERROR_NOMEM;
+        }
+    }
     while (bytes_read < size) {
         uint64_t read_size = 0;
+
         struct pal_svsm_guest_request_arg arg = {};
+#if 1
         arg.read.fd = handle->file.fd;
         arg.read.offset = bytes_read + offset;
         arg.read.count = MIN(size - bytes_read, sizeof(arg.read.buf));
 
         pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
-
         read_size = arg.read.count;
+#else
+        // XXX: the current READ2 requires page-aligned buffer
+        arg.read2.fd = handle->file.fd;
+        arg.read2.offset = bytes_read + offset;
+        arg.read2.ptr = (uint64_t)((uint8_t*)read_buffer + bytes_read);
+        uint64_t to_read = size - bytes_read;
+        arg.read2.bufsize = to_read;
+        arg.read2.count = to_read;
+        assert(arg.read2.count);
+        pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ2, (void *)&arg.read2, sizeof(arg.read2));
+
+        read_size = arg.read2.count;
+        assert(read_size <= to_read);
+        log_debug("read_whole_buf: read_size=%lu", read_size);
+#endif
 
         if (read_size == (uint64_t)-1)
             return -PAL_ERROR_INVAL; /* read error */
@@ -57,10 +85,15 @@ static int read_whole_buf(struct pal_handle* handle, void* buf, uint64_t size, u
         if (read_size == 0)
             return -PAL_ERROR_INVAL; /* unexpected EOF */
 
+#if 1
+        // for PAL_SVSM_GUEST_REQUEST_READ
         if (read_size > sizeof(arg.read.buf))
             return -PAL_ERROR_INVAL; /* unexpecgted read size */
 
         memcpy((uint8_t*)buf + bytes_read, arg.read.buf, read_size);
+#else
+        memcpy((uint8_t*)buf + bytes_read, read_buffer, read_size);
+#endif
 
         bytes_read += read_size;
     }

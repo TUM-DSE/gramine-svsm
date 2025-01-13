@@ -41,6 +41,56 @@ static int get_file_size(const char* uri, uint64_t* size) {
     return 0;
 }
 
+// This function assuems that handle->file.ptr is already allocated with the
+// file size
+static int64_t file_read_all(PAL_HANDLE handle) {
+    assert(handle);
+    assert(handle->file.fd);
+    assert(handle->file.size);
+    assert(handle->file.ptr);
+
+    static void* read_buffer = NULL;
+    static uint64_t buffer_size = 4096 * 1024; // 4MB
+    if (!read_buffer) {
+        read_buffer = calloc(1, buffer_size+4096);
+        if (!read_buffer) {
+            log_error("[PAL] file_read: failed to allocate buffer\n");
+            return -PAL_ERROR_NOMEM;
+        }
+        // Align the buffer to the page boundary
+        // NOTE: READ2 only accepts the page-aligned buffer
+        read_buffer = (void*)(((uint64_t)read_buffer + 4095) & ~4095);
+        log_debug("[PAL] file_read: read buffer = %p\n", read_buffer);
+        // TODO: free read_buffer at the end
+    }
+
+    struct pal_svsm_guest_request_arg arg = {};
+    arg.read2.fd = handle->file.fd;
+    arg.read2.ptr = (uint64_t)read_buffer;
+    arg.read2.bufsize = buffer_size;
+
+    uint64_t offset = 0;
+    for (offset = 0; offset < handle->file.size; offset += buffer_size) {
+        uint64_t read_size = MIN(buffer_size, handle->file.size - offset);
+        arg.read2.offset = offset;
+        arg.read2.count = read_size;
+        assert(arg.read2.ptr);
+
+        pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ2, (void *)&arg.read2, sizeof(arg.read2));
+
+        if (arg.read2.count == (uint64_t)(-1)) {
+            log_error("[PAL] file_read: failed to read file\n");
+            return -PAL_ERROR_INVAL;
+        }
+        if (arg.read2.count != read_size) {
+            log_error("[PAL] file_read: failed to read file: unexpected read count: %lu\n", arg.read2.count);
+            return -PAL_ERROR_INVAL;
+        }
+        memcpy(handle->file.ptr + offset, read_buffer, arg.read2.count);
+    }
+    return 0;
+}
+
 static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum pal_access access,
                      pal_share_flags_t share, enum pal_create_mode create,
                      pal_stream_options_t options) {
@@ -99,12 +149,13 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
         return -PAL_ERROR_INVAL;
     }
 
+    hdl->file.ptr = 0;
     hdl->file.fd = arg.open.fd;
     hdl->file.seekable = 1; // XXX: for now only consider regular file
     hdl->file.realpath = strdup(uri);
     hdl->flags |= PAL_HANDLE_FD_READABLE;
 
-    g_pal_preload_file = 0; // TODO: make it configurable
+    g_pal_preload_file = 1; // TODO: make it configurable
     if (g_pal_preload_file) {
         // Load the entire file into memory for access optimization
         log_debug("[PAL] file_open: preload file\n");
@@ -122,6 +173,12 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
         }
 
         // issue read request to load the file
+#if 1
+        ret = file_read_all(hdl);
+        if (ret < 0) {
+            goto out;
+        }
+#else
         uint64_t offset = 0;
         uint64_t bufsize = sizeof(arg.read.buf);
         log_debug("[PAL] file_open: preload file: size=%lu\n", hdl->file.size);
@@ -144,6 +201,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
 
             memcpy(hdl->file.ptr + offset, arg.read.buf, arg.read.count);
         }
+#endif
     }
 
     // Check if the file is allowed or trusted
@@ -199,6 +257,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
 out:
     if (ret < 0) {
         free(hdl->file.realpath);
+        free(hdl->file.ptr);
         free(hdl);
     }
     return ret;
@@ -219,8 +278,9 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
 
     if (!handle->file.chunk_hashes) {
         // Allowed or passthrough file
+        log_debug("[PAL] file_read: allowed or passthrough file\n");
 
-        if (handle->file.ptr != NULL && handle->file.size != 0) {
+        if (handle->file.ptr) {
             // The file is already loaded into memory
             assert(offset < handle->file.size);
             int copy_size = MIN(count, handle->file.size - offset);

@@ -28,6 +28,7 @@ typedef enum {
     PAL_SVSM_GUEST_REQUEST_FILEATTR=0,
     PAL_SVSM_GUEST_REQUEST_OPEN,
     PAL_SVSM_GUEST_REQUEST_READ,
+    PAL_SVSM_GUEST_REQUEST_READ2,
 } pal_svsm_guest_request_type_t;
 
 struct pal_svsm_guest_request_arg {
@@ -48,6 +49,13 @@ struct pal_svsm_guest_request_arg {
             uint64_t offset;
             uint32_t fd;
         } read;
+        struct {
+            uint64_t ptr;
+            uint64_t bufsize;
+            uint64_t count;
+            uint64_t offset;
+            uint64_t fd;
+        } read2;
     };
 } __attribute__((aligned(2048))); // align so that the struct is not split between pages
                                   // (this is to simplify page table handling
