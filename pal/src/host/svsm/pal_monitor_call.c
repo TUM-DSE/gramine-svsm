@@ -80,7 +80,10 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
 
     extended_monitor_call(&data);
 
-    return (void*)data.rcx;
+    if (data.rcx == 0)
+        return addr;
+
+    return NULL;
 }
 
 int pal_svsm_set_tcb(PAL_TCB* tcb) {
@@ -91,4 +94,16 @@ int pal_svsm_set_tcb(PAL_TCB* tcb) {
   monitor_call(&data);
 
   return 0;
+}
+
+int pal_svsm_mprotect(void* addr, uint64_t size, pal_prot_flags_t flags){
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFF9;
+    data.rbx = (uint64_t)addr;
+    data.rcx = size;
+    data.rdx = flags;
+
+    monitor_call(&data);
+
+    return data.rcx;
 }

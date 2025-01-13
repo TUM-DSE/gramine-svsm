@@ -21,8 +21,7 @@ int _PalVirtualMemoryFree(void* addr, uint64_t size) {
 }
 
 int _PalVirtualMemoryProtect(void* addr, uint64_t size, pal_prot_flags_t prot) {
-    // TODO
-    return 0;
+    return pal_svsm_mprotect(addr, size, prot);
 }
 
 unsigned long _PalMemoryQuota(void) {
