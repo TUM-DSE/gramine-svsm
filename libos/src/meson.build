@@ -35,6 +35,7 @@ libos_sources = files(
     'fs/libos_fs_util.c',
     'fs/libos_namei.c',
     'fs/lib/fs.c',
+    'fs/static/fs.c',
     'fs/pipe/fs.c',
     'fs/proc/fs.c',
     'fs/proc/info.c',

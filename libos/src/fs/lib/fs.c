@@ -2,11 +2,6 @@
 #include "libos_fs_pseudo.h"
 
 #include "ld.c"
-// #include "helloworld.c"
-// #include "nop.c"
-// #include "nop_static.c"
-// #include "cpuid.c"
-// #include "cpuid_static.c"
 
 #include "libc.c"
 #include "libm.c"
@@ -59,13 +54,6 @@ static int libc(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     return 0;
 }
 
-/*
-__DEFINE_LIBOS_FS_PSEUDO_NODE(helloworld_, helloworld, helloworld_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(nop_, nop, nop_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(nop_static_, nop_static, nop_static_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(cpuid__, cpuid_, cpuid_len)
-__DEFINE_LIBOS_FS_PSEUDO_NODE(cpuid_static_, cpuid_static, cpuid_static_len)
-*/
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libm, libm_so_6, libm_so_6_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libz, libz_so_1, libz_so_1_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libexpat, libexpat_so_1, libexpat_so_1_len)
@@ -102,14 +90,6 @@ int init_libfs(void) {
 
     struct pseudo_node* node = pseudo_add_str(root, "ld-linux-x86-64.so.2", &ld);
     node->str.no_free = true;
-
-    /*
-    __ADD_NODE("helloworld", helloworld_, helloworld_len);
-    __ADD_NODE("nop", nop_, nop_len);
-    __ADD_NODE("nop_static", nop_static_, nop_static_len);
-    __ADD_NODE("cpuid_", cpuid__, cpuid_len);
-    __ADD_NODE("cpuid_static", cpuid_static_, cpuid_static_len);
-    */
 
     // libc.so.6 is the C standard library
     __ADD_NODE("libc.so.6", libc, 0);

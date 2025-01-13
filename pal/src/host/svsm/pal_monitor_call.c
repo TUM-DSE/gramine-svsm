@@ -75,7 +75,7 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
     data.rbx = (uint64_t)addr;
     data.rcx = size;
     data.rdx = flags;
-    data.r8 = fd;
+    data.r8 = (uint64_t)(int64_t)fd;
     data.r9 = offset;
 
     extended_monitor_call(&data);
@@ -105,5 +105,15 @@ int pal_svsm_mprotect(void* addr, uint64_t size, pal_prot_flags_t flags){
 
     monitor_call(&data);
 
+    return data.rcx;
+}
+
+int pal_svsm_guest_request(pal_svsm_guest_request_type_t type, void *arg, size_t size) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFF7;
+    data.rbx = (int)type;
+    data.rcx = (uint64_t)arg;
+    data.rdx = size;
+    monitor_call(&data);
     return data.rcx;
 }
