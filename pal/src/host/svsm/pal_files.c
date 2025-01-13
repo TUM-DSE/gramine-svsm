@@ -282,7 +282,13 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
 
         if (handle->file.ptr) {
             // The file is already loaded into memory
-            assert(offset < handle->file.size);
+            if (offset == handle->file.size) {
+                return 0; // EOF
+            }
+            if (offset > handle->file.size) {
+                log_debug("[PAL] file_read: offset is out of range: offset=%lu, size=%lu\n", offset, handle->file.size);
+                return -PAL_ERROR_INVAL;
+            }
             int copy_size = MIN(count, handle->file.size - offset);
             memcpy(buffer, handle->file.ptr + offset, copy_size);
             return copy_size;
@@ -349,13 +355,31 @@ static int file_map(PAL_HANDLE handle, void* addr, pal_prot_flags_t prot, uint64
 
     log_debug("[PAL] file_map: fd=%d, addr=%p, prot=%d, offset=%lu, size=%lu\n", handle->file.fd, addr, prot, offset, size);
 
+    pal_prot_flags_t orig_prot = prot;
+
     if (!(prot & PAL_PROT_WRITECOPY) && (prot & PAL_PROT_WRITE)) {
         return -PAL_ERROR_DENIED;
+    }
+
+    if (handle->file.ptr) {
+        // the file is already loaded in the memory
+        // request the host to populate the memory so that we can use it
+        prot |= PAL_PROT_POPULATE;
+        prot |= PAL_PROT_WRITE;
+        prot &= ~PAL_PROT_WRITECOPY;
     }
 
     void* ret = pal_svsm_mmap(addr, size, prot, prot, handle->file.fd, offset);
     if(!ret)
         return -1;
+
+    if (handle->file.ptr) {
+        // copy the file content to the memory
+        memcpy(ret, (uint8_t*)handle->file.ptr + offset, size);
+        if (orig_prot != (prot & PAL_PROT_MASK)) {
+            pal_svsm_mprotect(ret, size, orig_prot);
+        }
+    }
 
     return 0;
 }
