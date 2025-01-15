@@ -16,7 +16,7 @@
 #include "libcrypt.c"
 #include "libpthread.c"
 #include "libdl.c"
-// #include "librt.c"
+#include "librt.c"
 // #include "libutil.c"
 #include "libuuid.c"
 #include "libbz2.c"
@@ -70,8 +70,8 @@ __DEFINE_LIBOS_FS_PSEUDO_NODE(libstdcpp, libstdc___so_6, libstdc___so_6_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libcrypt, libcrypt_so_1, libcrypt_so_1_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libpthread, libpthread_so_0, libpthread_so_0_len)
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libdl, libdl_so_2, libdl_so_2_len)
-/*
 __DEFINE_LIBOS_FS_PSEUDO_NODE(librt, librt_so_1, librt_so_1_len)
+/*
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libutil, libutil_so_1, libutil_so_1_len)
 */
 __DEFINE_LIBOS_FS_PSEUDO_NODE(libuuid, libuuid_so_1, libuuid_so_1_len)
@@ -134,10 +134,10 @@ int init_libfs(void) {
     // libdl.so.2 is needed for python?
     __ADD_NODE("libdl.so.2", libdl, 0);
 
-    /*
-    // librt.so.1 is needed for python?
+    // librt.so.1 is needed for 411
     __ADD_NODE("librt.so.1", librt, 0);
 
+    /*
     // libutil.so.1 is needed for python?
     __ADD_NODE("libutil.so.1", libutil, 0);
     */
