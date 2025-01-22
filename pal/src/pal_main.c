@@ -154,6 +154,10 @@ static int deep_copy_envs(const char** envp, const char*** out_envp) {
 static int build_envs(const char** orig_envp, bool propagate, const char*** out_envp) {
     int ret;
 
+    // Required to check if the orig_envp is empty
+    // Otherwise in release it will get optimized out
+    volatile uint64_t orig_envp_vol = (uint64_t)orig_envp;
+
     toml_table_t* toml_loader = toml_table_in(g_pal_public_state.manifest_root, "loader");
     if (!toml_loader)
         return propagate ? deep_copy_envs(orig_envp, out_envp) : create_empty_envs(out_envp);
@@ -189,36 +193,39 @@ static int build_envs(const char** orig_envp, bool propagate, const char*** out_
 
     /* First, go through original variables and copy the ones that we're going to use (because of
      * `propagate`, or because passthrough is specified for that variable in manifest). */
-    if(orig_envp != NULL)
-    for (const char** orig_env = orig_envp; *orig_env; orig_env++) {
-        char* orig_env_key_end = strchr(*orig_env, '=');
-        if (!orig_env_key_end)
-            return -PAL_ERROR_INVAL;
 
-        char* env_key = alloc_substr(*orig_env, orig_env_key_end - *orig_env);
-        if (!env_key)
-            return -PAL_ERROR_NOMEM;
+    // Uses volatile to avoid problems with optimization
+    if(orig_envp_vol != 0){
+        for (const char** orig_env = orig_envp; *orig_env; orig_env++) {
+            char* orig_env_key_end = strchr(*orig_env, '=');
+            if (!orig_env_key_end)
+                return -PAL_ERROR_INVAL;
 
-        bool exists;
-        char* env_val;
-        bool passthrough;
-        ret = get_env_value_from_manifest(toml_envs, env_key, &exists, &env_val, &passthrough);
-        if (ret < 0) {
-            log_error("Invalid environment variable in manifest: '%s'", env_key);
-            return ret;
-        }
-
-        if ((propagate && !exists) || (exists && passthrough)) {
-            new_envp[idx] = strdup(*orig_env);
-            if (!new_envp[idx])
+            char* env_key = alloc_substr(*orig_env, orig_env_key_end - *orig_env);
+            if (!env_key)
                 return -PAL_ERROR_NOMEM;
-            idx++;
+
+            bool exists;
+            char* env_val;
+            bool passthrough;
+            ret = get_env_value_from_manifest(toml_envs, env_key, &exists, &env_val, &passthrough);
+            if (ret < 0) {
+                log_error("Invalid environment variable in manifest: '%s'", env_key);
+                return ret;
+            }
+
+            if ((propagate && !exists) || (exists && passthrough)) {
+                new_envp[idx] = strdup(*orig_env);
+                if (!new_envp[idx])
+                    return -PAL_ERROR_NOMEM;
+                idx++;
+            }
+
+            free(env_key);
+            free(env_val);
+
         }
-
-        free(env_key);
-        free(env_val);
     }
-
     /* Then, go through the manifest variables and copy the ones with value provided. */
     for (ssize_t i = 0; i < toml_envs_cnt; i++) {
         const char* toml_env_key = toml_key_in(toml_envs, i);
