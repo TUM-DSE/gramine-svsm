@@ -8,7 +8,7 @@
 
 // #include "dependencies_dynamic-html.c" // 23 -> 256 // python3 scripts/dependencies_zip_generator.py deps/110.dynamic-html_code/site-packages/ "libos/src/fs/python/dependencies_dynamic-html.c"
 // #include "dependencies_thumbnailer.c" // 36 -> 256 // python3 scripts/dependencies_zip_generator.py deps/210.thumbnailer_code/site-packages/ "libos/src/fs/python/dependencies_thumbnailer.c"
-#include "dependencies_image-recognition.c" // 1659 -> 2048 // python3 scripts/dependencies_zip_generator.py deps/411.image-recognition_code/site-packages/ "libos/src/fs/python/dependencies_image-recognition.c"
+#include "dependencies_image-recognition.c" // 1661 -> 2048 // python3 scripts/dependencies_zip_generator.py deps/411.image-recognition_code/site-packages/ "libos/src/fs/python/dependencies_image-recognition.c"
 // #include "dependencies_igraph.c" // 81 -> 256 // python3 scripts/dependencies_zip_generator.py deps/501.graph-pagerank_code/site-packages/ "libos/src/fs/python/dependencies_igraph.c"
 // #include "dependencies_dna-visualisation.c" // 124 -> 8192 // python3 scripts/dependencies_zip_generator.py deps/504.dna-visualisation_code/site-packages/ "libos/src/fs/python/dependencies_dna-visualisation.c"
 
