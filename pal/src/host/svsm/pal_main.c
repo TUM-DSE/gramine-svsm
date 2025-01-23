@@ -109,11 +109,3 @@ noreturn void pal_svsm_main(void)
 
     pal_main(instance_id, parent_process, NULL, NULL, NULL, NULL);
 }
-
-/* must implement "pal_start", and call "pal_main" inside */
-void pal_start(void);
-void pal_start(void)
-{
-    pal_svsm_main();
-}
-

@@ -46,6 +46,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
     char* entrypoint_name = NULL;
     int ret = toml_string_in(manifest_loader, "entrypoint", &entrypoint_name);
     assert(ret == 0);
+    (void)ret;
     if (strstartswith(entrypoint_name, URI_PREFIX_FILE)){
         entrypoint_name += URI_PREFIX_FILE_LEN;
     }
