@@ -68,7 +68,7 @@ struct libos_dev_ops {
 #define PSEUDO_PERM_FILE_RW PERM_rw_rw_rw_
 
 /* Maximum count of created nodes (`pseudo_add_*` calls) */
-#define PSEUDO_MAX_NODES 2048 // todo!
+#define PSEUDO_MAX_NODES 8192
 
 /* Used to represent cpumaps like "00000000,ffffffff,00000000,ffffffff".
  * Note: Used to allocate on stack; increase with caution or use malloc instead. */
@@ -267,6 +267,3 @@ int sys_print_as_bitmask(char* buf, size_t buf_size, size_t count,
 int init_etcfs(void);
 
 #include "libos_fs_pseudo_static.h"
-
-int init_libfs(void);
-int init_pythonfs(void);
