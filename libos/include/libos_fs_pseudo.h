@@ -68,7 +68,7 @@ struct libos_dev_ops {
 #define PSEUDO_PERM_FILE_RW PERM_rw_rw_rw_
 
 /* Maximum count of created nodes (`pseudo_add_*` calls) */
-#define PSEUDO_MAX_NODES 9280
+#define PSEUDO_MAX_NODES 2048
 
 /* Used to represent cpumaps like "00000000,ffffffff,00000000,ffffffff".
  * Note: Used to allocate on stack; increase with caution or use malloc instead. */
