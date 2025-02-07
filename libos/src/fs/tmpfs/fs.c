@@ -46,7 +46,7 @@ static int tmpfs_setup_dentry(struct libos_dentry* dent, mode_t type, mode_t per
         return -EPERM;
     }
 
-    inode->ctime = time_us / USEC_IN_SEC;
+    inode->ctime = 315532800 + time_us / USEC_IN_SEC;
     inode->mtime = inode->ctime;
     inode->atime = inode->ctime;
 
@@ -199,7 +199,7 @@ static int tmpfs_rename(struct libos_dentry* old, struct libos_dentry* new) {
     /* TODO: this should be done in the syscall handler, not here */
 
     lock(&old->inode->lock);
-    old->inode->ctime = time_us / USEC_IN_SEC;
+    old->inode->ctime = 315532800 + time_us / USEC_IN_SEC;
     unlock(&old->inode->lock);
 
     return 0;
@@ -268,7 +268,7 @@ static ssize_t tmpfs_write(struct libos_handle* hdl, const void* buf, size_t siz
     inode->size = mem->size;
 
     *pos += ret;
-    inode->mtime = time_us / USEC_IN_SEC;
+    inode->mtime = 315532800 + time_us / USEC_IN_SEC;
     /* keep `ret` */
 
     unlock(&inode->lock);
@@ -299,7 +299,7 @@ static int tmpfs_truncate(struct libos_handle* hdl, file_off_t size) {
     if (ret < 0)
         goto out;
 
-    hdl->inode->mtime = time_us / USEC_IN_SEC;
+    hdl->inode->mtime = 315532800 + time_us / USEC_IN_SEC;
     hdl->inode->size = size;
     ret = 0;
 
