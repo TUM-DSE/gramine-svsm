@@ -16,8 +16,7 @@ int _PalVirtualMemoryAlloc(void* addr, uint64_t size, pal_prot_flags_t prot) {
 }
 
 int _PalVirtualMemoryFree(void* addr, uint64_t size) {
-    // TODO
-    return 0;
+    return pal_svsm_free(addr, size);
 }
 
 int _PalVirtualMemoryProtect(void* addr, uint64_t size, pal_prot_flags_t prot) {

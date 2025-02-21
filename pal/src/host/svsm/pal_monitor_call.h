@@ -18,6 +18,7 @@ void pal_svsm_fail(const char* err, int errno);
 void pal_svsm_exit(int exitcode);
 void pal_svsm_debug_putc(char c);
 
+int pal_svsm_free(void* addr, uint64_t size);
 int pal_svsm_virt_alloc(void* addr, uint64_t size, pal_prot_flags_t prot);
 int pal_svsm_mprotect(void* addr, uint64_t size, pal_prot_flags_t prot);
 void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t offset);

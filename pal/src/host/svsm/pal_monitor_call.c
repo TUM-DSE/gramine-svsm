@@ -69,6 +69,17 @@ int pal_svsm_virt_alloc(void* addr, uint64_t size, pal_prot_flags_t flags){
     return data.rcx;
 }
 
+int pal_svsm_free(void* addr, uint64_t size) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFF6;
+    data.rbx = (uint64_t)addr;
+    data.rcx = size;
+
+    monitor_call(&data);
+
+    return data.rcx;
+}
+
 void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t offset){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFB;
