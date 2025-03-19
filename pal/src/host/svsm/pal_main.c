@@ -22,8 +22,8 @@ typedef void (*loader_callback)(void);
 
 static void pal_initilize_memory() {
 
-   g_pal_public_state.memory_address_start = (void*)0x10000000000;
-   g_pal_public_state.memory_address_end = (void*)0x40000000000;
+   g_pal_public_state.memory_address_start = (void*)0x40000000000;
+   g_pal_public_state.memory_address_end = (void*)0x80000000000;
    g_pal_public_state.initial_mem_ranges_len = 100;
 
 }
