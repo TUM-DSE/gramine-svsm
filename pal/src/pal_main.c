@@ -586,7 +586,13 @@ noreturn void pal_main(uint64_t instance_id,       /* current instance id */
     }
     g_pal_public_state.mem_total = _PalMemoryQuota();
 
-    ret = load_entrypoint(entrypoint_name);
+    bool in_memory = false;
+    ret = toml_bool_in(manifest_loader, "in_memory",false , &in_memory);
+
+    if (ret < 0)
+        INIT_FAIL_MANIFEST("Cannot parse 'loader.in_memory");
+
+    ret = load_entrypoint(entrypoint_name, in_memory);
     if (ret < 0)
         INIT_FAIL("Unable to load loader.entrypoint: %ld", ret);
     free(entrypoint_name);

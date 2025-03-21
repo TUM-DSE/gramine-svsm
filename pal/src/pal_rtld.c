@@ -641,29 +641,30 @@ out:
     return ret;
 }
 
-int load_entrypoint(const char* uri) {
+int load_entrypoint(const char* uri, bool in_memory) {
     int ret;
     PAL_HANDLE handle;
 
-    // char buf[1024]; /* must be enough to hold ELF header and all its program headers */
+    char buf_[1024]; /* must be enough to hold ELF header and all its program headers */
+    char* buf = &buf_[0];
     ret = _PalStreamOpen(&handle, uri, PAL_ACCESS_RDONLY, /*share_flags=*/0, PAL_CREATE_NEVER,
                          /*options=*/0);
     if (ret < 0)
         return ret;
 
-#if 0
-    // XXX: Here, PAL reads the libos file ("loader.entrypoint")
-    //      For Wallet, the file is mapped in memory (0x18000000000) at the
-    //      boot time, so we skip the file reading and directly use the mapped memory
-    ret = _PalStreamRead(handle, 0, sizeof(buf), buf);
-    if (ret < 0) {
-        log_error("Reading ELF file failed");
-        goto out;
+    if(!in_memory){
+        // XXX: Here, PAL reads the libos file ("loader.entrypoint")
+        //      For Wallet, the file is mapped in memory (0x18000000000) at the
+        //      boot time, so we skip the file reading and directly use the mapped memory
+        ret = _PalStreamRead(handle, 0, sizeof(buf_), buf);
+        if (ret < 0) {
+            log_error("Reading ELF file failed");
+            goto out;
+        }
+    } else {
+        ret = 1024;
+        buf = (void*)0x18000000000;
     }
-#endif
-    ret = 1024;
-    char* buf = (void*)0x18000000000;
-
     size_t bytes_read = (size_t)ret;
 
     elf_ehdr_t* ehdr = (elf_ehdr_t*)buf;

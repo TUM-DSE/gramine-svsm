@@ -53,7 +53,7 @@ int _PalDebugDescribeLocation(uintptr_t addr, char* buf, size_t buf_size);
 /* loading ELF binaries */
 int setup_pal_binary(void);
 void set_pal_binary_name(const char* name);
-int load_entrypoint(const char* uri);
+int load_entrypoint(const char* uri, bool in_memory);
 int find_string_and_symbol_tables(elf_addr_t ehdr_addr, elf_addr_t base_addr,
                                   const char** out_string_table, elf_sym_t** out_symbol_table,
                                   uint32_t* out_symbol_table_cnt);
