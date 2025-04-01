@@ -13,7 +13,7 @@
 #error "cannot be included outside PAL"
 #endif
 
-typedef struct {
+typedef struct pal_handle {
     /* TSAI: Here we define the internal types of PAL_HANDLE in PAL design, user has not to access
      * the content inside the handle, also there is no need to allocate the internal handles, so we
      * hide the type name of these handles on purpose.
@@ -52,6 +52,11 @@ typedef struct {
             PAL_IDX fd;
             char* realpath;
             bool seekable; /* regular files are seekable, FIFO pipes are not */
+            void *ptr; // pointer to the file data
+            size_t size; // size of the file
+            // for trusted files
+            void * chunk_hashes; // array of hashes of file
+                                 // chunks
         } file;
 
         struct {
@@ -72,3 +77,5 @@ typedef struct {
 #define PAL_HANDLE_FD_ERROR     4
 /* Set if a hang-up was seen on this handle. */
 #define PAL_HANDLE_FD_HANG_UP   8
+
+extern bool g_pal_preload_file;

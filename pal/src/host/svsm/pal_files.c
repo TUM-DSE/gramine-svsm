@@ -11,6 +11,8 @@
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
 #include "pal_rtld.h"
+#include "pal_tf.h"
+#include "list.h"
 #include "toml.h"
 #include "toml_utils.h"
 
@@ -18,6 +20,76 @@
 
 #define FD_ERROR ((PAL_IDX)-1)
 #define FD_LIBOS ((PAL_IDX)-2)
+
+bool g_pal_preload_file = 0;
+
+static int get_file_size(const char* uri, uint64_t* size) {
+    struct pal_svsm_guest_request_arg arg = {};
+
+    unsigned len = strlen(uri);
+    if (len >= sizeof(arg.fileattr.path))
+        return -PAL_ERROR_INVAL;
+    memcpy(arg.fileattr.path, uri, len + 1);
+
+    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_FILEATTR, (void *)&arg.fileattr, sizeof(arg.fileattr));
+
+    if (arg.fileattr.ret < 0) {
+        return -PAL_ERROR_INVAL;
+    }
+
+    *size = arg.fileattr.size;
+    return 0;
+}
+
+// This function assuems that handle->file.ptr is already allocated with the
+// file size
+static int64_t file_read_all(PAL_HANDLE handle) {
+    assert(handle);
+    assert(handle->file.fd);
+    assert(handle->file.size);
+    assert(handle->file.ptr);
+
+    static void* read_buffer = NULL;
+    static uint64_t buffer_size = 4096 * 1024; // 4MB
+    if (!read_buffer) {
+        read_buffer = calloc(1, buffer_size+4096);
+        if (!read_buffer) {
+            log_error("[PAL] file_read: failed to allocate buffer\n");
+            return -PAL_ERROR_NOMEM;
+        }
+        // Align the buffer to the page boundary
+        // NOTE: READ2 only accepts the page-aligned buffer
+        read_buffer = (void*)(((uint64_t)read_buffer + 4095) & ~4095);
+        log_debug("[PAL] file_read: read buffer = %p\n", read_buffer);
+        // TODO: free read_buffer at the end
+    }
+
+    struct pal_svsm_guest_request_arg arg = {};
+    arg.read2.fd = handle->file.fd;
+    arg.read2.ptr = (uint64_t)read_buffer;
+    arg.read2.bufsize = buffer_size;
+
+    uint64_t offset = 0;
+    for (offset = 0; offset < handle->file.size; offset += buffer_size) {
+        uint64_t read_size = MIN(buffer_size, handle->file.size - offset);
+        arg.read2.offset = offset;
+        arg.read2.count = read_size;
+        assert(arg.read2.ptr);
+
+        pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ2, (void *)&arg.read2, sizeof(arg.read2));
+
+        if (arg.read2.count == (uint64_t)(-1)) {
+            log_error("[PAL] file_read: failed to read file\n");
+            return -PAL_ERROR_INVAL;
+        }
+        if (arg.read2.count != read_size) {
+            log_error("[PAL] file_read: failed to read file: unexpected read count: %lu\n", arg.read2.count);
+            return -PAL_ERROR_INVAL;
+        }
+        memcpy(handle->file.ptr + offset, read_buffer, arg.read2.count);
+    }
+    return 0;
+}
 
 static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum pal_access access,
                      pal_share_flags_t share, enum pal_create_mode create,
@@ -77,20 +149,123 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, enum
         return -PAL_ERROR_INVAL;
     }
 
+    hdl->file.ptr = 0;
     hdl->file.fd = arg.open.fd;
     hdl->file.seekable = 1; // XXX: for now only consider regular file
     hdl->file.realpath = strdup(uri);
     hdl->flags |= PAL_HANDLE_FD_READABLE;
-    *handle = hdl;
+
+    g_pal_preload_file = 1; // TODO: make it configurable
+    if (g_pal_preload_file) {
+        // Load the entire file into memory for access optimization
+        log_debug("[PAL] file_open: preload file\n");
+
+        // get the file size
+        int ret;
+        ret = get_file_size(uri, &hdl->file.size);
+        assert(ret == 0);
+
+        // allocate memory for the file
+        hdl->file.ptr = malloc(hdl->file.size);
+        if (!hdl->file.ptr) {
+            log_error("[PAL] file_open: failed to allocate memory for file\n");
+            return -PAL_ERROR_NOMEM;
+        }
+
+        // issue read request to load the file
+#if 1
+        ret = file_read_all(hdl);
+        if (ret < 0) {
+            goto out;
+        }
+#else
+        uint64_t offset = 0;
+        uint64_t bufsize = sizeof(arg.read.buf);
+        log_debug("[PAL] file_open: preload file: size=%lu\n", hdl->file.size);
+        for (offset = 0; offset < hdl->file.size; offset += bufsize) {
+            arg.read.fd = hdl->file.fd;
+            arg.read.offset = offset;
+            uint64_t read_size = MIN(bufsize, hdl->file.size - offset);
+            arg.read.count = read_size;
+
+            pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+
+            if (arg.read.count == (uint64_t)(-1)) {
+                log_error("[PAL] file_open: failed to read file\n");
+                return -PAL_ERROR_INVAL;
+            }
+            if (arg.read.count != read_size) {
+                log_error("[PAL] file_open: failed to read file: unexpected read count: %lu\n", arg.read.count);
+                return -PAL_ERROR_INVAL;
+            }
+
+            memcpy(hdl->file.ptr + offset, arg.read.buf, arg.read.count);
+        }
+#endif
+    }
+
+    // Check if the file is allowed or trusted
+    struct trusted_file* tf = NULL;
+
+    if (!(options & PAL_OPTION_PASSTHROUGH)) {
+        tf = get_trusted_or_allowed_file(hdl->file.realpath);
+        if (!tf) {
+            if (get_file_check_policy() != FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG) {
+                log_warning("Disallowing access to file '%s'; file is not trusted or allowed.",
+                            hdl->file.realpath);
+                ret = -PAL_ERROR_DENIED;
+                goto out;
+            }
+            log_warning("Allowing access to unknown file '%s' due to file_check_policy settings.",
+                        hdl->file.realpath);
+        }
+    }
+
+    if (tf && !tf->allowed && ((access == PAL_ACCESS_RDWR)
+                || (access == PAL_ACCESS_WRONLY))) {
+        log_error("Disallowing create/write/append to a trusted file '%s'", hdl->file.realpath);
+        ret = -PAL_ERROR_DENIED;
+        goto out;
+    }
+
+    if (tf) {
+        /* now we can learn the size of the trusted file */
+        if (hdl->file.size != 0) {
+            // we have already queried the file size
+            tf->size = hdl->file.size;
+        } else {
+            // get the file size
+            ret = get_file_size(uri, &hdl->file.size);
+            assert(ret == 0);
+            tf->size = hdl->file.size;
+        }
+
+        // Calculate the hashes of the file
+        void* chunk_hashes = NULL;
+        ret = load_trusted_or_allowed_file(tf, hdl, /*create=*/ 0, &chunk_hashes);
+        if (ret < 0)
+            goto out;
+
+        hdl->file.chunk_hashes = chunk_hashes;
+    }
 
     log_debug("[PAL] file_open: fd=%d, seekable=%d, realpath=%s\n", hdl->file.fd, hdl->file.seekable,
               hdl->file.realpath);
 
-    return 0;
+    *handle = hdl;
+    ret = 0;
+out:
+    if (ret < 0) {
+        free(hdl->file.realpath);
+        free(hdl->file.ptr);
+        free(hdl);
+    }
+    return ret;
 }
 
 static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buffer) {
     log_debug("[PAL] file_read: offset=%lu, count=%lu\n", offset, count);
+
     if (handle->file.fd == FD_LIBOS) {
         // XXX: libos file
         static uint8_t* libos_start = (void*)0x18000000000;
@@ -101,33 +276,60 @@ static int64_t file_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, voi
         return count;
     }
 
-    struct pal_svsm_guest_request_arg arg = {};
-    arg.read.fd = handle->file.fd;
-    arg.read.offset = offset;
-    arg.read.count = count;
+    if (!handle->file.chunk_hashes) {
+        // Allowed or passthrough file
+        log_debug("[PAL] file_read: allowed or passthrough file\n");
 
-    // FIXME: currently we use arg.read.buf as a read buffer but this is small
-    pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+        if (handle->file.ptr) {
+            // The file is already loaded into memory
+            if (offset == handle->file.size) {
+                return 0; // EOF
+            }
+            if (offset > handle->file.size) {
+                log_debug("[PAL] file_read: offset is out of range: offset=%lu, size=%lu\n", offset, handle->file.size);
+                return -PAL_ERROR_INVAL;
+            }
+            int copy_size = MIN(count, handle->file.size - offset);
+            memcpy(buffer, handle->file.ptr + offset, copy_size);
+            return copy_size;
+        }
 
-    if (arg.read.count == 0) {
-        log_error("[PAL] file_read: failed to read file\n");
-        return -PAL_ERROR_INVAL;
+        // File is not loaded into memory
+
+        struct pal_svsm_guest_request_arg arg = {};
+        arg.read.fd = handle->file.fd;
+        arg.read.offset = offset;
+        arg.read.count = count;
+
+        // TODO: use more bigger buffer to read
+        pal_svsm_guest_request(PAL_SVSM_GUEST_REQUEST_READ, (void *)&arg.read, sizeof(arg.read));
+
+        if (arg.read.count == (uint64_t)(-1)) {
+            log_error("[PAL] file_read: failed to read file\n");
+            return -PAL_ERROR_INVAL;
+        }
+
+        assert(arg.read.count <= count);
+        memcpy(buffer, arg.read.buf, arg.read.count);
+
+        return arg.read.count;
     }
 
-    assert(arg.read.count <= count);
+    // Trusted file
+    uint64_t file_size = handle->file.size;
+    if (offset >= file_size)
+        return 0;
 
-    memcpy(buffer, arg.read.buf, arg.read.count);
+    int64_t end = MIN(offset + count, file_size);
+    int64_t aligned_offset = ALIGN_DOWN(offset, TRUSTED_CHUNK_SIZE);
+    int64_t aligned_end    = ALIGN_UP(end, TRUSTED_CHUNK_SIZE);
 
-    log_debug("[PAL] file_read: read %lu bytes\n", arg.read.count);
-#if 0
-    int i = 0;
-    for (i = 0; i < 64; i++) {
-        log_debug("%02x ", ((char*)arg.read.buf)[i]);
-    }
-    log_debug("\n");
-#endif
+    int ret = copy_and_verify_trusted_file(handle, buffer, aligned_offset, aligned_end, offset, end,
+                                       handle->file.chunk_hashes, file_size);
+    if (ret < 0)
+        return ret;
 
-    return arg.read.count;
+    return end - offset;
 }
 
 static int64_t file_write(PAL_HANDLE handle, uint64_t offset, uint64_t count, const void* buffer) {
@@ -153,9 +355,31 @@ static int file_map(PAL_HANDLE handle, void* addr, pal_prot_flags_t prot, uint64
 
     log_debug("[PAL] file_map: fd=%d, addr=%p, prot=%d, offset=%lu, size=%lu\n", handle->file.fd, addr, prot, offset, size);
 
+    pal_prot_flags_t orig_prot = prot;
+
+    if (!(prot & PAL_PROT_WRITECOPY) && (prot & PAL_PROT_WRITE)) {
+        return -PAL_ERROR_DENIED;
+    }
+
+    if (handle->file.ptr) {
+        // the file is already loaded in the memory
+        // request the host to populate the memory so that we can use it
+        prot |= PAL_PROT_POPULATE;
+        prot |= PAL_PROT_WRITE;
+        prot &= ~PAL_PROT_WRITECOPY;
+    }
+
     void* ret = pal_svsm_mmap(addr, size, prot, prot, handle->file.fd, offset);
     if(!ret)
         return -1;
+
+    if (handle->file.ptr) {
+        // copy the file content to the memory
+        memcpy(ret, (uint8_t*)handle->file.ptr + offset, size);
+        if (orig_prot != (prot & PAL_PROT_MASK)) {
+            pal_svsm_mprotect(ret, size, orig_prot);
+        }
+    }
 
     return 0;
 }

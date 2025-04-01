@@ -193,6 +193,7 @@ typedef uint32_t pal_prot_flags_t; /* bitfield */
 #define PAL_PROT_EXEC      0x4
 #define PAL_PROT_WRITECOPY 0x8
 #define PAL_PROT_MASK      0xF
+#define PAL_PROT_POPULATE  0x10 // svsm-specific
 
 struct pal_initial_mem_range {
     uintptr_t start;

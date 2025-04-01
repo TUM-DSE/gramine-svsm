@@ -15,6 +15,7 @@
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
 #include "pal_rtld.h"
+#include "pal_tf.h"
 
 #define MONITOR_PAGE_SIZE 4096
 #define MANIFEST_START (void*)0x10000000000
@@ -104,6 +105,19 @@ noreturn void pal_svsm_main(void)
     g_pal_public_state.manifest_root = toml_parse(raw_manifest, errbuf, sizeof(errbuf));
     if(!g_pal_public_state.manifest_root)
         INIT_FAIL_MANIFEST(errbuf);
+
+
+    ret = init_file_check_policy();
+    if (ret < 0)
+        INIT_FAIL("Failed to load the file check policy: %s", pal_strerror(ret));
+
+    ret = init_allowed_files();
+    if (ret < 0)
+        INIT_FAIL("Failed to initialize allowed files: %s", pal_strerror(ret));
+
+    ret = init_trusted_files();
+    if (ret < 0)
+        INIT_FAIL("Failed to initialize trusted files: %s", pal_strerror(ret));
 
     // Entering the actual pal_main
 

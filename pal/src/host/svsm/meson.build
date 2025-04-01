@@ -15,6 +15,7 @@ libpal_svsm = shared_library('pal',
     'pal_events.c',
     'pal_exception.c',
     'pal_files.c',
+    'pal_tf.c',
     'pal_main.c',
     'pal_memory.c',
     'pal_misc.c',
@@ -72,6 +73,7 @@ libpal_svsm = shared_library('pal',
 
     dependencies: [
         common_dep,
+        cryptoadapter_dep,
     ],
 
     install: true,
