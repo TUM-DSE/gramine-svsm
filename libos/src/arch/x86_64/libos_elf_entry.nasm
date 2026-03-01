@@ -25,7 +25,7 @@ call_elf_entry:
     ldmxcsr [rsp]    ; set MXCSR to 0x1F80
     add     rsp, 8   ; let's clean stack, it shouldn't matter, but let's keep it clean
                      ; for further uses
-    push    0x202
-    popf             ; set lower part of rFLAGS to 0
+    push    0x002
+    popf             ; clear rFLAGS (IF stays off for SVSM trustlets)
     mov     rsp, rsi ; set stack pointer to second arg
     jmp     rdi      ; jmp to entry point (first arg)

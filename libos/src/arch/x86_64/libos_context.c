@@ -270,8 +270,8 @@ void prepare_sigframe(PAL_CONTEXT* context, siginfo_t* siginfo, void* handler, v
     context->rip = (uint64_t)handler;
     context->rsp = stack;
     /* x64 SysV ABI mandates that DF flag is cleared and states that rest of flags is *not*
-     * preserved across function calls, hence we just set flags to a default value (IF). */
-    context->efl = 0x202;
+     * preserved across function calls, hence we just set flags to a default value (unset IF). */
+    context->efl = 0x002;
     /* If handler was defined as variadic/without prototype it would expect the number of vector
      * register arguments in `rax`. */
     context->rax = 0;
