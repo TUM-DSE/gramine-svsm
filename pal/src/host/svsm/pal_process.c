@@ -21,7 +21,10 @@ int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
 }
 
 noreturn void _PalProcessExit(int exitcode) {
-    pal_svsm_exit(-1);
+    /* Forward the real exit code: for binary-entrypoint trustlets it
+       is the result the guest receives (monitor pal_svsm_exit ->
+       rdx -> guest generic.values[1]). Was hardcoded -1. */
+    pal_svsm_exit(exitcode);
     die_or_inf_loop();
 }
 

@@ -1,4 +1,7 @@
-FROM ubuntu:latest
+# Pinned: mod/2/libpal.so embeds gcc-13 include paths (= 24.04), and
+# glibc 2.39 does not build with newer toolchains (gcc 15's kernel
+# headers redefine OPEN_TREE_CLONE -> -Werror failure).
+FROM ubuntu:24.04
 RUN apt-get update
 RUN apt-get install -y build-essential \
     autoconf bison gawk nasm ninja-build pkg-config python3 python3-click \
