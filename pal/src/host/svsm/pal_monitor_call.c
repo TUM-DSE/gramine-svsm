@@ -48,6 +48,19 @@ void pal_svsm_exit(int exitcode) {
     monitor_call(&data);
 }
 
+/* RuntimeInfo (0x4FFFFFEF): rbx = image index -> rcx = size in bytes (0 = none),
+ * rdx = base VA. The monitor mapped the image at zygote creation; this only asks where. */
+void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFEF;
+    data.rbx = index;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    *out_size = data.rcx;
+    *out_base = (void*)data.rdx;
+}
+
 void pal_svsm_debug_putc(char c){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFD;

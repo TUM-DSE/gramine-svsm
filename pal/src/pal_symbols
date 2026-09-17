@@ -1,6 +1,7 @@
 PalVirtualMemoryAlloc
 PalVirtualMemoryFree
 PalVirtualMemoryProtect
+PalRuntimeImageMap
 PalSetMemoryBookkeepingUpcalls
 PalThreadCreate
 PalThreadYieldExecution

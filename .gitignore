@@ -52,3 +52,7 @@ ncscope.*
 
 #static files
 libos/src/fs/static/*
+
+# container build outputs (--prefix/--bindir of build.sh)
+/python-libs/
+/bin/

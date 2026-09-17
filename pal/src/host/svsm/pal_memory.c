@@ -23,6 +23,17 @@ int _PalVirtualMemoryProtect(void* addr, uint64_t size, pal_prot_flags_t prot) {
     return pal_svsm_mprotect(addr, size, prot);
 }
 
+/* Zero-copy alias of runtime image pages: the monitor's map call with the
+ * runtime pseudo-fd (-3), like the LibOS blob's -2. */
+#define FD_RUNTIME_IMAGE (-3)
+int _PalRuntimeImageMap(void* addr, uint64_t size, pal_prot_flags_t prot, uint64_t image_off) {
+    if (!g_pal_public_state.runtime_images[0].size)
+        return -PAL_ERROR_NOTIMPLEMENTED;
+    if (!pal_svsm_mmap(addr, size, prot, prot, FD_RUNTIME_IMAGE, image_off))
+        return -PAL_ERROR_DENIED;
+    return 0;
+}
+
 unsigned long _PalMemoryQuota(void) {
     return g_pal_public_state.memory_address_end - g_pal_public_state.memory_address_start;
 }

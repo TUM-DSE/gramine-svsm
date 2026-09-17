@@ -1,2 +1,1 @@
-int init_static_fs_test(void);
-int init_static_fs_lib(void);
+/* Empty since the LibOS/runtime split; fs.py fills it for a legacy bake. */

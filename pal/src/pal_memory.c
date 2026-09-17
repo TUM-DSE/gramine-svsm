@@ -36,6 +36,16 @@ int PalVirtualMemoryProtect(void* addr, size_t size, pal_prot_flags_t prot) {
     return _PalVirtualMemoryProtect(addr, size, prot);
 }
 
+int PalRuntimeImageMap(void* addr, size_t size, pal_prot_flags_t prot, uint64_t image_off) {
+    if (!addr || !IS_ALLOC_ALIGNED_PTR(addr) || !size || !IS_ALLOC_ALIGNED(size) ||
+            !IS_ALLOC_ALIGNED(image_off) || (prot & PAL_PROT_WRITE)) {
+        return -PAL_ERROR_INVAL;
+    }
+
+    /* An alias is never a private copy: WRITECOPY would make the host copy. */
+    return _PalRuntimeImageMap(addr, size, prot & ~PAL_PROT_WRITECOPY, image_off);
+}
+
 /*
  * Allocator for PAL internal memory.
  * There are a few phases, which differ in how memory is allocated.

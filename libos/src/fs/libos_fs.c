@@ -80,6 +80,10 @@ int init_fs(void) {
     if ((ret = init_etcfs()) < 0)
         goto err;
 
+    /* Runtime images mapped by the monitor (LibOS/runtime split); a no-op without one. */
+    if ((ret = init_image_fs()) < 0)
+        goto err;
+
     #include "libos_fs_extension.h"
 
     return 0;

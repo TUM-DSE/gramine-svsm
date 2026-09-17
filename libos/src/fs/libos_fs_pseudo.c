@@ -23,7 +23,7 @@ static struct pseudo_node* g_pseudo_nodes[PSEUDO_MAX_NODES];
 static unsigned int g_pseudo_node_count;
 
 /* Find a root node with given name. */
-static struct pseudo_node* pseudo_find_root(const char* name) {
+struct pseudo_node* pseudo_find_root(const char* name) {
     struct pseudo_node* node;
     LISTP_FOR_EACH_ENTRY(node, &g_pseudo_roots, siblings) {
         if (node->name && strcmp(name, node->name) == 0) {
@@ -126,7 +126,11 @@ static int pseudo_open(struct libos_handle* hdl, struct libos_dentry* dent, int 
         case PSEUDO_STR: {
             char* str;
             size_t len;
-            if (node->str.load) {
+            if (node->str.static_data) {
+                /* Runtime-image file: the bytes live in the mapped image, no copy. */
+                str = (char*)node->str.static_data;
+                len = node->str.static_size;
+            } else if (node->str.load) {
                 ret = node->str.load(dent, &str, &len);
                 if (ret < 0)
                     return ret;
@@ -251,6 +255,14 @@ static int pseudo_istat(struct libos_dentry* dent, struct libos_inode* inode, st
             buf->st_rdev = makedev(node->dev.major, node->dev.minor);
             buf->st_nlink = 1;
             break;
+        case PSEUDO_STR:
+            buf->st_nlink = 1;
+            if (node->str.static_data) {
+                buf->st_size    = node->str.static_size;
+                buf->st_blksize = 4096;
+                buf->st_blocks  = (node->str.static_size + 511) / 512;
+            }
+            break;
         default:
             buf->st_nlink = 1;
             break;
@@ -361,6 +373,12 @@ static ssize_t pseudo_write(struct libos_handle* hdl, const void* buf, size_t si
             assert(hdl->type == TYPE_STR);
 
             ssize_t ret;
+
+            /* Static content (baked or runtime-image file): `mem_file_write` would realloc a
+             * pointer into the image. The nodes are 0444/0555, so only an O_RDWR open of a
+             * baked 0777 file gets here. */
+            if (node->str.no_free)
+                return -EACCES;
 
             lock(&hdl->lock);
 
@@ -587,6 +605,20 @@ struct pseudo_node* pseudo_add_dev(struct pseudo_node* parent_node, const char* 
     return node;
 }
 
+/* Runtime-image files are mapped without copying when the mapping is not writable
+ * (text/rodata of every library, the interpreter); everything else is the generic
+ * allocate-and-read emulation. */
+static int pseudo_mmap(struct libos_handle* hdl, void* addr, size_t size, int prot, int flags,
+                       uint64_t offset) {
+    struct pseudo_node* node = hdl->inode->data;
+    if (node->type == PSEUDO_STR && node->str.static_data) {
+        int ret = image_file_mmap(node, addr, size, prot, flags, offset);
+        if (ret != -ENOSYS)
+            return ret;
+    }
+    return generic_emulated_mmap(hdl, addr, size, prot, flags, offset);
+}
+
 struct libos_fs_ops pseudo_fs_ops = {
     .mount    = &pseudo_mount,
     .hstat    = &pseudo_hstat,
@@ -597,7 +629,7 @@ struct libos_fs_ops pseudo_fs_ops = {
     .close    = &pseudo_close,
     .flush    = &pseudo_flush,
     .poll     = &pseudo_poll,
-    .mmap     = &generic_emulated_mmap,
+    .mmap     = &pseudo_mmap,
 };
 
 struct libos_d_ops pseudo_d_ops = {

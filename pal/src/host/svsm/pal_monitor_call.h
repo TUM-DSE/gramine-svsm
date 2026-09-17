@@ -23,6 +23,8 @@ int pal_svsm_virt_alloc(void* addr, uint64_t size, pal_prot_flags_t prot);
 int pal_svsm_mprotect(void* addr, uint64_t size, pal_prot_flags_t prot);
 void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t offset);
 int pal_svsm_set_tcb(PAL_TCB* tcb);
+/* RuntimeInfo: where the monitor mapped runtime image `index` (size 0 = none). */
+void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size);
 
 typedef enum {
     PAL_SVSM_GUEST_REQUEST_FILEATTR=0,

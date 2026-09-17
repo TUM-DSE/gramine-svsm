@@ -125,6 +125,15 @@ struct pal_dns_host_conf {
     char hostname[PAL_HOSTNAME_MAX];
 };
 
+/* A runtime image the host mapped read-only into the process (svsm: the monitor maps it at
+ * zygote creation and reports it through the RuntimeInfo process call). size 0 = none. The
+ * LibOS mounts each one as pseudo roots (libos/src/fs/libos_fs_image.c). */
+struct pal_runtime_image {
+    void* base;
+    size_t size;
+};
+#define PAL_MAX_RUNTIME_IMAGES 4
+
 /* Part of PAL state which is shared between all PALs and accessible (read-only) by the binary
  * started by PAL (usually our LibOS). */
 struct pal_public_state {
@@ -155,6 +164,9 @@ struct pal_public_state {
     struct pal_initial_mem_range* initial_mem_ranges; /*!< array of initial memory ranges, see
                                                            `pal_memory.c` for more details */
     size_t initial_mem_ranges_len;
+
+    struct pal_runtime_image runtime_images[PAL_MAX_RUNTIME_IMAGES]; /*!< see above; unused
+                                                                        entries have size 0 */
 
     /*
      * Host information
@@ -241,6 +253,22 @@ int PalVirtualMemoryFree(void* addr, size_t size);
  * `[addr; addr+size)` must be a continuous memory range without any holes.
  */
 int PalVirtualMemoryProtect(void* addr, size_t size, pal_prot_flags_t prot);
+
+/*!
+ * \brief Map a range of the runtime image (pal_public_state.runtime_images[0]) at `addr`
+ *        without copying it.
+ *
+ * \param addr       Destination, aligned at the allocation alignment.
+ * \param size       Aligned size.
+ * \param prot       See #PalVirtualMemoryAlloc; must not include PAL_PROT_WRITE.
+ * \param image_off  Aligned offset inside the image (the file's `data_off` plus the mapping
+ *                   offset).
+ *
+ * The host aliases the image's pages read-only (svsm: the monitor maps the runtime store's
+ * physical pages, LibOS/runtime split); a later #PalVirtualMemoryProtect to writable turns the
+ * range into a private copy. Hosts without runtime images return -PAL_ERROR_NOTIMPLEMENTED.
+ */
+int PalRuntimeImageMap(void* addr, size_t size, pal_prot_flags_t prot, uint64_t image_off);
 
 /*!
  * \brief Set upcalls for memory bookkeeping

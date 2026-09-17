@@ -105,6 +105,18 @@ noreturn void pal_svsm_main(void)
     if(!g_pal_public_state.manifest_root)
         INIT_FAIL_MANIFEST(errbuf);
 
+    /* Runtime images (LibOS/runtime split): the monitor mapped them at zygote creation,
+       ask where. The LibOS mounts them in init_fs(). */
+    for (size_t i = 0; i < PAL_MAX_RUNTIME_IMAGES; i++) {
+        void* base = NULL;
+        size_t size = 0;
+        pal_svsm_runtime_info(i, &base, &size);
+        g_pal_public_state.runtime_images[i].base = base;
+        g_pal_public_state.runtime_images[i].size = size;
+        if (!size)
+            break;
+    }
+
     // Entering the actual pal_main
 
     pal_main(instance_id, parent_process, NULL, NULL, NULL, NULL);

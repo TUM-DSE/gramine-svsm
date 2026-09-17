@@ -27,6 +27,7 @@ libos_sources = files(
     'fs/libos_fs.c',
     'fs/libos_fs_encrypted.c',
     'fs/libos_fs_hash.c',
+    'fs/libos_fs_image.c',
     'fs/libos_fs_lock.c',
     'fs/libos_fs_mem.c',
     'fs/libos_fs_path.c',

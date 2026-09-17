@@ -68,7 +68,9 @@ struct libos_dev_ops {
 #define PSEUDO_PERM_FILE_RW PERM_rw_rw_rw_
 
 /* Maximum count of created nodes (`pseudo_add_*` calls) */
-#define PSEUDO_MAX_NODES 2048
+/* Raised from 2048 for runtime images (libos_fs_image.c): a pip tree with torch
+ * is ~1.5k files plus directories, and proc/sys/dev share the table. */
+#define PSEUDO_MAX_NODES 65536
 
 /* Used to represent cpumaps like "00000000,ffffffff,00000000,ffffffff".
  * Note: Used to allocate on stack; increase with caution or use malloc instead. */
@@ -148,6 +150,17 @@ struct pseudo_node {
             bool no_free;
 
             /*
+             * Static content (runtime image files, libos_fs_image.c): when `static_data` is
+             * set, `open` uses it directly instead of `load` (no copy, never freed - see
+             * `no_free`), `stat` reports `static_size`, and `image_off` is the offset of the
+             * data inside the image the node came from (page aligned; used to map it without
+             * copying).
+             */
+            const char* static_data;
+            size_t static_size;
+            uint64_t image_off;
+
+            /*
              * Invoked on every write operation.
              *
              * This is used to implement writable files similar to the ones in Linux sysfs. The
@@ -192,6 +205,9 @@ int pseudo_parse_ulong(const char* str, unsigned long max_value, unsigned long* 
 
 struct pseudo_node* pseudo_add_root_dir(const char* name);
 
+/* Root (top-level pseudo directory) by name, or NULL. */
+struct pseudo_node* pseudo_find_root(const char* name);
+
 struct pseudo_node* pseudo_add_dir(struct pseudo_node* parent_ent, const char* name);
 
 struct pseudo_node* pseudo_add_link(struct pseudo_node* parent_ent, const char* name,
@@ -203,6 +219,14 @@ struct pseudo_node* pseudo_add_str(struct pseudo_node* parent_ent, const char* n
 struct pseudo_node* pseudo_add_dev(struct pseudo_node* parent_ent, const char* name);
 
 extern struct libos_fs pseudo_builtin_fs;
+
+/* runtime images (libos_fs_image.c) */
+
+int init_image_fs(void);
+/* Zero-copy mmap of an image file (`node->str.static_data` set); -ENOSYS when the request
+ * needs a private writable copy and the caller should fall back to generic_emulated_mmap. */
+int image_file_mmap(struct pseudo_node* node, void* addr, size_t size, int prot, int flags,
+                    uint64_t offset);
 
 /* procfs */
 
