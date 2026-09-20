@@ -39,6 +39,15 @@ void pal_svsm_device_mmio(uint64_t id, void** out_base, size_t* out_size, uint64
  * completed through a GHCB by a #VC handler, and a vault has neither.
  * Returns the value read, or all ones if the access was refused. */
 uint64_t pal_svsm_device_io(uint64_t offset, uint32_t width, int write, uint64_t value);
+/* TimeInfo (0x4FFFFFEA): how many TSC ticks make a second, and how many
+ * microseconds to add to a converted reading to get wall clock (0 = the
+ * monitor does not know what time it is). A vault has no other clock. */
+void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us);
+/* Nop (0x4FFFFFF5): a round trip to the monitor that does nothing. The only
+ * way a vault can give the vCPU back - interrupts are off inside it, so a
+ * spin produces no exits at all and the monitor cannot take the core back,
+ * run its watchdog, or let the host in until the vault calls out. */
+void pal_svsm_nop(void);
 /* Declare what this vault offers other vaults - the thing that makes it a
  * service. `name` is up to eight ASCII bytes packed little-endian. */
 int pal_svsm_service_declare(uint64_t name);

@@ -5,6 +5,7 @@ common_src_utils = files(
 
 common_src_internal = files(
     'avl_tree.c',
+    'cpu_relax.c',
     'init.c',
     'location.c',
     'pal_error.c',

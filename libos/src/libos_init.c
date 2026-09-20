@@ -6,6 +6,7 @@
  */
 
 #include "api.h"
+#include "cpu.h"
 #include "hex.h"
 #include "init.h"
 #include "libos_checkpoint.h"
@@ -372,6 +373,18 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
     assert(g_pal_public_state);
 
     g_log_level = g_pal_public_state->log_level;
+
+    /*
+     * On a host where every thread of a process shares one CPU and is
+     * scheduled cooperatively (the SVSM PAL), a spin that waits on another
+     * thread has to give that thread a turn or it never ends. LibOS has
+     * three such spins - waiting for a cloned thread to finish initialising,
+     * for an exiting thread to have really exited, and for the IPC worker to
+     * stop - and each would hang the process outright. See CPU_RELAX in
+     * cpu.h; this is LibOS's own copy of the hook.
+     */
+    if (g_pal_public_state->cooperative_threading)
+        g_cpu_relax_yield = PalThreadYieldExecution;
 
     /* create the initial TCB, libos can not be run without a tcb */
     libos_tcb_init();

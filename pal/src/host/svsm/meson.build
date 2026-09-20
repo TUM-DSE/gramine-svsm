@@ -27,6 +27,7 @@ libpal_svsm = shared_library('pal',
     'pal_threading.c',
     'pal_monitor_call.c',
     'arch/x86_64/pal_start.S',
+    'arch/x86_64/pal_switch.S',
     pal_common_sources,
 
     include_directories: [

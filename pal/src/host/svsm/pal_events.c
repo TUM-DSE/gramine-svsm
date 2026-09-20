@@ -6,8 +6,10 @@
  */
 
 #include "assert.h"
+#include "pal.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "pal_svsm.h"
 #include "spinlock.h"
 
 int _PalEventCreate(PAL_HANDLE* handle_ptr, bool init_signaled, bool auto_clear) {
@@ -32,7 +34,13 @@ void _PalEventSet(PAL_HANDLE handle) {
     bool need_wake = handle->event.waiters_cnt > 0;
     spinlock_unlock(&handle->event.lock);
     if (need_wake) {
-        log_error("Need Wake not implemented");
+        /* Everyone parked on this handle, not just one, even for an
+         * auto-clear event: they re-test the flag on the way out of
+         * pal_svsm_thread_block and whoever loses goes straight back to
+         * sleep. Waking one would mean tracking which, and with a handful of
+         * contexts on one CPU that bookkeeping costs more than the extra
+         * pass round the ring. */
+        pal_svsm_thread_wake_all(handle);
     }
 }
 
@@ -42,8 +50,24 @@ void _PalEventClear(PAL_HANDLE handle) {
     spinlock_unlock(&handle->event.lock);
 }
 
+/*
+ * Wait for the event, for `*timeout_us` microseconds, or until interrupted.
+ *
+ * This used to spin forever inside log_error("Sleep not implemented"), and
+ * because each log line is a monitor call it flooded the console while doing
+ * it. It also never looked at `timeout_us`. Everything that blocks in LibOS
+ * comes through here - the futex (sys/libos_futex.c) and nanosleep
+ * (sys/libos_sleep.c) among them - so until now time.sleep() hung a vault and
+ * no lock could ever be waited on.
+ *
+ * On return `*timeout_us` is what is left of the timeout, and -TRYAGAIN means
+ * it ran out: the same contract as the Linux PAL, which LibOS relies on.
+ */
 int _PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
-    int ret;
+    int ret = 0;
+    uint64_t deadline_us = 0;
+    if (timeout_us)
+        deadline_us = pal_svsm_now_usec() + *timeout_us;
 
     spinlock_lock(&handle->event.lock);
     handle->event.waiters_cnt++;
@@ -61,17 +85,35 @@ int _PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
             break;
         }
 
+        /* Unlocked across the park, so that whoever is going to signal this
+         * event can take the lock when the scheduler gives them the CPU. A
+         * lock held across a switch would deadlock outright: there is one
+         * CPU, so the holder is the only thread that can release it. */
         spinlock_unlock(&handle->event.lock);
-
-        log_error("Sleep not implemented");
-
+        enum pal_svsm_wait_result wr =
+            pal_svsm_thread_block(handle, timeout_us ? &deadline_us : NULL);
         spinlock_lock(&handle->event.lock);
 
+        if (wr == PAL_SVSM_WAIT_TIMEOUT) {
+            ret = -PAL_ERROR_TRYAGAIN;
+            break;
+        }
+        if (wr == PAL_SVSM_WAIT_INTERRUPTED) {
+            ret = -PAL_ERROR_INTERRUPTED;
+            break;
+        }
+        /* Woken: round again and re-test, because another waiter may have
+         * taken the signal first. */
     }
 
     handle->event.waiters_cnt--;
     spinlock_unlock(&handle->event.lock);
 
+    if (timeout_us) {
+        uint64_t now = pal_svsm_now_usec();
+        *timeout_us = now >= deadline_us ? 0 : deadline_us - now;
+        assert(ret != -PAL_ERROR_TRYAGAIN || *timeout_us == 0);
+    }
     return ret;
 }
 

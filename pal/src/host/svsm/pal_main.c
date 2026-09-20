@@ -29,6 +29,108 @@ static void pal_initilize_memory() {
 
 }
 
+/*
+ * The one CPU a vault has.
+ *
+ * Nothing filled this in before, so threads_cnt was 0 and every caller that
+ * asks the system how many CPUs there are got zero back: os.cpu_count(),
+ * len(sched_getaffinity(0)), nproc. A library that sizes a worker pool by
+ * that divides by zero. /proc/cpuinfo was empty for the same reason.
+ *
+ * One thread on one core in one socket in one NUMA node is the truth as a
+ * vault can see it: the monitor runs its single VMSA on whichever vCPU it
+ * likes, and the threads in pal_threading.c share that one CPU. Caches and
+ * NUMA distances are left empty rather than invented - /sys entries for them
+ * simply do not appear, which is a shape Linux itself produces.
+ */
+static struct pal_cpu_thread_info g_topo_thread;
+static struct pal_cpu_core_info   g_topo_core;
+static struct pal_socket_info     g_topo_socket;
+static struct pal_numa_node_info  g_topo_node;
+static size_t                     g_topo_distance = 10;  /* local, as ACPI SLIT spells it */
+
+static void pal_initialize_topology(void) {
+    g_topo_thread.is_online = true;
+    g_topo_thread.core_id   = 0;
+    for (size_t i = 0; i < MAX_CACHES; i++)
+        g_topo_thread.ids_of_caches[i] = (size_t)-1;   /* no cache is described */
+
+    g_topo_core.socket_id = 0;
+    g_topo_core.node_id   = 0;
+
+    g_topo_node.is_online = true;
+    for (size_t i = 0; i < HUGEPAGES_MAX; i++)
+        g_topo_node.nr_hugepages[i] = 0;
+
+    struct pal_topo_info* topo = &g_pal_public_state.topo_info;
+    topo->caches_cnt     = 0;
+    topo->caches         = NULL;
+    topo->threads_cnt    = 1;
+    topo->threads        = &g_topo_thread;
+    topo->cores_cnt      = 1;
+    topo->cores          = &g_topo_core;
+    topo->sockets_cnt    = 1;
+    topo->sockets        = &g_topo_socket;
+    topo->numa_nodes_cnt = 1;
+    topo->numa_nodes     = &g_topo_node;
+    topo->numa_distance_matrix = &g_topo_distance;
+}
+
+/*
+ * What /proc/cpuinfo says about that CPU. Read out of CPUID, which reaches
+ * the monitor as a reflected #VC and is answered from the SNP CPUID page.
+ * The vendor and brand strings must exist because /proc/cpuinfo prints them
+ * with %s; when the CPUID page has no brand leaves, say so rather than print
+ * whatever happened to be in the buffer.
+ */
+static const char* g_cpu_vendor = "Unknown";
+static char g_cpu_brand[49];
+
+static void pal_initialize_cpu_info(void) {
+    static char vendor[13];
+    uint32_t words[4];
+
+    cpuid(0, 0, words);
+    uint32_t max_leaf = words[0];
+    memcpy(&vendor[0], &words[1], 4);   /* ebx */
+    memcpy(&vendor[4], &words[3], 4);   /* edx */
+    memcpy(&vendor[8], &words[2], 4);   /* ecx */
+    vendor[12] = '\0';
+    if (vendor[0])
+        g_cpu_vendor = vendor;
+
+    uint64_t family = 0, model = 0, stepping = 0;
+    if (max_leaf >= 1) {
+        cpuid(1, 0, words);
+        uint32_t eax = words[0];
+        family   = (eax >> 8) & 0xf;
+        model    = (eax >> 4) & 0xf;
+        stepping = eax & 0xf;
+        if (family == 0xf)
+            family += (eax >> 20) & 0xff;
+        if (family == 0xf || family == 0x6)
+            model += ((eax >> 16) & 0xf) << 4;
+    }
+
+    cpuid(0x80000000, 0, words);
+    if (words[0] >= 0x80000004) {
+        for (uint32_t leaf = 0x80000002, off = 0; leaf <= 0x80000004; leaf++, off += 16) {
+            cpuid(leaf, 0, words);
+            memcpy(&g_cpu_brand[off], words, 16);
+        }
+        g_cpu_brand[48] = '\0';
+    }
+    if (!g_cpu_brand[0])
+        memcpy(g_cpu_brand, "Unknown", sizeof("Unknown"));
+
+    g_pal_public_state.cpu_info.cpu_vendor   = g_cpu_vendor;
+    g_pal_public_state.cpu_info.cpu_brand    = g_cpu_brand;
+    g_pal_public_state.cpu_info.cpu_family   = family;
+    g_pal_public_state.cpu_info.cpu_model    = model;
+    g_pal_public_state.cpu_info.cpu_stepping = stepping;
+    g_pal_public_state.cpu_info.cpu_bogomips = _PalGetBogomips();
+}
+
 noreturn void pal_svsm_main(void) 
 {
 
@@ -40,7 +142,7 @@ noreturn void pal_svsm_main(void)
 	loader_callback callback;
     int ret;
 
-	__UNUSED(first_thread);
+	first_thread = NULL;
 	__UNUSED(arguments);
 	__UNUSED(environments);
 	__UNUSED(callback);
@@ -55,6 +157,10 @@ noreturn void pal_svsm_main(void)
          * work anyway */
         pal_svsm_fail("pal_svsm_set_tcb() failed: ", ret);;
     }
+
+    /* Before anything asks the time. Until this runs, a tick is counted as a
+     * microsecond and every duration is wrong by whatever the clock rate is. */
+    pal_svsm_time_init();
 
     uint64_t start_time;
     ret = _PalSystemTimeQuery(&start_time);
@@ -95,6 +201,20 @@ noreturn void pal_svsm_main(void)
     }
     init_slab_mgr();
     //pal_svsm_fail("After slab", 0);
+
+    pal_initialize_topology();
+    pal_initialize_cpu_info();
+
+    /* Threads in a vault are cooperative contexts, not CPUs; see
+     * pal_threading.c. LibOS reads this to decide whether a spin that waits
+     * on another thread has to yield. */
+    g_pal_public_state.cooperative_threading = true;
+
+    /* Needs the slab allocator, and has to be in place before anything can
+     * block or spin - which includes everything below. */
+    ret = pal_svsm_threading_init(&first_thread);
+    if (ret < 0)
+        pal_svsm_fail("pal_svsm_threading_init() failed: ", ret);
 
     void* raw_manifest = MANIFEST_START;
     g_pal_common_state.raw_manifest_data = raw_manifest;
@@ -198,5 +318,5 @@ noreturn void pal_svsm_main(void)
 
     // Entering the actual pal_main
 
-    pal_main(instance_id, parent_process, NULL, NULL, NULL, NULL);
+    pal_main(instance_id, parent_process, first_thread, NULL, NULL, NULL);
 }

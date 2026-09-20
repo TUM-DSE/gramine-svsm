@@ -11,14 +11,60 @@
 #include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
+#include "pal_svsm.h"
 
+/* How fast the clock runs, and where its zero is. Asked of the monitor once
+ * at startup (pal_svsm_time_init) rather than baked in, because libpal.so is
+ * measured and a constant here would make the same digest wrong on a host
+ * with a different clock. Until that call happens these hold the shape of
+ * the old behaviour - a tick counted as a microsecond - so that a failure to
+ * ask is visibly wrong rather than a division by zero. */
+static uint64_t g_tsc_hz = 1000000;
+static uint64_t g_epoch_us = 0;
+static bool g_time_ready = false;
+
+void pal_svsm_time_init(void) {
+    uint64_t hz = 0, epoch = 0;
+    pal_svsm_time_info(&hz, &epoch);
+    /* A frequency the monitor could not answer, or one so low that the
+     * conversion below would be nonsense, is worth dying for: every timeout
+     * in the vault would silently be off by whatever the real ratio is, and
+     * that failure shows up far from here. */
+    if (hz < 1000000)
+        pal_svsm_fail("monitor reported no usable TSC frequency", (int)hz);
+    g_tsc_hz = hz;
+    g_epoch_us = epoch;
+    g_time_ready = true;
+}
+
+uint64_t pal_svsm_tsc_hz(void) {
+    return g_tsc_hz;
+}
+
+static inline uint64_t rdtsc_now(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* Split so that neither half can overflow: the remainder is below g_tsc_hz
+ * (~2.4e9), and 2.4e9 * 1e6 is still well inside 64 bits. */
+uint64_t pal_svsm_tsc_to_usec(uint64_t tsc) {
+    return (tsc / g_tsc_hz) * 1000000ULL + ((tsc % g_tsc_hz) * 1000000ULL) / g_tsc_hz;
+}
+
+uint64_t pal_svsm_now_usec(void) {
+    return pal_svsm_tsc_to_usec(rdtsc_now()) + g_epoch_us;
+}
+
+/* Microseconds, not tick counts. Monotonic and shared by every vault on this
+ * VM, because the guest TSC starts at zero when the VM does; absolute only
+ * once someone tells the monitor the wall clock, which nobody does yet, so
+ * dates inside a vault are still wrong even though durations are right. */
 int _PalSystemTimeQuery(uint64_t* out_usec) {
-   // TODO: Get real time from guest maybe?
-   // For now it is just the clock cycles
-   uint32_t lo, hi;
-   __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-   *out_usec = ((uint64_t)hi << 32 | lo);
-   return 0;
+    assert(g_time_ready);
+    *out_usec = pal_svsm_now_usec();
+    return 0;
 }
 
 int _PalRandomBitsRead(void* buffer, size_t size) {
@@ -88,8 +134,11 @@ int _PalSegmentBaseSet(enum pal_segment_reg reg, uintptr_t addr) {
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
+/* A plain CPUID: the #VC is reflected to the monitor, which answers out of
+ * the SNP CPUID page. It is what /proc/cpuinfo's flags line is built from. */
 int _PalCpuIdRetrieve(uint32_t leaf, uint32_t subleaf, uint32_t values[4]) {
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    cpuid(leaf, subleaf, values);
+    return 0;
 }
 
 int _PalAttestationReport(const void* user_report_data, size_t* user_report_data_size,
@@ -120,7 +169,9 @@ int _PalGetSpecialKey(const char* name, void* key, size_t* key_size) {
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
+/* Linux's delay-loop calibration, which by convention comes out at about
+ * twice the clock in MHz. Derived rather than invented, and only ever read
+ * out of /proc/cpuinfo. */
 double _PalGetBogomips(void) {
-    /* this has to be implemented */
-    return 0.0;
+    return (double)(g_tsc_hz / 1000000ULL) * 2.0;
 }

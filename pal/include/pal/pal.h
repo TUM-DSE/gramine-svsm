@@ -217,6 +217,18 @@ struct pal_public_state {
 
     size_t mem_total;
 
+    /*!
+     * \brief Every thread of a process shares one CPU and is scheduled
+     * cooperatively by the PAL.
+     *
+     * True on the SVSM PAL: the monitor runs one VMSA per vault and refuses a
+     * second entrant to it, so PAL threads are contexts inside one thread of
+     * execution rather than CPUs. The consequence that reaches beyond the PAL
+     * is that a spin waiting on another thread never ends unless spinning
+     * yields, so LibOS installs `g_cpu_relax_yield` when this is set.
+     */
+    bool cooperative_threading;
+
     struct pal_cpu_info cpu_info;
     struct pal_topo_info topo_info; /* received from untrusted host, but sanitized */
 

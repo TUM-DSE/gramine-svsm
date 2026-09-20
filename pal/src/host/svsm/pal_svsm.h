@@ -13,3 +13,67 @@ typedef struct pal_svsm_tcb {
         void*      param;
     };
 } PAL_SVSM_TCB;
+
+static inline PAL_SVSM_TCB* pal_get_svsm_tcb(void) {
+    return (PAL_SVSM_TCB*)pal_get_tcb();
+}
+
+/*
+ * Time (pal_misc.c). A vault has no clock: no RTC, no kvm-clock, no timer
+ * interrupt. rdtsc is the only tick source and the monitor is the only place
+ * that knows what a tick is worth, so ask it once and convert here.
+ */
+void     pal_svsm_time_init(void);
+uint64_t pal_svsm_tsc_hz(void);
+uint64_t pal_svsm_tsc_to_usec(uint64_t tsc);
+uint64_t pal_svsm_now_usec(void);
+
+/*
+ * Threads (pal_threading.c). Cooperative contexts inside the one CPL3
+ * process a vault is - not vCPUs. See the comment at the top of that file
+ * for why, and for what this does and does not buy.
+ */
+enum pal_svsm_thread_state {
+    PAL_SVSM_THREAD_RUNNING = 0,
+    PAL_SVSM_THREAD_RUNNABLE,
+    PAL_SVSM_THREAD_BLOCKED,
+    PAL_SVSM_THREAD_ZOMBIE,
+};
+
+/* Why a blocked thread came back. */
+enum pal_svsm_wait_result {
+    PAL_SVSM_WAIT_WOKEN = 0,   /* somebody signalled what we waited on */
+    PAL_SVSM_WAIT_TIMEOUT,     /* the deadline passed */
+    PAL_SVSM_WAIT_INTERRUPTED, /* _PalThreadResume, i.e. a signal is pending */
+};
+
+/* Build the first thread's handle and make it current. Must run after the
+ * slab allocator is up and before anything can block. */
+int pal_svsm_threading_init(PAL_HANDLE* out_first_thread);
+
+/* Park the caller until woken, until `deadline_us` (absolute, as
+ * pal_svsm_now_usec reports; NULL = forever), or until resumed. `waiting_on`
+ * is the handle being waited for, so a wake can find just its waiters; NULL
+ * parks against nothing in particular. */
+enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
+                                                const uint64_t* deadline_us);
+
+/* Make every thread parked on `waiting_on` runnable. Safe to call with no
+ * waiters. */
+void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on);
+
+/* The same, for threads waiting on something pollable rather than on one
+ * handle: a poll may be watching several handles at once, so it parks
+ * against the whole class and re-tests when woken. pal_svsm_poll_wake is
+ * what a pipe write (or close) calls. */
+enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us);
+void pal_svsm_poll_wake(void);
+
+/*
+ * Pipes (pal_pipes.c). Both ends are in this address space, so what a poll
+ * wants to know is answerable here; pal_object.c asks.
+ */
+size_t pal_svsm_pipe_readable(PAL_HANDLE handle);
+bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
+bool   pal_svsm_pipe_peer_gone(PAL_HANDLE handle);
+bool   pal_svsm_pipesrv_pending(PAL_HANDLE handle);

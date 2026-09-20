@@ -121,6 +121,29 @@ int pal_svsm_service_declare(uint64_t name) {
     return data.rcx == 0 ? 0 : -1;
 }
 
+/* TimeInfo (0x4FFFFFEA): -> rcx = TSC ticks per second, rdx = microseconds
+ * from the epoch to this VM's zero, or 0 if unknown. */
+void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFEA;
+    data.rbx = 0;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    *out_tsc_hz   = data.rcx;
+    *out_epoch_us = data.rdx;
+}
+
+/* Nop (0x4FFFFFF5): costs one exit and does nothing, which is the point. */
+void pal_svsm_nop(void) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFF5;
+    data.rbx = 0;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+}
+
 void pal_svsm_debug_putc(char c){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFD;

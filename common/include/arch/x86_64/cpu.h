@@ -120,7 +120,30 @@ static noreturn void die_or_inf_loop(void) {
     __builtin_unreachable();
 }
 
-#define CPU_RELAX() __asm__ volatile("pause")
+/*
+ * A hint that this thread is spinning and cannot make progress by itself.
+ *
+ * On most hosts a thread is a CPU and the thing it waits for is running
+ * somewhere else, so PAUSE is the whole story. On a host where every thread
+ * of a process shares one CPU and is scheduled cooperatively - the SVSM PAL,
+ * where the monitor runs one VMSA per vault and refuses a second entrant to
+ * it - a spin that waits on another thread can never end, because the thread
+ * it waits for cannot run until this one stops spinning. Such a host installs
+ * a yield here at startup; for everyone else this is one branch on a pointer
+ * that is never set.
+ *
+ * LibOS and each PAL have their own copy of the pointer (they are separate
+ * shared objects); both consult pal_public_state::cooperative_threading to
+ * decide whether to set it.
+ */
+extern void (*g_cpu_relax_yield)(void);
+
+#define CPU_RELAX()                     \
+    do {                                \
+        __asm__ volatile("pause");      \
+        if (g_cpu_relax_yield)          \
+            g_cpu_relax_yield();        \
+    } while (0)
 
 /* some non-Intel clones support out of order store; WMB() ceases to be a nop for these */
 #define MB()  __asm__ __volatile__("mfence" ::: "memory")
