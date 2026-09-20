@@ -15,6 +15,7 @@
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
 #include "pal_rtld.h"
+#include "toml_utils.h"
 
 #define MONITOR_PAGE_SIZE 4096
 #define MANIFEST_START (void*)0x10000000000
@@ -115,6 +116,30 @@ noreturn void pal_svsm_main(void)
         g_pal_public_state.runtime_images[i].size = size;
         if (!size)
             break;
+    }
+
+    /* Device window: memory this vault and the HOST can both see. Only when
+     * the manifest asks for it - it is the one region of a vault the host
+     * can read, so which vaults have one is part of what the manifest
+     * measures, not something the runtime decides. Absent key = no window,
+     * which is every vault that exists today. */
+    int64_t window_pages = 0;
+    toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
+    if (manifest_svsm)
+        toml_int_in(manifest_svsm, "device_window_pages", 0, &window_pages);
+    if (window_pages > 0) {
+        void* base = NULL;
+        size_t size = 0;
+        pal_svsm_device_window((uint64_t)window_pages, &base, &size);
+        /* The monitor writes {magic, gpa, size, base} at offset 0. Checking
+         * the magic is how this side knows it got a window and not a
+         * coincidence, and the second word is the physical address a device
+         * descriptor would name - the only way a vault learns one. */
+        if (base && size >= 32 && ((volatile uint64_t*)base)[0] == 0x4D56445700000001ULL) {
+            g_pal_public_state.device_window.base = base;
+            g_pal_public_state.device_window.size = size;
+            g_pal_public_state.device_window.gpa  = ((volatile uint64_t*)base)[1];
+        }
     }
 
     // Entering the actual pal_main

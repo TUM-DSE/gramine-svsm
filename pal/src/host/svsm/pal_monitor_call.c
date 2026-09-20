@@ -61,6 +61,23 @@ void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size) {
     *out_base = (void*)data.rdx;
 }
 
+/* DeviceWindow (0x4FFFFFEE): rbx = pages wanted (0 = only ask) -> rcx = size
+ * in bytes (0 = none), rdx = base VA. Deliberately the same shape as
+ * RuntimeInfo. The window's first four words are {magic, guest-physical
+ * address, size, base VA} written by the monitor, so the physical address a
+ * descriptor needs is read from the window itself rather than carried in a
+ * third register - and a window whose magic is wrong is not a window. */
+void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFEE;
+    data.rbx = pages;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    *out_size = data.rcx;
+    *out_base = (void*)data.rdx;
+}
+
 void pal_svsm_debug_putc(char c){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFD;

@@ -25,6 +25,11 @@ void* pal_svsm_mmap(void* addr, size_t size, int prot, int flags, int fd, size_t
 int pal_svsm_set_tcb(PAL_TCB* tcb);
 /* RuntimeInfo: where the monitor mapped runtime image `index` (size 0 = none). */
 void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size);
+/* DeviceWindow: memory the HOST can also see, for descriptor rings and the
+ * buffers they point at. `pages` = 0 only asks what this vault already has.
+ * The guest-physical address is not returned here; it is the second word of
+ * the header the monitor writes at the start of the window. */
+void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
 
 typedef enum {
     PAL_SVSM_GUEST_REQUEST_FILEATTR=0,

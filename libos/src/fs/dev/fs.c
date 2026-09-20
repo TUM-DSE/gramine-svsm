@@ -111,6 +111,76 @@ static int dev_tty_poll(struct libos_handle* hdl, int in_events, int* out_events
     return -ENOSYS;
 }
 
+/*
+ * /dev/mvwindow - the vault's device window (see PLAN.md "A device driver in
+ * a vault"). Memory this process and the HOST can both see: the monitor
+ * carved it from its pool, converted it to host-shared and mapped it here
+ * without the encryption bit, and the PAL asked for it at startup because
+ * the manifest said `svsm.device_window_pages`.
+ *
+ * It exists as a file rather than only as a pointer so that ordinary code -
+ * a driver, or a test written in Python - can reach it without a special
+ * API. Reads and writes go straight to the memory; there is nothing
+ * underneath and no copy in between.
+ *
+ * The first 32 bytes are the monitor's header {magic, guest-physical
+ * address, size, base}. They are readable, and writable like the rest: this
+ * is the vault's own memory and the monitor does not read it back. A vault
+ * that overwrites its own header only loses the physical address it needs
+ * for descriptors.
+ */
+static bool dev_mvwindow_present(void) {
+    return g_pal_public_state->device_window.size != 0;
+}
+
+static ssize_t dev_mvwindow_rw(struct libos_handle* hdl, void* buf, size_t count, bool write) {
+    if (!dev_mvwindow_present())
+        return -ENODEV;
+
+    char* base = g_pal_public_state->device_window.base;
+    size_t size = g_pal_public_state->device_window.size;
+
+    lock(&hdl->lock);
+    file_off_t pos = hdl->pos;
+    if (pos < 0 || (size_t)pos >= size) {
+        unlock(&hdl->lock);
+        return write ? -ENOSPC : 0;   /* reading past the end is EOF */
+    }
+    size_t avail = size - (size_t)pos;
+    if (count > avail)
+        count = avail;
+    if (write)
+        memcpy(base + pos, buf, count);
+    else
+        memcpy(buf, base + pos, count);
+    hdl->pos = pos + count;
+    unlock(&hdl->lock);
+    return count;
+}
+
+static ssize_t dev_mvwindow_read(struct libos_handle* hdl, void* buf, size_t count) {
+    return dev_mvwindow_rw(hdl, buf, count, /*write=*/false);
+}
+
+static ssize_t dev_mvwindow_write(struct libos_handle* hdl, const void* buf, size_t count) {
+    return dev_mvwindow_rw(hdl, (void*)buf, count, /*write=*/true);
+}
+
+static int64_t dev_mvwindow_seek(struct libos_handle* hdl, int64_t offset, int whence) {
+    if (!dev_mvwindow_present())
+        return -ENODEV;
+
+    lock(&hdl->lock);
+    file_off_t pos = hdl->pos;
+    int ret = generic_seek(pos, g_pal_public_state->device_window.size, offset, whence, &pos);
+    if (ret == 0) {
+        hdl->pos = pos;
+        ret = pos;
+    }
+    unlock(&hdl->lock);
+    return ret;
+}
+
 int init_devfs(void) {
     struct pseudo_node* root = pseudo_add_root_dir("dev");
 
@@ -150,6 +220,17 @@ int init_devfs(void) {
     urandom->dev.minor = 9;
     /* /dev/urandom is implemented the same as /dev/random, so it has the same operations */
     urandom->dev.dev_ops = random->dev.dev_ops;
+
+    /* The device window, when the manifest asked for one. The node always
+     * exists - a vault without a window gets ENODEV on use, which is a
+     * clearer answer than a missing path. */
+    struct pseudo_node* mvwindow = pseudo_add_dev(root, "mvwindow");
+    mvwindow->perm = PSEUDO_PERM_FILE_RW;
+    mvwindow->dev.major = 10;   /* misc */
+    mvwindow->dev.minor = 200;
+    mvwindow->dev.dev_ops.read = &dev_mvwindow_read;
+    mvwindow->dev.dev_ops.write = &dev_mvwindow_write;
+    mvwindow->dev.dev_ops.seek = &dev_mvwindow_seek;
 
     /* see `man 4 tty` for more info, including major/minor numbers */
     struct pseudo_node* tty = pseudo_add_dev(root, "tty");

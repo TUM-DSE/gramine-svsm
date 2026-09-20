@@ -134,6 +134,18 @@ struct pal_runtime_image {
 };
 #define PAL_MAX_RUNTIME_IMAGES 4
 
+/* Memory this process and the HOST can both see (svsm: the monitor carves it
+ * from its pool, converts it to host-shared and maps it without the
+ * encryption bit; see the DeviceWindow process call). It exists only when
+ * the manifest asked for it, because it is the one region of a vault the
+ * host can read. `gpa` is the guest-physical address a device descriptor
+ * would name; size 0 = none. */
+struct pal_device_window {
+    void* base;
+    size_t size;
+    uint64_t gpa;
+};
+
 /* Part of PAL state which is shared between all PALs and accessible (read-only) by the binary
  * started by PAL (usually our LibOS). */
 struct pal_public_state {
@@ -167,6 +179,8 @@ struct pal_public_state {
 
     struct pal_runtime_image runtime_images[PAL_MAX_RUNTIME_IMAGES]; /*!< see above; unused
                                                                         entries have size 0 */
+
+    struct pal_device_window device_window; /*!< see above; size 0 = none */
 
     /*
      * Host information
