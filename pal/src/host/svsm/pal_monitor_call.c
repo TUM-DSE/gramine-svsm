@@ -145,13 +145,15 @@ void pal_svsm_nop(void) {
 }
 
 /* SetExceptionEntry (0x4FFFFFE9): rbx = the entry, rcx = where in the TCB
- * the alternate stack is described -> rcx = 0 accepted. */
-int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset) {
+ * the alternate stack is described, rdx = the preempt control block
+ * -> rcx = 0 accepted. */
+int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
+                                 void* preempt_ctl) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFE9;
     data.rbx = (uint64_t)entry;
     data.rcx = tcb_alt_stack_offset;
-    data.rdx = 0;
+    data.rdx = (uint64_t)preempt_ctl;
     monitor_call(&data);
     return data.rcx == 0 ? 0 : -1;
 }

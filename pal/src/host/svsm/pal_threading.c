@@ -65,6 +65,8 @@
 /* void pal_svsm_ctx_switch(void** save_rsp, void* new_rsp, uint64_t new_gs_base) */
 void pal_svsm_ctx_switch(void** save_rsp, void* new_rsp, uint64_t new_gs_base);
 
+static void refresh_preempt_wanted(void);
+
 static PAL_HANDLE g_current = NULL;  /* the running context; NULL until init */
 static size_t g_thread_cnt = 0;
 
@@ -127,6 +129,7 @@ static PAL_HANDLE pick_next(void) {
                     t->thread.timed_out  = true;
                     t->thread.waiting_on = NULL;
                     t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+                    pal_svsm_preempt_update(true);
                 } else if (!have_deadline || t->thread.deadline_us < earliest) {
                     earliest      = t->thread.deadline_us;
                     have_deadline = true;
@@ -180,6 +183,7 @@ static void schedule(void) {
     if (next == prev) {
         assert(prev->thread.state == PAL_SVSM_THREAD_RUNNING);
         reap_stack();
+        refresh_preempt_wanted();
         return;
     }
 
@@ -207,6 +211,7 @@ static void schedule(void) {
     /* Back on prev's stack, however long later. */
     wrfsbase(prev->thread.fsbase);
     reap_stack();
+    refresh_preempt_wanted();
 }
 
 /* Where a new context starts. Reached by the switch stub's `ret`, so GS -
@@ -228,10 +233,47 @@ static noreturn void thread_trampoline(void) {
     _PalThreadExit(/*clear_child_tid=*/NULL);
 }
 
+/*
+ * Whether anything other than the running context has any prospect of
+ * running.
+ *
+ * The monitor reads this to decide whether preempting is worth a frame and
+ * a round trip: a vault with one context has nothing to switch to, and
+ * interrupting it to find that out is pure cost.
+ *
+ * A thread waiting on a deadline counts, and that is not a detail. The
+ * only thing that ever notices a deadline has passed is the scheduler, and
+ * the scheduler only runs when somebody yields - so during a computation
+ * that never yields, a sleeping sibling would stay asleep for ever, its
+ * timer would never fire, and counting only RUNNABLE contexts would say
+ * there was nothing to preempt for and make that permanent. Being
+ * preempted is precisely how the deadline comes to be noticed.
+ *
+ * Recomputed whenever the ring's population or a context's state changes,
+ * which is cheap: a vault has a handful of contexts, not thousands.
+ */
+static void refresh_preempt_wanted(void) {
+    if (!g_current) {
+        pal_svsm_preempt_update(false);
+        return;
+    }
+    PAL_HANDLE t = g_current->thread.next;
+    while (t != g_current) {
+        if (t->thread.state == PAL_SVSM_THREAD_RUNNABLE
+                || (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.has_deadline)) {
+            pal_svsm_preempt_update(true);
+            return;
+        }
+        t = t->thread.next;
+    }
+    pal_svsm_preempt_update(false);
+}
+
 static void ring_insert_after(PAL_HANDLE at, PAL_HANDLE node) {
     node->thread.next = at->thread.next;
     at->thread.next   = node;
     g_thread_cnt++;
+    refresh_preempt_wanted();
 }
 
 /* Caller must not leave g_current pointing at `node`: every walk starts
@@ -244,6 +286,11 @@ static void ring_remove(PAL_HANDLE node) {
     prev->thread.next = node->thread.next;
     node->thread.next = NULL;
     g_thread_cnt--;
+    /* Deliberately NOT refreshing here. This runs with g_current still
+     * pointing at the node being unlinked, whose `next` has just been
+     * cleared, and every walk of the ring starts at g_current - so a walk
+     * from here leaves the ring immediately and reads whatever it lands
+     * on. The caller refreshes once it has re-pointed g_current. */
 }
 
 /* Installed as g_cpu_relax_yield: see the comment on CPU_RELAX in cpu.h. */
@@ -415,6 +462,8 @@ noreturn void _PalThreadExit(int* clear_child_tid) {
     assert(!g_stack_to_reap);
     g_stack_to_reap = self->thread.stack;
     g_current = succ;
+    /* Now that g_current is a node that is still in the ring. */
+    refresh_preempt_wanted();
 
     PAL_HANDLE next = pick_next();
     if (!next)
@@ -443,6 +492,7 @@ int _PalThreadResume(PAL_HANDLE thread_handle) {
     if (thread_handle->thread.state == PAL_SVSM_THREAD_BLOCKED) {
         thread_handle->thread.waiting_on = NULL;
         thread_handle->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+        refresh_preempt_wanted();
     }
     return 0;
 }
@@ -462,6 +512,7 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
     self->thread.deadline_us  = deadline_us ? *deadline_us : 0;
     self->thread.timed_out    = false;
     self->thread.state        = PAL_SVSM_THREAD_BLOCKED;
+    refresh_preempt_wanted();
 
     schedule();
 
@@ -511,6 +562,7 @@ void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on) {
         }
         t = t->thread.next;
     } while (t != g_current);
+    refresh_preempt_wanted();
 }
 
 /* One CPU, and it is not ours to hand out: the monitor decides which vCPU

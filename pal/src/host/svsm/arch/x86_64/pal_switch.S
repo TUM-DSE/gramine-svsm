@@ -52,5 +52,95 @@ pal_svsm_ctx_switch:
     .cfi_endproc
     .size pal_svsm_ctx_switch, .-pal_svsm_ctx_switch
 
+
+/*
+ * Delivery trampoline: save the extended state before any of the PAL runs.
+ *
+ * A fault delivery can get away without this, because the handler usually
+ * ends the process. A preemption cannot: the interrupted code carries on
+ * afterwards, and everything between here and the return - the PAL, the
+ * LibOS, whatever memcpy they call - uses the vector registers. Resuming
+ * with those clobbered does not crash, it computes the wrong thing, and
+ * what it computed wrong turns up later as glibc reporting a corrupted
+ * double-linked list from a memcpy that moved the wrong bytes.
+ *
+ * The hardware has already saved the process's register state into its
+ * VMSA, FPU included, and will restore it - but the process is still
+ * running on that VMSA, so the saved copy is the live one and the PAL is
+ * about to overwrite it. The save has to happen here, in the first
+ * instructions the process executes after being redirected, before the
+ * compiler has had a chance to touch anything.
+ *
+ * Entered exactly as the C function was: rdi = event, rsi = address,
+ * rdx = the interrupted context, on the alternate stack.
+ */
+#define XSAVE_AREA_SIZE 4096
+
+    .text
+
+    .globl pal_svsm_exception_trampoline
+    .type pal_svsm_exception_trampoline, @function
+    .align 16
+pal_svsm_exception_trampoline:
+    .cfi_startproc
+    /* XSAVE takes its mask in edx:eax, and rdx is the third argument -
+     * the interrupted context. Park the arguments somewhere the save
+     * cannot reach before setting the mask, or the context pointer
+     * becomes 0xffffffff and the resume has nothing to go back to. */
+    movq  %rdi, %r8
+    movq  %rsi, %r9
+    movq  %rdx, %r10
+
+    subq  $(XSAVE_AREA_SIZE + 64), %rsp
+    andq  $-64, %rsp                 /* XSAVE wants 64-byte alignment */
+
+    /* XSAVE reads the header it is about to write, so it has to be clear;
+     * a stale XSTATE_BV or a non-zero XCOMP_BV makes XRSTOR refuse it. */
+    xorl  %eax, %eax
+    movq  %rax, 512(%rsp)
+    movq  %rax, 520(%rsp)
+    movq  %rax, 528(%rsp)
+    movq  %rax, 536(%rsp)
+    movq  %rax, 544(%rsp)
+    movq  %rax, 552(%rsp)
+    movq  %rax, 560(%rsp)
+    movq  %rax, 568(%rsp)
+
+    movl  $-1, %eax                  /* every component XCR0 enables */
+    movl  $-1, %edx
+    xsave64 (%rsp)
+
+    movq  %r8,  %rdi                 /* the arguments, as they arrived */
+    movq  %r9,  %rsi
+    movq  %r10, %rdx
+    movq  %rsp, %rcx                 /* 4th argument: where the state went */
+    call  pal_svsm_exception_deliver
+    ud2                              /* deliver never returns */
+    .cfi_endproc
+    .size pal_svsm_exception_trampoline, .-pal_svsm_exception_trampoline
+
+/*
+ * void pal_svsm_exception_resume(PAL_CONTEXT* ctx, void* xsave_area)
+ *
+ * Put the extended state back and ask the monitor to resume from `ctx`.
+ * Nothing between the XRSTOR and the call may touch vector state, which is
+ * why this is written out rather than left to a compiler.
+ */
+    .globl pal_svsm_exception_resume
+    .type pal_svsm_exception_resume, @function
+    .align 16
+pal_svsm_exception_resume:
+    .cfi_startproc
+    movq  %rdi, %rbx                 /* the monitor reads the context here */
+    movl  $-1, %eax
+    movl  $-1, %edx
+    xrstor64 (%rsi)
+
+    movl  $0x4FFFFFE8, %eax          /* ExceptionReturn */
+    cpuid                            /* does not return */
+    ud2
+    .cfi_endproc
+    .size pal_svsm_exception_resume, .-pal_svsm_exception_resume
+
 /* Mark the stack non-executable, as the rest of the PAL is. */
 .section .note.GNU-stack,"",@progbits

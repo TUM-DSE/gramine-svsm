@@ -54,8 +54,10 @@ void pal_svsm_nop(void);
  * `tcb_alt_stack_offset` is where, in the running thread's TCB (which the
  * monitor finds through the GS base), this PAL keeps the top and size of
  * that thread's alternate stack - the stack a fault is delivered on, which
- * must not be the one it interrupted. */
-int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset);
+ * must not be the one it interrupted. `preempt_ctl` is the three-word block
+ * that governs preemption (struct pal_svsm_preempt_ctl). */
+int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
+                                 void* preempt_ctl);
 /* ExceptionReturn (0x4FFFFFE8): resume from `context`. Does not return -
  * restoring rip, rsp and rflags together is what an iretq is for, and this
  * side of the boundary runs at CPL3 and has none. */

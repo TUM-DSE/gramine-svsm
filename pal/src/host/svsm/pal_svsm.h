@@ -55,6 +55,45 @@ void pal_svsm_exception_init(void);
 void pal_svsm_set_text_range(uintptr_t start, uintptr_t end);
 
 /*
+ * What the monitor needs to know to preempt this vault, and what it tells
+ * the vault back. Read by the monitor out of this process's own memory, so
+ * the three words must keep this order.
+ *
+ * `wanted` is the whole of the policy: the scheduler sets it when there is
+ * more than one context to run and clears it when there is not, so a vault
+ * with nothing to switch to is never interrupted to be told so.
+ */
+struct pal_svsm_preempt_ctl {
+    uint64_t wanted;          /* nonzero: something else could run */
+    uint64_t min_interval_us; /* the quantum this vault wants */
+    uint64_t count;           /* preemptions taken; the monitor bumps it */
+    /*
+     * This PAL's own code, which must never be preempted.
+     *
+     * An application or the LibOS can be interrupted anywhere - both are
+     * written for real preemptive threads and take real locks. The PAL is
+     * not: it IS the scheduler, and stopping it in the middle of picking
+     * the next context to run, to go and pick the next context to run,
+     * does not end anywhere good. Measured before this range existed:
+     * preemptions landed inside the PAL and the vault aborted.
+     *
+     * A range rather than a flag because it needs no instrumenting - every
+     * PAL critical section is inside it by construction, and the monitor
+     * pays one comparison.
+     */
+    uint64_t text_start;
+    uint64_t text_end;
+    /* TSC when the PAL was entered for the current delivery, so the
+     * monitor can tell its own cost from the PAL's. */
+    uint64_t entry_tsc;
+};
+
+extern struct pal_svsm_preempt_ctl g_pal_svsm_preempt;
+
+/* Keep `wanted` in step with the ready queue. Called by the scheduler. */
+void pal_svsm_preempt_update(bool others_runnable);
+
+/*
  * Threads (pal_threading.c). Cooperative contexts inside the one CPL3
  * process a vault is - not vCPUs. See the comment at the top of that file
  * for why, and for what this does and does not buy.

@@ -36,16 +36,42 @@
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
 
-/* Set by setup_pal_binary(); used to answer "did this fault happen inside
- * the PAL itself", which the LibOS asks before deciding whether the
- * application may hear about it. */
+/*
+ * How often this vault wants preempting, and whether there is currently
+ * anything to preempt it for.
+ *
+ * A green thread cannot be taken off the CPU by anything inside the vault:
+ * interrupts are off and the IDT has three vectors, so a compute-bound
+ * thread runs until it calls something that yields. The monitor can take
+ * the vCPU back - the hypervisor puts VMPL0 on it - and this is how it
+ * knows whether doing so is worth anything.
+ *
+ * 4 ms is a scheduling quantum, not a timer tick: it is the longest a
+ * runnable sibling should wait behind a thread that never blocks.
+ */
+struct pal_svsm_preempt_ctl g_pal_svsm_preempt = {
+    .wanted = 0,
+    .min_interval_us = 4000,
+    .count = 0,
+    .text_start = 0,
+    .text_end = 0,
+    .entry_tsc = 0,
+};
+
+void pal_svsm_preempt_update(bool others_runnable) {
+    __atomic_store_n(&g_pal_svsm_preempt.wanted, others_runnable ? 1 : 0,
+                     __ATOMIC_RELEASE);
+}
+
+/* This PAL's own code, from the linker script. Used for two things: to
+ * answer "did this fault happen inside the PAL itself", which the LibOS
+ * asks before deciding whether the application may hear about it, and to
+ * tell the monitor where it must not preempt. */
+extern char __text_start;
+extern char __text_end;
+
 static uintptr_t g_pal_text_start;
 static uintptr_t g_pal_text_end;
-
-void pal_svsm_set_text_range(uintptr_t start, uintptr_t end) {
-    g_pal_text_start = start;
-    g_pal_text_end = end;
-}
 
 static bool rip_is_in_pal(uintptr_t rip) {
     /* Unknown range: say no. Claiming a fault was the PAL's own turns a
@@ -62,9 +88,40 @@ static bool rip_is_in_pal(uintptr_t rip) {
  * Entered at CPL3 on the interrupted thread's own stack, below its red
  * zone, with the interrupted context written out by the monitor.
  */
-noreturn void pal_svsm_exception_entry(uint64_t event, uintptr_t addr, PAL_CONTEXT* context);
+noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CONTEXT* context,
+                                         void* xsave_area);
+noreturn void pal_svsm_exception_trampoline(uint64_t event, uintptr_t addr,
+                                            PAL_CONTEXT* context);
+noreturn void pal_svsm_exception_resume(PAL_CONTEXT* context, void* xsave_area);
 
-noreturn void pal_svsm_exception_entry(uint64_t event, uintptr_t addr, PAL_CONTEXT* context) {
+noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CONTEXT* context,
+                                         void* xsave_area) {
+    {
+        uint32_t lo, hi;
+        __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+        g_pal_svsm_preempt.entry_tsc = ((uint64_t)hi << 32) | lo;
+    }
+
+    if (event == PAL_EVENT_INTERRUPTED) {
+        /*
+         * A preemption. The vCPU was taken off this thread between two
+         * instructions and handed to the monitor, which built this frame
+         * and brought us here on the alternate stack.
+         *
+         * Yielding is the whole of it. The scheduler picks another
+         * runnable context and switches to it; this one is left parked in
+         * the middle of this function, on its own alternate stack, and
+         * resumes here when its turn comes round again. The interrupted
+         * context is untouched in `context` throughout, and goes back
+         * below.
+         *
+         * This is what makes a compute-bound thread yield without its
+         * cooperation - the thing the cooperative scheduler could not do.
+         */
+        _PalThreadYieldExecution();
+        pal_svsm_exception_resume(context, xsave_area);
+    }
+
     pal_event_handler_t upcall = _PalGetExceptionHandler((enum pal_event)event);
 
     if (!upcall) {
@@ -81,12 +138,18 @@ noreturn void pal_svsm_exception_entry(uint64_t event, uintptr_t addr, PAL_CONTE
     /* The handler returned, so it wants the context resumed - possibly a
      * different one than arrived, since a handler may set rip to unwind
      * somewhere else. Only the monitor can put it back. */
-    pal_svsm_exception_return(context);
+    pal_svsm_exception_resume(context, xsave_area);
 }
 
 void pal_svsm_exception_init(void) {
-    int ret = pal_svsm_set_exception_entry(&pal_svsm_exception_entry,
-                                           offsetof(PAL_SVSM_TCB, alt_stack_top));
+    g_pal_text_start = (uintptr_t)&__text_start;
+    g_pal_text_end   = (uintptr_t)&__text_end;
+    g_pal_svsm_preempt.text_start = g_pal_text_start;
+    g_pal_svsm_preempt.text_end   = g_pal_text_end;
+
+    int ret = pal_svsm_set_exception_entry(&pal_svsm_exception_trampoline,
+                                           offsetof(PAL_SVSM_TCB, alt_stack_top),
+                                           &g_pal_svsm_preempt);
     if (ret < 0) {
         /* Not fatal: without it a fault retires the vault exactly as it
          * did before, which is the behaviour every vault has had so far. */
