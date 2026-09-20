@@ -137,15 +137,50 @@ noreturn void pal_svsm_main(void)
         }
     }
 
-    /* Device window: memory this vault and the HOST can both see. Only when
-     * the manifest asks for it - it is the one region of a vault the host
-     * can read, so which vaults have one is part of what the manifest
-     * measures, not something the runtime decides. Absent key = no window,
-     * which is every vault that exists today. */
-    int64_t window_pages = 0;
+    /* A device, and memory it can reach - in that order, and only when the
+     * manifest names both.
+     *
+     * The order is not cosmetic: the monitor refuses a window to a vault
+     * that owns no device, so the device has to be claimed first. And the
+     * pairing is a manifest rule, because that is where it can be seen
+     * before anything runs: a window is host-readable by construction, so
+     * asking for one without a device is a hole in this vault's
+     * confidentiality with nothing on the other side of it. It is also not
+     * the way to reach another vault - that is a channel, which is private
+     * between the two of them.
+     *
+     * Absent keys = neither, which is every vault that is not a driver. */
+    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
-    if (manifest_svsm)
+    if (manifest_svsm) {
         toml_int_in(manifest_svsm, "device_window_pages", 0, &window_pages);
+        toml_int_in(manifest_svsm, "device_mmio_vendor", 0, &mmio_vendor);
+        toml_int_in(manifest_svsm, "device_mmio_device", 0, &mmio_device);
+    }
+    if (window_pages > 0 && mmio_vendor <= 0) {
+        /* A manifest error, and a measured one, so it can only be fixed by
+         * changing the manifest - which is the right place for it. Loud,
+         * because the monitor would refuse the window anyway and a vault
+         * that quietly started without the memory it asked for would fail
+         * later and somewhere less obvious. */
+        pal_svsm_fail("manifest asks for svsm.device_window_pages without "
+                      "svsm.device_mmio_vendor: a window is only reachable by a "
+                      "device (or the host)", 0);
+    }
+
+    if (mmio_vendor > 0) {
+        void* base = NULL;
+        size_t size = 0;
+        uint64_t phys = 0;
+        pal_svsm_device_mmio(((uint64_t)mmio_vendor & 0xFFFF) |
+                             (((uint64_t)mmio_device & 0xFFFF) << 16),
+                             &base, &size, &phys);
+        g_pal_public_state.device_mmio.base = base;   /* always NULL */
+        g_pal_public_state.device_mmio.size = size;
+        g_pal_public_state.device_mmio.phys = phys;
+        g_pal_public_state.device_mmio.io = pal_svsm_device_io;
+    }
+
     if (window_pages > 0) {
         void* base = NULL;
         size_t size = 0;
@@ -159,27 +194,6 @@ noreturn void pal_svsm_main(void)
             g_pal_public_state.device_window.size = size;
             g_pal_public_state.device_window.gpa  = ((volatile uint64_t*)base)[1];
         }
-    }
-
-    /* A device's registers, by vendor and device id, again only when the
-     * manifest names one. Same reasoning as the window: which vault may
-     * touch which device is not a runtime decision. */
-    int64_t mmio_vendor = 0, mmio_device = 0;
-    if (manifest_svsm) {
-        toml_int_in(manifest_svsm, "device_mmio_vendor", 0, &mmio_vendor);
-        toml_int_in(manifest_svsm, "device_mmio_device", 0, &mmio_device);
-    }
-    if (mmio_vendor > 0) {
-        void* base = NULL;
-        size_t size = 0;
-        uint64_t phys = 0;
-        pal_svsm_device_mmio(((uint64_t)mmio_vendor & 0xFFFF) |
-                             (((uint64_t)mmio_device & 0xFFFF) << 16),
-                             &base, &size, &phys);
-        g_pal_public_state.device_mmio.base = base;   /* always NULL */
-        g_pal_public_state.device_mmio.size = size;
-        g_pal_public_state.device_mmio.phys = phys;
-        g_pal_public_state.device_mmio.io = pal_svsm_device_io;
     }
 
     // Entering the actual pal_main
