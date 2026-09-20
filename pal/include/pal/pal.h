@@ -146,6 +146,25 @@ struct pal_device_window {
     uint64_t gpa;
 };
 
+/* A device's registers, mapped uncached and unencrypted (svsm: the monitor
+ * checked the BAR is not guest RAM before mapping it). `phys` is the address
+ * the BAR decodes at, which is what a descriptor elsewhere would name;
+ * size 0 = none. */
+struct pal_device_mmio {
+    /* Always NULL. Registers are NOT mapped: under SEV-SNP a guest cannot
+     * reach MMIO by touching it, so every access goes through the monitor.
+     * The field is kept so the shape matches pal_device_window and so that
+     * anything that dereferences it faults immediately. */
+    void* base;
+    size_t size;
+    uint64_t phys;
+    /* How to actually reach a register, since `base` cannot be used. The
+     * PAL that has a device sets this; everywhere else it stays NULL and
+     * the LibOS reports ENODEV. Returns the value read, or all ones if the
+     * monitor refused the access. */
+    uint64_t (*io)(uint64_t offset, uint32_t width, int write, uint64_t value);
+};
+
 /* Part of PAL state which is shared between all PALs and accessible (read-only) by the binary
  * started by PAL (usually our LibOS). */
 struct pal_public_state {
@@ -181,6 +200,7 @@ struct pal_public_state {
                                                                         entries have size 0 */
 
     struct pal_device_window device_window; /*!< see above; size 0 = none */
+    struct pal_device_mmio device_mmio;     /*!< see above; size 0 = none */
 
     /*
      * Host information

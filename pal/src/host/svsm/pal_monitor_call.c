@@ -78,6 +78,38 @@ void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size) {
     *out_base = (void*)data.rdx;
 }
 
+/* DeviceMmio (0x4FFFFFED): rbx = vendor | device << 16 -> rcx = size,
+ * rdx = base VA, r8 = physical address. The physical address comes back in
+ * a register here, unlike the window's: these are somebody else's registers
+ * and there is no header the monitor could have written it into. */
+void pal_svsm_device_mmio(uint64_t id, void** out_base, size_t* out_size, uint64_t* out_phys) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFED;
+    data.rbx = id;
+    data.rcx = 0;
+    data.rdx = 0;
+    data.r8  = 0;
+    data.r9  = 0;
+    extended_monitor_call(&data);
+    *out_size = data.rcx;
+    *out_base = (void*)data.rdx;
+    *out_phys = data.r8;
+}
+
+/* DeviceIo (0x4FFFFFEC): rbx = offset, rcx = width, rdx = 1 to write,
+ * r8 = value to write -> rcx = value read (all ones = refused). */
+uint64_t pal_svsm_device_io(uint64_t offset, uint32_t width, int write, uint64_t value) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFEC;
+    data.rbx = offset;
+    data.rcx = width;
+    data.rdx = write ? 1 : 0;
+    data.r8  = value;
+    data.r9  = 0;
+    extended_monitor_call(&data);
+    return data.rcx;
+}
+
 void pal_svsm_debug_putc(char c){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFD;

@@ -142,6 +142,27 @@ noreturn void pal_svsm_main(void)
         }
     }
 
+    /* A device's registers, by vendor and device id, again only when the
+     * manifest names one. Same reasoning as the window: which vault may
+     * touch which device is not a runtime decision. */
+    int64_t mmio_vendor = 0, mmio_device = 0;
+    if (manifest_svsm) {
+        toml_int_in(manifest_svsm, "device_mmio_vendor", 0, &mmio_vendor);
+        toml_int_in(manifest_svsm, "device_mmio_device", 0, &mmio_device);
+    }
+    if (mmio_vendor > 0) {
+        void* base = NULL;
+        size_t size = 0;
+        uint64_t phys = 0;
+        pal_svsm_device_mmio(((uint64_t)mmio_vendor & 0xFFFF) |
+                             (((uint64_t)mmio_device & 0xFFFF) << 16),
+                             &base, &size, &phys);
+        g_pal_public_state.device_mmio.base = base;   /* always NULL */
+        g_pal_public_state.device_mmio.size = size;
+        g_pal_public_state.device_mmio.phys = phys;
+        g_pal_public_state.device_mmio.io = pal_svsm_device_io;
+    }
+
     // Entering the actual pal_main
 
     pal_main(instance_id, parent_process, NULL, NULL, NULL, NULL);

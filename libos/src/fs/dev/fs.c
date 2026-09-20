@@ -181,6 +181,94 @@ static int64_t dev_mvwindow_seek(struct libos_handle* hdl, int64_t offset, int w
     return ret;
 }
 
+/*
+ * /dev/mvmmio - a device's registers, when the manifest named one.
+ *
+ * Every access is a monitor call, not a memory access, and that is not a
+ * design preference: under SEV-SNP an MMIO access from a guest is
+ * intercepted and has to be completed through a GHCB by a #VC handler. A
+ * vault has neither, so mapping the BAR here produces an RMP violation at
+ * the first touch - measured, not assumed. The monitor does the access at
+ * VMPL0 where both exist.
+ *
+ * Accesses are 4 bytes when the offset and length allow it, 1 byte
+ * otherwise, which is what a driver expects of a register file exposed as
+ * a file. A register file read with memcpy is read in whatever widths the
+ * compiler felt like, and a device that latches on a 4-byte read sees four
+ * 1-byte reads of the wrong thing.
+ */
+static bool dev_mvmmio_present(void) {
+    return g_pal_public_state->device_mmio.size != 0
+           && g_pal_public_state->device_mmio.io != NULL;
+}
+
+static ssize_t dev_mvmmio_rw(struct libos_handle* hdl, void* buf, size_t count, bool write) {
+    if (!dev_mvmmio_present())
+        return -ENODEV;
+
+    size_t size = g_pal_public_state->device_mmio.size;
+
+    lock(&hdl->lock);
+    file_off_t pos = hdl->pos;
+    if (pos < 0 || (size_t)pos >= size) {
+        unlock(&hdl->lock);
+        return write ? -ENXIO : 0;
+    }
+    size_t avail = size - (size_t)pos;
+    if (count > avail)
+        count = avail;
+
+    uint32_t width = ((pos % 4) == 0 && (count % 4) == 0) ? 4 : 1;
+    unsigned char* bytes = buf;
+    for (size_t done = 0; done < count; done += width) {
+        uint64_t offset = (uint64_t)pos + done;
+        if (write) {
+            uint64_t value = 0;
+            memcpy(&value, bytes + done, width);
+            if (g_pal_public_state->device_mmio.io(offset, width, /*write=*/1, value) == ~0ULL) {
+                unlock(&hdl->lock);
+                return done ? (ssize_t)done : -EIO;
+            }
+        } else {
+            uint64_t value = g_pal_public_state->device_mmio.io(offset, width, /*write=*/0, 0);
+            if (value == ~0ULL && width != 8) {
+                /* All ones is how a refusal comes back. A 4-byte register
+                 * really holding 0xffffffff is indistinguishable, which is
+                 * why the monitor bounds-checks rather than relying on
+                 * this; treat it as data. */
+            }
+            memcpy(bytes + done, &value, width);
+        }
+    }
+
+    hdl->pos = pos + count;
+    unlock(&hdl->lock);
+    return count;
+}
+
+static ssize_t dev_mvmmio_read(struct libos_handle* hdl, void* buf, size_t count) {
+    return dev_mvmmio_rw(hdl, buf, count, /*write=*/false);
+}
+
+static ssize_t dev_mvmmio_write(struct libos_handle* hdl, const void* buf, size_t count) {
+    return dev_mvmmio_rw(hdl, (void*)buf, count, /*write=*/true);
+}
+
+static int64_t dev_mvmmio_seek(struct libos_handle* hdl, int64_t offset, int whence) {
+    if (!dev_mvmmio_present())
+        return -ENODEV;
+
+    lock(&hdl->lock);
+    file_off_t pos = hdl->pos;
+    int ret = generic_seek(pos, g_pal_public_state->device_mmio.size, offset, whence, &pos);
+    if (ret == 0) {
+        hdl->pos = pos;
+        ret = pos;
+    }
+    unlock(&hdl->lock);
+    return ret;
+}
+
 int init_devfs(void) {
     struct pseudo_node* root = pseudo_add_root_dir("dev");
 
@@ -231,6 +319,14 @@ int init_devfs(void) {
     mvwindow->dev.dev_ops.read = &dev_mvwindow_read;
     mvwindow->dev.dev_ops.write = &dev_mvwindow_write;
     mvwindow->dev.dev_ops.seek = &dev_mvwindow_seek;
+
+    struct pseudo_node* mvmmio = pseudo_add_dev(root, "mvmmio");
+    mvmmio->perm = PSEUDO_PERM_FILE_RW;
+    mvmmio->dev.major = 10;
+    mvmmio->dev.minor = 201;
+    mvmmio->dev.dev_ops.read = &dev_mvmmio_read;
+    mvmmio->dev.dev_ops.write = &dev_mvmmio_write;
+    mvmmio->dev.dev_ops.seek = &dev_mvmmio_seek;
 
     /* see `man 4 tty` for more info, including major/minor numbers */
     struct pseudo_node* tty = pseudo_add_dev(root, "tty");
