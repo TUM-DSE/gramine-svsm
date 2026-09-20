@@ -144,6 +144,33 @@ void pal_svsm_nop(void) {
     monitor_call(&data);
 }
 
+/* SetExceptionEntry (0x4FFFFFE9): rbx = the entry, rcx = where in the TCB
+ * the alternate stack is described -> rcx = 0 accepted. */
+int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE9;
+    data.rbx = (uint64_t)entry;
+    data.rcx = tcb_alt_stack_offset;
+    data.rdx = 0;
+    monitor_call(&data);
+    return data.rcx == 0 ? 0 : -1;
+}
+
+/* ExceptionReturn (0x4FFFFFE8): rbx = the context. The monitor overwrites
+ * this process's registers from it, so nothing after the call runs. */
+noreturn void pal_svsm_exception_return(PAL_CONTEXT* context) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE8;
+    data.rbx = (uint64_t)context;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    /* The monitor refused, which it only does when it could not read the
+     * context back - there is nothing to resume to. */
+    pal_svsm_fail("exception return did not resume", 0);
+    die_or_inf_loop();
+}
+
 void pal_svsm_debug_putc(char c){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFD;

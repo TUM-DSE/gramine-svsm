@@ -6,9 +6,27 @@ noreturn void pal_svsm_main(void);
 typedef struct pal_svsm_tcb {
     PAL_TCB common;
     struct {
-        /* private to Linux PAL */
         PAL_HANDLE handle;
-        void*      alt_stack;
+        /*
+         * Where a fault is delivered: the top of this thread's alternate
+         * stack, and its size.
+         *
+         * A fault cannot be delivered onto the stack it interrupted. The
+         * LibOS answers a memory-fault upcall by building the
+         * *application's* signal frame below the interrupted rsp - the
+         * same place the interrupted context and the PAL's own frames
+         * would be - and then returns expecting to be resumed from a
+         * context it has just written over. Gramine on Linux keeps the
+         * two apart with sigaltstack; this is that, by hand.
+         *
+         * The monitor reads these two words out of this thread's TCB via
+         * the GS base it already has, so the right stack is picked per
+         * thread without anything being told which thread is running.
+         * They must stay adjacent and in this order; the offset of the
+         * pair is registered once by pal_svsm_exception_init.
+         */
+        void*      alt_stack_top;
+        uint64_t   alt_stack_size;
         int        (*callback)(void*);
         void*      param;
     };
@@ -27,6 +45,14 @@ void     pal_svsm_time_init(void);
 uint64_t pal_svsm_tsc_hz(void);
 uint64_t pal_svsm_tsc_to_usec(uint64_t tsc);
 uint64_t pal_svsm_now_usec(void);
+
+/*
+ * Faults and signals (pal_exception.c). The monitor enters
+ * pal_svsm_exception_entry with a fault it will not handle itself; see the
+ * comment at the top of that file.
+ */
+void pal_svsm_exception_init(void);
+void pal_svsm_set_text_range(uintptr_t start, uintptr_t end);
 
 /*
  * Threads (pal_threading.c). Cooperative contexts inside the one CPL3

@@ -216,6 +216,11 @@ noreturn void pal_svsm_main(void)
     if (ret < 0)
         pal_svsm_fail("pal_svsm_threading_init() failed: ", ret);
 
+    /* Tell the monitor where to bring a fault it will not handle itself.
+     * From here on a SIGSEGV in this vault reaches the application instead
+     * of retiring it from outside. */
+    pal_svsm_exception_init();
+
     void* raw_manifest = MANIFEST_START;
     g_pal_common_state.raw_manifest_data = raw_manifest;
     char errbuf[256];

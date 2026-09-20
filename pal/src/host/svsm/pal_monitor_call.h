@@ -48,6 +48,18 @@ void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us);
  * spin produces no exits at all and the monitor cannot take the core back,
  * run its watchdog, or let the host in until the vault calls out. */
 void pal_svsm_nop(void);
+/* SetExceptionEntry (0x4FFFFFE9): where the monitor should enter this PAL
+ * when it has a fault for it rather than a reason to retire the process.
+ * 0 stops asking, which is the state a PAL that never calls this is in.
+ * `tcb_alt_stack_offset` is where, in the running thread's TCB (which the
+ * monitor finds through the GS base), this PAL keeps the top and size of
+ * that thread's alternate stack - the stack a fault is delivered on, which
+ * must not be the one it interrupted. */
+int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset);
+/* ExceptionReturn (0x4FFFFFE8): resume from `context`. Does not return -
+ * restoring rip, rsp and rflags together is what an iretq is for, and this
+ * side of the boundary runs at CPL3 and has none. */
+noreturn void pal_svsm_exception_return(PAL_CONTEXT* context);
 /* Declare what this vault offers other vaults - the thing that makes it a
  * service. `name` is up to eight ASCII bytes packed little-endian. */
 int pal_svsm_service_declare(uint64_t name);

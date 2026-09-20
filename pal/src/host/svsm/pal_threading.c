@@ -47,6 +47,13 @@
  * one. */
 #define SVSM_THREAD_STACK_SIZE (64 * 1024)
 
+/* The stack a fault is delivered on, per thread. It cannot be the stack the
+ * fault interrupted: the LibOS answers a memory-fault upcall by writing the
+ * application's signal frame below the interrupted rsp, over anything the
+ * PAL had put there. See the note in pal_svsm.h. 32 KiB carries the PAL
+ * entry, the LibOS upcall and the signal delivery under it. */
+#define SVSM_ALT_STACK_SIZE (32 * 1024)
+
 /* How long the idle loop spins between monitor calls. Interrupts are off in a
  * vault, so a spin produces no exits at all: without these the monitor could
  * not take the core back on its 10 ms slice, its invoke watchdog could not
@@ -260,7 +267,20 @@ int pal_svsm_threading_init(PAL_HANDLE* out_first_thread) {
     handle->thread.state = PAL_SVSM_THREAD_RUNNING;
     handle->thread.next  = handle;
 
-    pal_get_svsm_tcb()->handle = handle;
+    /* The first thread's stack is the monitor's, so its alternate stack has
+     * to be found somewhere; every other thread carves one out of its own
+     * block. Without it this thread cannot be delivered a fault at all. */
+    void* alt = malloc(SVSM_ALT_STACK_SIZE);
+    if (!alt) {
+        free(handle);
+        return -PAL_ERROR_NOMEM;
+    }
+    memset(alt, 0, SVSM_ALT_STACK_SIZE);
+
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    tcb->handle         = handle;
+    tcb->alt_stack_top  = (char*)alt + SVSM_ALT_STACK_SIZE;
+    tcb->alt_stack_size = SVSM_ALT_STACK_SIZE;
 
     g_current    = handle;
     g_thread_cnt = 1;
@@ -286,31 +306,39 @@ int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param) {
      * One block: the stack, with the TCB sitting at the top of it.
      *
      *   stack +--> +-------------------+  low
+     *              |  alternate stack  |  SVSM_ALT_STACK_SIZE, grows down
+     *              +-------------------+
      *              |                   |
      *              |   thread stack    |  SVSM_THREAD_STACK_SIZE, grows down
      *              |                   |
      *       tcb +--> +-----------------+
      *              |   PAL_SVSM_TCB    |
      *              +-------------------+  high
+     *
+     * The alternate stack sits below the thread stack so that running off
+     * the bottom of the latter lands in a region of this block rather than
+     * in whatever malloc handed out next.
      */
-    char* stack = malloc(SVSM_THREAD_STACK_SIZE + sizeof(PAL_SVSM_TCB));
+    size_t block = SVSM_ALT_STACK_SIZE + SVSM_THREAD_STACK_SIZE + sizeof(PAL_SVSM_TCB);
+    char* stack = malloc(block);
     if (!stack) {
         free(hdl);
         return -PAL_ERROR_NOMEM;
     }
-    memset(stack, 0, SVSM_THREAD_STACK_SIZE + sizeof(PAL_SVSM_TCB));
+    memset(stack, 0, block);
 
-    PAL_SVSM_TCB* tcb = (PAL_SVSM_TCB*)(stack + SVSM_THREAD_STACK_SIZE);
+    PAL_SVSM_TCB* tcb = (PAL_SVSM_TCB*)(stack + SVSM_ALT_STACK_SIZE + SVSM_THREAD_STACK_SIZE);
     tcb->common.self  = &tcb->common;
     /* The same canary the creating thread uses, as glibc does for its own
      * threads. A per-thread random one is a hardening nicety, but it has to
      * be installed by the new context itself, and every frame that straddles
      * the change would then check the wrong value. */
     pal_tcb_arch_set_stack_canary(&tcb->common, pal_get_tcb()->stack_protector_canary);
-    tcb->handle    = hdl;
-    tcb->alt_stack = NULL;   /* no signals reach a vault: pal_exception.c is a stub */
-    tcb->callback  = callback;
-    tcb->param     = param;
+    tcb->handle         = hdl;
+    tcb->alt_stack_top  = stack + SVSM_ALT_STACK_SIZE;
+    tcb->alt_stack_size = SVSM_ALT_STACK_SIZE;
+    tcb->callback       = callback;
+    tcb->param          = param;
 
     /*
      * The frame pal_svsm_ctx_switch will unwind into. It pops six registers
