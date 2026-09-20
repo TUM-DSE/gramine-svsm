@@ -218,7 +218,14 @@ static ssize_t dev_mvmmio_rw(struct libos_handle* hdl, void* buf, size_t count, 
     if (count > avail)
         count = avail;
 
-    uint32_t width = ((pos % 4) == 0 && (count % 4) == 0) ? 4 : 1;
+    /* Widest access the offset and length allow. NVMe's CAP, ASQ and ACQ
+     * are 64-bit registers; splitting them into halves works on some
+     * controllers and is not something to rely on. */
+    uint32_t width = 1;
+    if ((pos % 8) == 0 && (count % 8) == 0)
+        width = 8;
+    else if ((pos % 4) == 0 && (count % 4) == 0)
+        width = 4;
     unsigned char* bytes = buf;
     for (size_t done = 0; done < count; done += width) {
         uint64_t offset = (uint64_t)pos + done;
@@ -230,13 +237,12 @@ static ssize_t dev_mvmmio_rw(struct libos_handle* hdl, void* buf, size_t count, 
                 return done ? (ssize_t)done : -EIO;
             }
         } else {
+            /* All ones is also how a refusal comes back, and a register
+             * really holding all ones is indistinguishable from one. That
+             * is why the monitor bounds-checks the access rather than
+             * signalling through the value: by the time a value is
+             * returned it is data. */
             uint64_t value = g_pal_public_state->device_mmio.io(offset, width, /*write=*/0, 0);
-            if (value == ~0ULL && width != 8) {
-                /* All ones is how a refusal comes back. A 4-byte register
-                 * really holding 0xffffffff is indistinguishable, which is
-                 * why the monitor bounds-checks rather than relying on
-                 * this; treat it as data. */
-            }
             memcpy(bytes + done, &value, width);
         }
     }
