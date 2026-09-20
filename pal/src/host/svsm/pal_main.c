@@ -118,6 +118,25 @@ noreturn void pal_svsm_main(void)
             break;
     }
 
+    /* What this vault offers other vaults, if anything - the declaration
+     * that makes it a service. From the manifest, so it is measured: a
+     * vault cannot decide at runtime that it is something else. A device is
+     * one thing to provide and by far the most machinery, but a vault that
+     * offers a model, a key or an answer is a service on the same terms and
+     * needs none of what follows. */
+    toml_table_t* manifest_svsm_early = toml_table_in(g_pal_public_state.manifest_root, "svsm");
+    if (manifest_svsm_early) {
+        char* service_name = NULL;
+        if (toml_string_in(manifest_svsm_early, "service", &service_name) == 0 && service_name) {
+            uint64_t packed = 0;
+            for (size_t i = 0; i < 8 && service_name[i]; i++)
+                packed |= (uint64_t)(unsigned char)service_name[i] << (i * 8);
+            if (packed)
+                pal_svsm_service_declare(packed);
+            free(service_name);
+        }
+    }
+
     /* Device window: memory this vault and the HOST can both see. Only when
      * the manifest asks for it - it is the one region of a vault the host
      * can read, so which vaults have one is part of what the manifest

@@ -110,6 +110,17 @@ uint64_t pal_svsm_device_io(uint64_t offset, uint32_t width, int write, uint64_t
     return data.rcx;
 }
 
+/* ServiceDeclare (0x4FFFFFEB): rbx = the packed name -> rcx = 0 accepted. */
+int pal_svsm_service_declare(uint64_t name) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFEB;
+    data.rbx = name;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return data.rcx == 0 ? 0 : -1;
+}
+
 void pal_svsm_debug_putc(char c){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFD;

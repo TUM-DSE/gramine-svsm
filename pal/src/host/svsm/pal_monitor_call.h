@@ -39,6 +39,9 @@ void pal_svsm_device_mmio(uint64_t id, void** out_base, size_t* out_size, uint64
  * completed through a GHCB by a #VC handler, and a vault has neither.
  * Returns the value read, or all ones if the access was refused. */
 uint64_t pal_svsm_device_io(uint64_t offset, uint32_t width, int write, uint64_t value);
+/* Declare what this vault offers other vaults - the thing that makes it a
+ * service. `name` is up to eight ASCII bytes packed little-endian. */
+int pal_svsm_service_declare(uint64_t name);
 
 typedef enum {
     PAL_SVSM_GUEST_REQUEST_FILEATTR=0,
