@@ -275,12 +275,17 @@ noreturn void pal_svsm_main(void)
      * between the two of them.
      *
      * Absent keys = neither, which is every vault that is not a driver. */
-    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0;
+    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
     if (manifest_svsm) {
         toml_int_in(manifest_svsm, "device_window_pages", 0, &window_pages);
         toml_int_in(manifest_svsm, "device_mmio_vendor", 0, &mmio_vendor);
         toml_int_in(manifest_svsm, "device_mmio_device", 0, &mmio_device);
+        /* Which BAR the registers are in. Zero unless the manifest says
+         * otherwise, which is right for everything that keeps them where
+         * they have always been - and wrong for modern virtio, which is
+         * why this is a manifest key rather than an assumption. */
+        toml_int_in(manifest_svsm, "device_mmio_bar", 0, &mmio_bar);
     }
     if (window_pages > 0 && mmio_vendor <= 0) {
         /* A manifest error, and a measured one, so it can only be fixed by
@@ -299,11 +304,12 @@ noreturn void pal_svsm_main(void)
         uint64_t phys = 0;
         pal_svsm_device_mmio(((uint64_t)mmio_vendor & 0xFFFF) |
                              (((uint64_t)mmio_device & 0xFFFF) << 16),
-                             &base, &size, &phys);
+                             (uint8_t)(mmio_bar & 0xFF), &base, &size, &phys);
         g_pal_public_state.device_mmio.base = base;   /* always NULL */
         g_pal_public_state.device_mmio.size = size;
         g_pal_public_state.device_mmio.phys = phys;
         g_pal_public_state.device_mmio.io = pal_svsm_device_io;
+        g_pal_public_state.device_mmio.cfg = pal_svsm_device_config;
     }
 
     if (window_pages > 0) {

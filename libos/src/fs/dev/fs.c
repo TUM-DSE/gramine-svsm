@@ -252,6 +252,78 @@ static ssize_t dev_mvmmio_rw(struct libos_handle* hdl, void* buf, size_t count, 
     return count;
 }
 
+/*
+ * /dev/mvcfg - this device's PCI configuration space, read-only.
+ *
+ * Where a modern device says where its registers actually are. virtio-net
+ * keeps the location of its common configuration, notification and ISR
+ * structures in a capability chain here, so a driver that cannot read
+ * capabilities cannot find its registers at all.
+ *
+ * Read-only, and that is the whole of the policy: a driver that could
+ * write configuration space could move the BAR that every /dev/mvmmio
+ * access is bounds-checked against, or turn on bus mastering for a device
+ * it was never given.
+ *
+ * 4 KiB because a capability chain may run past the first 256 bytes into
+ * PCIe extended space.
+ */
+#define MVCFG_SIZE 4096
+
+static bool dev_mvcfg_present(void) {
+    return g_pal_public_state->device_mmio.size != 0
+           && g_pal_public_state->device_mmio.cfg != NULL;
+}
+
+static ssize_t dev_mvcfg_read(struct libos_handle* hdl, void* buf, size_t count) {
+    if (!dev_mvcfg_present())
+        return -ENODEV;
+
+    lock(&hdl->lock);
+    file_off_t pos = hdl->pos;
+    if (pos < 0 || (size_t)pos >= MVCFG_SIZE) {
+        unlock(&hdl->lock);
+        return 0;
+    }
+    size_t avail = MVCFG_SIZE - (size_t)pos;
+    if (count > avail)
+        count = avail;
+
+    /* Configuration space is a dword file: capability records are laid out
+     * on byte boundaries but the bus reads 32 bits at a time, so read the
+     * widest the offset allows and let the caller slice. */
+    uint32_t width = 1;
+    if ((pos % 4) == 0 && (count % 4) == 0)
+        width = 4;
+    else if ((pos % 2) == 0 && (count % 2) == 0)
+        width = 2;
+
+    unsigned char* bytes = buf;
+    for (size_t done = 0; done < count; done += width) {
+        uint64_t value = g_pal_public_state->device_mmio.cfg((uint32_t)pos + done, width);
+        memcpy(bytes + done, &value, width);
+    }
+
+    hdl->pos = pos + count;
+    unlock(&hdl->lock);
+    return count;
+}
+
+static int64_t dev_mvcfg_seek(struct libos_handle* hdl, int64_t offset, int whence) {
+    if (!dev_mvcfg_present())
+        return -ENODEV;
+
+    lock(&hdl->lock);
+    file_off_t pos = hdl->pos;
+    int ret = generic_seek(pos, MVCFG_SIZE, offset, whence, &pos);
+    if (ret == 0) {
+        hdl->pos = pos;
+        ret = pos;
+    }
+    unlock(&hdl->lock);
+    return ret;
+}
+
 static ssize_t dev_mvmmio_read(struct libos_handle* hdl, void* buf, size_t count) {
     return dev_mvmmio_rw(hdl, buf, count, /*write=*/false);
 }
@@ -333,6 +405,13 @@ int init_devfs(void) {
     mvmmio->dev.dev_ops.read = &dev_mvmmio_read;
     mvmmio->dev.dev_ops.write = &dev_mvmmio_write;
     mvmmio->dev.dev_ops.seek = &dev_mvmmio_seek;
+
+    struct pseudo_node* mvcfg = pseudo_add_dev(root, "mvcfg");
+    mvcfg->perm = PSEUDO_PERM_FILE_R;
+    mvcfg->dev.major = 10;
+    mvcfg->dev.minor = 202;
+    mvcfg->dev.dev_ops.read = &dev_mvcfg_read;
+    mvcfg->dev.dev_ops.seek = &dev_mvcfg_seek;
 
     /* see `man 4 tty` for more info, including major/minor numbers */
     struct pseudo_node* tty = pseudo_add_dev(root, "tty");

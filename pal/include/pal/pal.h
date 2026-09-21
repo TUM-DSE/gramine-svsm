@@ -163,6 +163,13 @@ struct pal_device_mmio {
      * the LibOS reports ENODEV. Returns the value read, or all ones if the
      * monitor refused the access. */
     uint64_t (*io)(uint64_t offset, uint32_t width, int write, uint64_t value);
+    /* One read of this device's PCI configuration space, which is where a
+     * modern device says where its registers actually are - virtio puts
+     * the location of its common configuration, notification and ISR
+     * structures in a capability chain. Reads only: writing here would let
+     * a driver move the BAR that every register access is bounds-checked
+     * against. All ones if the monitor refused. */
+    uint64_t (*cfg)(uint32_t offset, uint32_t width);
 };
 
 /* Part of PAL state which is shared between all PALs and accessible (read-only) by the binary

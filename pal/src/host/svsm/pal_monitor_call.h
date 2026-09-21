@@ -31,9 +31,15 @@ void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size);
  * the header the monitor writes at the start of the window. */
 void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
 /* DeviceMmio: a device's registers. `id` is vendor | device << 16, 0 only
- * asks what this vault already has. Returns where they are mapped and the
- * physical address the BAR decodes at. */
-void pal_svsm_device_mmio(uint64_t id, void** out_base, size_t* out_size, uint64_t* out_phys);
+ * asks what this vault already has. `bar` says which BAR to map, because a
+ * modern device does not necessarily keep its registers in BAR0. Returns
+ * where they are mapped and the physical address the BAR decodes at. */
+void pal_svsm_device_mmio(uint64_t id, uint8_t bar, void** out_base, size_t* out_size,
+                          uint64_t* out_phys);
+/* DeviceConfig: one read of this vault's own device's PCI configuration
+ * space. `width` is 1, 2 or 4. All ones if refused. A vault never learns
+ * where its device sits on the bus - it says "mine, at this offset". */
+uint64_t pal_svsm_device_config(uint32_t offset, uint32_t width);
 /* One register access, performed BY THE MONITOR: a vault cannot reach MMIO
  * by touching it - under SEV-SNP the access is intercepted and has to be
  * completed through a GHCB by a #VC handler, and a vault has neither.
