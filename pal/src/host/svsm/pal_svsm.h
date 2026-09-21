@@ -83,9 +83,6 @@ struct pal_svsm_preempt_ctl {
      */
     uint64_t text_start;
     uint64_t text_end;
-    /* TSC when the PAL was entered for the current delivery, so the
-     * monitor can tell its own cost from the PAL's. */
-    uint64_t entry_tsc;
 };
 
 extern struct pal_svsm_preempt_ctl g_pal_svsm_preempt;

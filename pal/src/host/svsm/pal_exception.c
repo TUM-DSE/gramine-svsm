@@ -55,7 +55,6 @@ struct pal_svsm_preempt_ctl g_pal_svsm_preempt = {
     .count = 0,
     .text_start = 0,
     .text_end = 0,
-    .entry_tsc = 0,
 };
 
 void pal_svsm_preempt_update(bool others_runnable) {
@@ -96,12 +95,6 @@ noreturn void pal_svsm_exception_resume(PAL_CONTEXT* context, void* xsave_area);
 
 noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CONTEXT* context,
                                          void* xsave_area) {
-    {
-        uint32_t lo, hi;
-        __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-        g_pal_svsm_preempt.entry_tsc = ((uint64_t)hi << 32) | lo;
-    }
-
     if (event == PAL_EVENT_INTERRUPTED) {
         /*
          * A preemption. The vCPU was taken off this thread between two
