@@ -220,12 +220,18 @@ static ssize_t dev_mvmmio_rw(struct libos_handle* hdl, void* buf, size_t count, 
 
     /* Widest access the offset and length allow. NVMe's CAP, ASQ and ACQ
      * are 64-bit registers; splitting them into halves works on some
-     * controllers and is not something to rely on. */
+     * controllers and is not something to rely on. Neither is splitting a
+     * 16-bit one: virtio's common configuration puts queue_select at
+     * offset 0x16 and queue_size at 0x18, and a device decodes a register
+     * at its own width - two byte writes reach the first byte and are
+     * dropped on the floor for the second. */
     uint32_t width = 1;
     if ((pos % 8) == 0 && (count % 8) == 0)
         width = 8;
     else if ((pos % 4) == 0 && (count % 4) == 0)
         width = 4;
+    else if ((pos % 2) == 0 && (count % 2) == 0)
+        width = 2;
     unsigned char* bytes = buf;
     for (size_t done = 0; done < count; done += width) {
         uint64_t offset = (uint64_t)pos + done;
