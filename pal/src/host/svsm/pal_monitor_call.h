@@ -54,6 +54,11 @@ void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us);
  * spin produces no exits at all and the monitor cannot take the core back,
  * run its watchdog, or let the host in until the vault calls out. */
 void pal_svsm_nop(void);
+/* Sleep (0x4FFFFFDE): give the processor back until `usec` has passed.
+ * Returns 0 once woken, or a negative status when the monitor will not park
+ * this vault (a host invoke is on the stack) and the caller must wait the
+ * hard way. */
+long pal_svsm_sleep(uint64_t usec);
 /* SetExceptionEntry (0x4FFFFFE9): where the monitor should enter this PAL
  * when it has a fault for it rather than a reason to retire the process.
  * 0 stops asking, which is the state a PAL that never calls this is in.

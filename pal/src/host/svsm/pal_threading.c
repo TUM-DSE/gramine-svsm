@@ -100,6 +100,17 @@ static void idle_until(uint64_t deadline_us) {
         if (now >= deadline_us)
             return;
         uint64_t left = deadline_us - now;
+
+        /* Every context is blocked and only the clock can change that, so
+         * there is nothing for this vault to do with a processor. Ask the
+         * monitor for the time back: it parks this vault and dispatches it
+         * when the deadline passes, which costs one dispatch instead of the
+         * whole wait. Refused while a host invoke is on the stack - a park
+         * returns GETRESULT and would end the invoke - and then we spin as
+         * we always did. */
+        if (pal_svsm_sleep(left) >= 0)
+            continue;
+
         uint64_t until = now + (left < SVSM_IDLE_SLICE_US ? left : SVSM_IDLE_SLICE_US);
         /* Bare pause, not CPU_RELAX: yielding from the idle loop would come
          * straight back here. */

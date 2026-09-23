@@ -159,6 +159,23 @@ void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us) {
     *out_epoch_us = data.rdx;
 }
 
+/* Sleep (0x4FFFFFDE): rbx = microseconds -> rcx = 0 once woken, or a
+ * negative status meaning the monitor will not park this vault (a host
+ * invoke is on the stack, and a park would end it). The caller then waits
+ * the way it always did.
+ *
+ * This is what a cooperative scheduler with nothing runnable should do:
+ * one dispatch instead of a processor held for the whole wait. */
+long pal_svsm_sleep(uint64_t usec) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFDE;
+    data.rbx = usec;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return (long)data.rcx;
+}
+
 /* Nop (0x4FFFFFF5): costs one exit and does nothing, which is the point. */
 void pal_svsm_nop(void) {
     struct monitor_call_data data;
