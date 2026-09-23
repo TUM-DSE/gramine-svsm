@@ -122,15 +122,28 @@ uint64_t pal_svsm_device_config(uint32_t offset, uint32_t width) {
     return data.rcx;
 }
 
-/* ServiceDeclare (0x4FFFFFEB): rbx = the packed name -> rcx = 0 accepted. */
-int pal_svsm_service_declare(uint64_t name) {
+/* ServiceDeclare (0x4FFFFFEB): rbx = the packed name, rcx = priority
+ * 0..7 (higher is more urgent) -> rcx = 0 accepted. */
+int pal_svsm_service_declare(uint64_t name, uint64_t priority) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFEB;
     data.rbx = name;
-    data.rcx = 0;
+    data.rcx = priority;
     data.rdx = 0;
     monitor_call(&data);
     return data.rcx == 0 ? 0 : -1;
+}
+
+/* ChannelPolicy (0x4FFFFFE0): rbx = the record, rcx = its length.
+ * -> rcx = 0, or a negative status. Once per lineage, from the zygote. */
+int64_t pal_svsm_channel_policy(const void* record, uint64_t len) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE0;
+    data.rbx = (uint64_t)record;
+    data.rcx = len;
+    data.rdx = 0;
+    monitor_call(&data);
+    return (int64_t)data.rcx;
 }
 
 /* TimeInfo (0x4FFFFFEA): -> rcx = TSC ticks per second, rdx = microseconds

@@ -256,9 +256,215 @@ noreturn void pal_svsm_main(void)
             uint64_t packed = 0;
             for (size_t i = 0; i < 8 && service_name[i]; i++)
                 packed |= (uint64_t)(unsigned char)service_name[i] << (i * 8);
+            /* How urgent this service is, 0..7, higher being more
+             * urgent. From the manifest for the same reason the name is:
+             * a vault that could raise its own priority at runtime would
+             * make the scheduler's guarantees mean nothing, and an
+             * attestation covering the manifest covers this with it.
+             * Absent = 4, the middle. */
+            int64_t priority = 4;
+            toml_int_in(manifest_svsm_early, "priority", 4, &priority);
+            if (priority < 0) priority = 0;
+            if (priority > 7) priority = 7;
             if (packed)
-                pal_svsm_service_declare(packed);
+                pal_svsm_service_declare(packed, (uint64_t)priority);
             free(service_name);
+        }
+    }
+
+    /* And what it offers other VAULTS: the channel policy (PLAN.md,
+     * "Vault-to-vault channels and an optional router"). Sealed here, from
+     * the measured manifest, before any application code runs - that is
+     * what makes "who may connect to me, and on what terms" part of what an
+     * attestation covers rather than something a vault decides at runtime.
+     *
+     * The record is packed little-endian, exactly as `ipc::seal_policy`
+     * reads it. Anything malformed stops the vault here: a policy that
+     * silently fell back to "no channels" would look like a working vault
+     * that nobody can reach.
+     *
+     *   [svsm]
+     *   name = "kv"                     # who this vault is, to others
+     *   [svsm.endpoint]                 # omit to offer nothing
+     *   id = "rpc"
+     *   direction = "both"              # both | in | out
+     *   in  = { slot = 256, depth = 64 }
+     *   out = { slot = 256, depth = 64 }
+     *   max_channels = 64
+     *   guest_visible = false
+     *   [[svsm.accept]]                 # who may connect; none = nobody
+     *   name = "frontend"               # or any = true, or same = true,
+     *   pin = "function:<128 hex>"      # or a measurement to pin
+     *   levels = [1, 3]                 # default: 0, 1 and 3, never 2
+     *   max = 4                         # channels per requester instance
+     */
+    if (manifest_svsm_early) {
+        /* Page-aligned: the monitor copies the record from one page,
+         * which is all a call argument may span. */
+        static uint8_t policy_record[0x44 + 8 * 0x68] __attribute__((aligned(4096)));
+        memset(policy_record, 0, sizeof(policy_record));
+        memcpy(policy_record, "VCP1", 4);
+        bool wanted = false;
+
+        char* vault_name = NULL;
+        if (toml_string_in(manifest_svsm_early, "name", &vault_name) == 0 && vault_name) {
+            size_t n = strlen(vault_name);
+            if (n > 32)
+                pal_svsm_fail("svsm.name is longer than 32 bytes", 0);
+            memcpy(policy_record + 0x04, vault_name, n);
+            wanted = true;
+            free(vault_name);
+        }
+
+        toml_table_t* ep = toml_table_in(manifest_svsm_early, "endpoint");
+        if (ep) {
+            char* id = NULL;
+            if (toml_string_in(ep, "id", &id) != 0 || !id)
+                pal_svsm_fail("svsm.endpoint needs an id", 0);
+            uint64_t packed = 0;
+            for (size_t i = 0; i < 8 && id[i]; i++)
+                packed |= (uint64_t)(unsigned char)id[i] << (i * 8);
+            if (!packed)
+                pal_svsm_fail("svsm.endpoint.id is empty", 0);
+            memcpy(policy_record + 0x24, &packed, 8);
+            free(id);
+
+            uint8_t dir = 3;
+            char* direction = NULL;
+            if (toml_string_in(ep, "direction", &direction) == 0 && direction) {
+                if (!strcmp(direction, "in")) dir = 1;
+                else if (!strcmp(direction, "out")) dir = 2;
+                else if (!strcmp(direction, "both")) dir = 3;
+                else pal_svsm_fail("svsm.endpoint.direction is not in, out or both", 0);
+                free(direction);
+            }
+            policy_record[0x3C] = dir;
+
+            /* in = { slot, depth } and out = { slot, depth }: the message
+             * size and how many may be in flight, fixed here so a requester
+             * cannot ask for a bigger ring than the service sized. */
+            const char* which[2] = { "in", "out" };
+            for (int i = 0; i < 2; i++) {
+                toml_table_t* ring = toml_table_in(ep, which[i]);
+                if (!ring) {
+                    if (dir & (i == 0 ? 1 : 2))
+                        pal_svsm_fail("svsm.endpoint names a direction without its ring", 0);
+                    continue;
+                }
+                int64_t slot = 0, depth = 0;
+                toml_int_in(ring, "slot", 0, &slot);
+                toml_int_in(ring, "depth", 0, &depth);
+                if (slot <= 0 || depth <= 0)
+                    pal_svsm_fail("svsm.endpoint ring needs slot and depth", 0);
+                uint32_t s32 = (uint32_t)slot, d32 = (uint32_t)depth;
+                memcpy(policy_record + 0x2C + i * 8, &s32, 4);
+                memcpy(policy_record + 0x30 + i * 8, &d32, 4);
+            }
+
+            int64_t max_channels = 64;
+            toml_int_in(ep, "max_channels", 64, &max_channels);
+            if (max_channels <= 0 || max_channels > 64)
+                pal_svsm_fail("svsm.endpoint.max_channels is out of range", 0);
+            uint16_t mc = (uint16_t)max_channels;
+            memcpy(policy_record + 0x3E, &mc, 2);
+
+            bool guest_visible = false;
+            toml_bool_in(ep, "guest_visible", false, &guest_visible);
+            policy_record[0x3D] = guest_visible ? 1 : 0;
+            wanted = true;
+        }
+
+        toml_array_t* accepts = toml_array_in(manifest_svsm_early, "accept");
+        int n_accepts = accepts ? toml_array_nelem(accepts) : 0;
+        if (n_accepts > 8)
+            pal_svsm_fail("svsm.accept has more than eight rules", 0);
+        for (int i = 0; i < n_accepts; i++) {
+            toml_table_t* a = toml_table_at(accepts, i);
+            if (!a)
+                pal_svsm_fail("svsm.accept holds something that is not a rule", 0);
+            uint8_t* rec = policy_record + 0x44 + (size_t)i * 0x68;
+            bool any = false, same = false;
+            toml_bool_in(a, "any", false, &any);
+            toml_bool_in(a, "same", false, &same);
+            char* who = NULL;
+            char* pin = NULL;
+            toml_string_in(a, "name", &who);
+            toml_string_in(a, "pin", &pin);
+            if (any) {
+                rec[0] = 2;
+            } else if (same) {
+                rec[0] = 3;
+            } else if (pin) {
+                /* "<field>:<128 hex>", the field being one the monitor
+                 * measured: init (the PAL), manifest, libos, runtime or
+                 * function. */
+                const char* colon = strchr(pin, ':');
+                if (!colon || strlen(colon + 1) != 128)
+                    pal_svsm_fail("svsm.accept.pin is not <field>:<128 hex>", 0);
+                size_t flen = (size_t)(colon - pin);
+                static const char* fields[] = { "init", "manifest", "libos", "runtime", "function" };
+                rec[1] = 0;
+                for (uint8_t f = 0; f < 5; f++)
+                    if (flen == strlen(fields[f]) && !memcmp(pin, fields[f], flen))
+                        rec[1] = f + 1;
+                if (!rec[1])
+                    pal_svsm_fail("svsm.accept.pin names no measured field", 0);
+                for (int b = 0; b < 64; b++) {
+                    uint8_t byte = 0;
+                    for (int half = 0; half < 2; half++) {
+                        char c = colon[1 + b * 2 + half];
+                        uint8_t v = 0;
+                        if (c >= '0' && c <= '9') v = (uint8_t)(c - '0');
+                        else if (c >= 'a' && c <= 'f') v = (uint8_t)(c - 'a' + 10);
+                        else if (c >= 'A' && c <= 'F') v = (uint8_t)(c - 'A' + 10);
+                        else pal_svsm_fail("svsm.accept.pin is not hex", 0);
+                        byte = (uint8_t)((byte << 4) | v);
+                    }
+                    rec[40 + b] = byte;
+                }
+                rec[0] = 4;
+            } else if (who) {
+                size_t n = strlen(who);
+                if (n > 32)
+                    pal_svsm_fail("svsm.accept.name is longer than 32 bytes", 0);
+                memcpy(rec + 8, who, n);
+                rec[0] = 1;
+            } else {
+                pal_svsm_fail("svsm.accept rule says nothing", 0);
+            }
+            free(who);
+            free(pin);
+
+            /* Which levels a requester may run at. Absent: 0, 1 and 3 -
+             * never 2, the guest's own, which the endpoint must make
+             * guest_visible to admit at all. */
+            toml_array_t* levels = toml_array_in(a, "levels");
+            if (levels) {
+                uint8_t mask = 0;
+                for (int l = 0; l < toml_array_nelem(levels); l++) {
+                    toml_datum_t d = toml_int_at(levels, l);
+                    if (!d.ok || d.u.i < 0 || d.u.i > 3)
+                        pal_svsm_fail("svsm.accept.levels holds a level that is not 0..3", 0);
+                    mask |= (uint8_t)(1u << d.u.i);
+                }
+                rec[2] = mask;
+            }
+
+            int64_t max = 0;
+            toml_int_in(a, "max", 0, &max);
+            if (max < 0 || max > 0xFFFF)
+                pal_svsm_fail("svsm.accept.max is out of range", 0);
+            uint16_t m16 = (uint16_t)max;
+            memcpy(rec + 4, &m16, 2);
+            wanted = true;
+        }
+        policy_record[0x40] = (uint8_t)n_accepts;
+
+        if (wanted) {
+            int64_t sealed = pal_svsm_channel_policy(policy_record,
+                                                     0x44 + (uint64_t)n_accepts * 0x68);
+            if (sealed != 0)
+                pal_svsm_fail("the monitor refused this vault's channel policy", sealed);
         }
     }
 

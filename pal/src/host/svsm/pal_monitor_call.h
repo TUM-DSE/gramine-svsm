@@ -70,7 +70,10 @@ int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
 noreturn void pal_svsm_exception_return(PAL_CONTEXT* context);
 /* Declare what this vault offers other vaults - the thing that makes it a
  * service. `name` is up to eight ASCII bytes packed little-endian. */
-int pal_svsm_service_declare(uint64_t name);
+int pal_svsm_service_declare(uint64_t name, uint64_t priority);
+/* ChannelPolicy (0x4FFFFFE0): seal what this vault offers other vaults,
+ * from the measured manifest, before any application code runs. */
+int64_t pal_svsm_channel_policy(const void* record, uint64_t len);
 
 typedef enum {
     PAL_SVSM_GUEST_REQUEST_FILEATTR=0,
