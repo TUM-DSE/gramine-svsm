@@ -28,6 +28,17 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
                 got |= PAL_WAIT_READ;
             break;
 
+        case PAL_TYPE_SOCKET:
+            /* Two loads from the ring's control words, no monitor call -
+             * which is what makes a poll over many sockets cheap. A peer
+             * that has gone reads as readable, so the caller gets its
+             * zero-length recv and sees the end of the stream. */
+            if ((want & PAL_WAIT_READ) && pal_svsm_sock_readable(handle))
+                got |= PAL_WAIT_READ;
+            if ((want & PAL_WAIT_WRITE) && pal_svsm_sock_writable(handle))
+                got |= PAL_WAIT_WRITE;
+            break;
+
         case PAL_TYPE_PIPESRV:
             if ((want & PAL_WAIT_READ) && pal_svsm_pipesrv_pending(handle))
                 got |= PAL_WAIT_READ;

@@ -84,6 +84,23 @@ struct pal_handle_inner {
             bool     nonblocking;
         } pipe;
 
+        /* A socket is a CHANNEL: the monitor maps a run of pages into this
+         * vault and one other, and send/recv are a store and a load on the
+         * rings in it. What the network service adds on top is where the
+         * other end of that channel goes - see PLAN.md "Full socket
+         * support". Nothing here is host-visible. */
+        struct {
+            unsigned long win;      /* the window's address, 0 until connected */
+            unsigned long widx;     /* its index, for park arms and close */
+            int      side;          /* 0 = we opened it, 1 = it was opened to us */
+            enum pal_socket_domain domain;
+            enum pal_socket_type   type;
+            uint64_t recvtimeout_us;
+            uint64_t sendtimeout_us;
+            bool     is_nonblocking;
+            bool     broken;        /* a malformed length: the stream is over */
+        } sock;
+
         struct {
             PAL_IDX fd;
             char* realpath;

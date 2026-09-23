@@ -129,6 +129,14 @@ void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on);
  * against the whole class and re-tests when woken. pal_svsm_poll_wake is
  * what a pipe write (or close) calls. */
 enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us);
+
+/* Socket readiness, from the ring's own indices (pal_sockets.c). */
+bool pal_svsm_sock_readable(PAL_HANDLE handle);
+bool pal_svsm_sock_writable(PAL_HANDLE handle);
+
+/* Who this vault may connect to, from [svsm.net] in its measured manifest. */
+extern char     g_pal_svsm_net_name[32];
+extern uint64_t g_pal_svsm_net_endpoint;
 void pal_svsm_poll_wake(void);
 
 /*

@@ -316,6 +316,37 @@ noreturn void pal_svsm_main(void)
             free(vault_name);
         }
 
+        /* [svsm.net]: who this vault may open a socket to. Measured, like
+         * everything else a vault claims about itself - `socket()` works
+         * without it, `connect()` does not, and the attestation says so.
+         *
+         *   [svsm.net]
+         *   service  = "echo"      # the name that vault declares
+         *   endpoint = "rpc"       # which of its endpoints
+         */
+        toml_table_t* net = toml_table_in(manifest_svsm_early, "net");
+        if (net) {
+            char* svc = NULL;
+            if (toml_string_in(net, "service", &svc) != 0 || !svc)
+                pal_svsm_fail("svsm.net needs a service name", 0);
+            size_t n = strlen(svc);
+            if (n == 0 || n > sizeof(g_pal_svsm_net_name))
+                pal_svsm_fail("svsm.net.service is empty or longer than 32 bytes", (int)n);
+            memcpy(g_pal_svsm_net_name, svc, n);
+            free(svc);
+
+            char* nep = NULL;
+            if (toml_string_in(net, "endpoint", &nep) != 0 || !nep)
+                pal_svsm_fail("svsm.net needs an endpoint", 0);
+            uint64_t packed = 0;
+            for (size_t i = 0; i < 8 && nep[i]; i++)
+                packed |= (uint64_t)(unsigned char)nep[i] << (i * 8);
+            if (!packed)
+                pal_svsm_fail("svsm.net.endpoint is empty", 0);
+            g_pal_svsm_net_endpoint = packed;
+            free(nep);
+        }
+
         toml_table_t* ep = toml_table_in(manifest_svsm_early, "endpoint");
         if (ep) {
             char* id = NULL;

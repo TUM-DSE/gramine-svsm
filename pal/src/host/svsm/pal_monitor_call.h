@@ -59,6 +59,13 @@ void pal_svsm_nop(void);
  * this vault (a host invoke is on the stack) and the caller must wait the
  * hard way. */
 long pal_svsm_sleep(uint64_t usec);
+/* Sleep with words to watch: the same arm encoding as Park, refused the
+ * same way while a host invoke is on the stack. */
+long pal_svsm_sleep_arms(const uint64_t* arms, uint64_t count, uint64_t usec);
+int64_t pal_svsm_channel_grant(const void* request, uint64_t len, uint64_t* out_addr);
+int64_t pal_svsm_channel_close(uint64_t window);
+int64_t pal_svsm_channel_notify(uint64_t window);
+int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec);
 /* SetExceptionEntry (0x4FFFFFE9): where the monitor should enter this PAL
  * when it has a fault for it rather than a reason to retire the process.
  * 0 stops asking, which is the state a PAL that never calls this is in.

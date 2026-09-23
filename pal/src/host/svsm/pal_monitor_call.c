@@ -146,6 +146,57 @@ int64_t pal_svsm_channel_policy(const void* record, uint64_t len) {
     return (int64_t)data.rcx;
 }
 
+/* ChannelGrant (0x4FFFFFE5): rbx = the request, rcx = its length
+ * -> rcx = this vault's window for the new channel, or a negative status;
+ * rdx = the window's address, so the caller needs no constant. */
+int64_t pal_svsm_channel_grant(const void* request, uint64_t len, uint64_t* out_addr) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE5;
+    data.rbx = (uint64_t)request;
+    data.rcx = len;
+    data.rdx = 0;
+    monitor_call(&data);
+    if (out_addr)
+        *out_addr = data.rdx;
+    return (int64_t)data.rcx;
+}
+
+/* ChannelClose (0x4FFFFFE3): rbx = the window. */
+int64_t pal_svsm_channel_close(uint64_t window) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE3;
+    data.rbx = window;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return (int64_t)data.rcx;
+}
+
+/* Notify (0x4FFFFFE2): rbx = the window -> rcx = holders told. */
+int64_t pal_svsm_channel_notify(uint64_t window) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE2;
+    data.rbx = window;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return (int64_t)data.rcx;
+}
+
+/* Park (0x4FFFFFE1): rbx = an array of arm words, rcx = how many, rdx =
+ * microseconds -> rcx = why it was woken. An arm word is
+ * `expected:32 | which:4 | window:28`; which 0 is the peer's tail ("until
+ * there is something to read"), 1 its head ("until there is room"). */
+int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE1;
+    data.rbx = (uint64_t)arms;
+    data.rcx = count;
+    data.rdx = usec;
+    monitor_call(&data);
+    return (int64_t)data.rcx;
+}
+
 /* TimeInfo (0x4FFFFFEA): -> rcx = TSC ticks per second, rdx = microseconds
  * from the epoch to this VM's zero, or 0 if unknown. */
 void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us) {
@@ -166,14 +217,18 @@ void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us) {
  *
  * This is what a cooperative scheduler with nothing runnable should do:
  * one dispatch instead of a processor held for the whole wait. */
-long pal_svsm_sleep(uint64_t usec) {
+long pal_svsm_sleep_arms(const uint64_t* arms, uint64_t count, uint64_t usec) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFDE;
-    data.rbx = usec;
-    data.rcx = 0;
-    data.rdx = 0;
+    data.rbx = (uint64_t)arms;
+    data.rcx = count;
+    data.rdx = usec;
     monitor_call(&data);
     return (long)data.rcx;
+}
+
+long pal_svsm_sleep(uint64_t usec) {
+    return pal_svsm_sleep_arms(NULL, 0, usec);
 }
 
 /* Nop (0x4FFFFFF5): costs one exit and does nothing, which is the point. */
