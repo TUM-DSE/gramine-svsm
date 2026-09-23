@@ -57,6 +57,12 @@ struct pal_sock_grant {
 char     g_pal_svsm_net_name[32];
 uint64_t g_pal_svsm_net_endpoint;
 
+/* Windows already handed to a handle - by `connect`, which opened one, or by
+ * `accept`, which found one. A bit per window, which is also how the monitor
+ * publishes them in the directory. Without it `accept` would hand out this
+ * vault's own outgoing connections, and hand the same arrival out twice. */
+static uint64_t g_sock_claimed;
+
 static void ring_for(PAL_HANDLE handle, struct pal_chan_ring* in,
                      struct pal_chan_ring* out) {
     if (in)
@@ -84,29 +90,105 @@ int _PalSocketCreate(enum pal_socket_domain domain, enum pal_socket_type type,
     return 0;
 }
 
+/*
+ * Bind records the address and nothing else.
+ *
+ * What this vault answers on is not chosen here: it is the endpoint its
+ * MEASURED manifest declares ([svsm.endpoint]), which the PAL sealed with
+ * the monitor before any application code ran. A port number in a bind is
+ * therefore a label, not a decision - and with a network service on the far
+ * end it becomes the port in the LISTEN message, which is the first point
+ * at which it means anything to anybody.
+ */
 int _PalSocketBind(PAL_HANDLE handle, struct pal_socket_addr* addr) {
-    __UNUSED(handle);
+    if (handle->hdr.type != PAL_TYPE_SOCKET)
+        return -PAL_ERROR_INVAL;
+    /* The address itself is not kept: what this vault answers on is the
+     * endpoint its measured manifest declares, and a port here would only
+     * be a label for it. */
     __UNUSED(addr);
-    /* Step 3: a bind is only meaningful against the endpoint the measured
-     * manifest declares, and nothing listens yet. */
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    handle->sock.bound = true;
+    return 0;
 }
 
+/*
+ * Listen makes this handle the one `accept` draws from.
+ *
+ * Nobody has to be told: a vault that declared an endpoint is already
+ * reachable - peers open channels to it by name and the monitor admits them
+ * by the sealed policy. The backlog is the monitor's to hold, in the sense
+ * that a channel exists from the moment it is granted whether or not this
+ * vault has accepted it yet.
+ */
 int _PalSocketListen(PAL_HANDLE handle, unsigned int backlog) {
-    __UNUSED(handle);
-    __UNUSED(backlog);
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    if (handle->hdr.type != PAL_TYPE_SOCKET)
+        return -PAL_ERROR_INVAL;
+    handle->sock.listening = true;
+    handle->sock.backlog   = backlog;
+    return 0;
 }
 
+/*
+ * A connection is a channel appearing in this vault's directory.
+ *
+ * The monitor publishes one bit per window there, and writes the region's
+ * header - magic, geometry, both ends' identity - before it sets the bit. So
+ * accept is: find a bit that is set, that this vault did not set itself by
+ * connecting, and whose header is the shape a channel has. The peer is on
+ * side 0 because it asked; we are side 1 because we were asked.
+ *
+ * Waiting for one is a sleep and a look, not a park: a new CHANNEL is not a
+ * ring index moving, so there is no word to arm. Posting a cause to the
+ * target at grant time is five lines in the monitor and is what turns this
+ * 50 ms poll into a wake (PLAN.md's receive loop, M2).
+ */
 int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE* out_client,
                      struct pal_socket_addr* out_client_addr,
                      struct pal_socket_addr* out_local_addr) {
-    __UNUSED(handle);
-    __UNUSED(options);
-    __UNUSED(out_client);
-    __UNUSED(out_client_addr);
-    __UNUSED(out_local_addr);
-    return -PAL_ERROR_NOTIMPLEMENTED;
+    if (handle->hdr.type != PAL_TYPE_SOCKET)
+        return -PAL_ERROR_INVAL;
+    if (!handle->sock.listening)
+        return -PAL_ERROR_INVAL;
+
+    bool nonblock = handle->sock.is_nonblocking || (options & PAL_OPTION_NONBLOCK);
+
+    for (;;) {
+        uint64_t live = pal_chan_u64(PAL_CHAN_DIR_VADDR, PAL_CHAN_DIR_LIVE);
+        for (unsigned w = 1; w < 64; w++) {
+            uint64_t bit = 1UL << w;
+            if (!(live & bit) || (g_sock_claimed & bit))
+                continue;
+            unsigned long win = pal_chan_window_addr(w);
+            if (pal_chan_u64(win, 0) != PAL_CHAN_HDR_MAGIC)
+                continue;
+
+            PAL_HANDLE cli = calloc(1, HANDLE_SIZE(sock));
+            if (!cli)
+                return -PAL_ERROR_NOMEM;
+            init_handle_hdr(cli, PAL_TYPE_SOCKET);
+            cli->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
+            cli->sock.domain         = handle->sock.domain;
+            cli->sock.type           = handle->sock.type;
+            cli->sock.is_nonblocking = !!(options & PAL_OPTION_NONBLOCK);
+            cli->sock.win            = win;
+            cli->sock.widx           = w;
+            cli->sock.side           = 1;   /* they asked, we were asked */
+            g_sock_claimed |= bit;
+
+            if (out_client_addr)
+                memset(out_client_addr, 0, sizeof(*out_client_addr));
+            if (out_local_addr)
+                memset(out_local_addr, 0, sizeof(*out_local_addr));
+            *out_client = cli;
+            return 0;
+        }
+
+        if (nonblock)
+            return -PAL_ERROR_TRYAGAIN;
+        if (pal_svsm_sleep(50000) < 0)
+            for (int i = 0; i < PAL_SOCK_SPINS * 50; i++)
+                __asm__ volatile("pause");
+    }
 }
 
 /*
@@ -143,6 +225,8 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     handle->sock.win  = addr_out;
     handle->sock.widx = (unsigned long)win;
     handle->sock.side = 0;                  /* we asked, so we are side 0 */
+    /* Ours, not an arrival: `accept` must not hand this back to us. */
+    g_sock_claimed |= 1UL << (unsigned)win;
 
     if (out_local_addr)
         memset(out_local_addr, 0, sizeof(*out_local_addr));
@@ -350,6 +434,8 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
+    if (handle->sock.win)
+        g_sock_claimed &= ~(1UL << handle->sock.widx);
     if (handle->sock.win)
         pal_svsm_channel_close(handle->sock.widx);
     free(handle);

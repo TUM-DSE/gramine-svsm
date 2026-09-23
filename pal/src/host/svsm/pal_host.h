@@ -99,6 +99,9 @@ struct pal_handle_inner {
             uint64_t sendtimeout_us;
             bool     is_nonblocking;
             bool     broken;        /* a malformed length: the stream is over */
+            bool     bound;
+            bool     listening;
+            unsigned int backlog;
         } sock;
 
         struct {
