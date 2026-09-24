@@ -136,6 +136,9 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle);
 
 /* Who this vault may connect to, from [svsm.net] in its measured manifest. */
 extern char     g_pal_svsm_net_name[32];
+/* 1 when that peer is a network service and `connect` must say where it
+ * is going first (svsm.net.protocol = "mvnet"). */
+extern int      g_pal_svsm_net_protocol;
 extern uint64_t g_pal_svsm_net_endpoint;
 void pal_svsm_poll_wake(void);
 

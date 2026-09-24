@@ -345,6 +345,26 @@ noreturn void pal_svsm_main(void)
                 pal_svsm_fail("svsm.net.endpoint is empty", 0);
             g_pal_svsm_net_endpoint = packed;
             free(nep);
+
+            /* Whether that service is a NETWORK service - one that will
+             * open a TCP connection on this vault's behalf - or just
+             * another vault on the other end of a pipe. It changes what
+             * `connect()` puts on the wire first (the MVN1 record in
+             * tools/netsvc/src/mvnet.h), so it is measured rather than
+             * guessed: a vault that started speaking a protocol its peer
+             * does not know would hand it the application's first bytes
+             * as if they were an address.
+             *
+             *   protocol = "mvnet"   # absent = a raw channel to a peer
+             */
+            char* proto = NULL;
+            if (toml_string_in(net, "protocol", &proto) == 0 && proto) {
+                if (!strcmp(proto, "mvnet"))
+                    g_pal_svsm_net_protocol = 1;
+                else
+                    pal_svsm_fail("svsm.net.protocol: only \"mvnet\" is known", 0);
+                free(proto);
+            }
         }
 
         toml_table_t* ep = toml_table_in(manifest_svsm_early, "endpoint");

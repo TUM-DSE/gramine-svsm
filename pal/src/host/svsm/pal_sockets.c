@@ -30,6 +30,7 @@
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
 #include "pal_svsm_chan.h"
+#include "socket_utils.h"
 
 /* How long a blocking call parks before looking again. Not a timeout the
  * application can see - the loop goes round - but the interval at which a
@@ -56,6 +57,31 @@ struct pal_sock_grant {
  * Empty means it may not: `socket()` works, `connect()` does not. */
 char     g_pal_svsm_net_name[32];
 uint64_t g_pal_svsm_net_endpoint;
+int      g_pal_svsm_net_protocol;
+
+/* The record a vault sends a NETWORK service before anything else, and
+ * the answer it waits for. Mirrored from tools/netsvc/src/mvnet.h - both
+ * ends are measured separately, so neither can negotiate this with the
+ * other; change one and change the other. */
+#define PAL_MVNET_MAGIC      0x314E564DU   /* "MVN1" */
+#define PAL_MVNET_OP_CONNECT 1
+
+struct pal_mvnet_req {
+    uint32_t magic;
+    uint8_t  op;
+    uint8_t  proto;             /* 6 = TCP */
+    uint16_t port;
+    uint8_t  addr[4];
+    uint32_t flags;
+} __attribute__((packed));
+
+struct pal_mvnet_rep {
+    uint32_t magic;
+    int32_t  status;
+    uint16_t local_port;
+    uint16_t pad;
+    uint32_t reserved;
+} __attribute__((packed));
 
 /* Windows already handed to a handle - by `connect`, which opened one, or by
  * `accept`, which found one. A bit per window, which is also how the monitor
@@ -199,14 +225,89 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
  * Open the channel this vault's manifest says it may open, and call that the
  * connection.
  *
- * The address is not used yet, and saying so is better than pretending: with
- * a network service on the far end it becomes a CONNECT message on the
- * control channel (step 4), and the same handle then carries a TCP
- * connection instead of an echo service's ring.
+ * What the address means depends on what is on the far end, and the
+ * manifest says which: to a peer vault the channel IS the connection and
+ * the address is not used; to a network service (svsm.net.protocol =
+ * "mvnet") the address goes across first as an MVN1 record and the same
+ * handle then carries a TCP connection.
  */
+/* How many times a connecting vault looks for its answer before giving
+   up. The service is dispatched by the scheduler about every millisecond,
+   so a few hundred rounds is a comfortable second or two. */
+#define PAL_MVNET_ROUNDS 2000
+
+/* One round of waiting. A park if the monitor will grant one, a spin if
+   it will not - which it will not for a vault running inside an invoke. */
+static void mvnet_wait(void) {
+    if (pal_svsm_sleep(2000) < 0)
+        for (int i = 0; i < PAL_SOCK_SPINS * 50; i++)
+            __asm__ volatile("pause");
+}
+
+/* Tell a network service where this connection is going, and wait for it
+ * to say whether it got there. Only for a peer the manifest declared to
+ * be one: to any other peer these sixteen bytes would be the
+ * application's data, arriving with a meaning nobody agreed to. */
+static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr) {
+    if (!addr || addr->domain != PAL_IPV4)
+        return -PAL_ERROR_INVAL;
+
+    struct pal_mvnet_req req;
+    memset(&req, 0, sizeof(req));
+    req.magic = PAL_MVNET_MAGIC;
+    req.op    = PAL_MVNET_OP_CONNECT;
+    req.proto = 6;
+    /* The port is carried in host order because both ends are the same
+     * machine and neither puts it on a wire; the address is not, because
+     * the service copies it straight into the header it builds. */
+    req.port  = ntohs(addr->ipv4.port);
+    memcpy(req.addr, &addr->ipv4.addr, 4);
+
+    struct pal_chan_ring in, out;
+    ring_for(handle, &in, &out);
+    if (!pal_chan_present(&in) || !pal_chan_present(&out))
+        return -PAL_ERROR_NOTSUPPORT;
+
+    /* A park is a request, not a right: a vault that is not the
+       scheduler's to dispatch - a client running inside an invoke, which
+       is most of them - is told no, and the answer to that is to spin,
+       not to give up. Treating the refusal as a failed connection is how
+       this first refused every connection it ever made, a millisecond
+       before the service accepted it. The bound is rounds, so a service
+       that never answers still loses the client rather than keeping it. */
+    for (int round = 0; round < PAL_MVNET_ROUNDS; round++) {
+        if (pal_chan_send(&out, &req, sizeof(req)) == 0) {
+            pal_svsm_channel_notify(handle->sock.widx);
+            break;
+        }
+        if (pal_chan_peer_gone(handle->sock.win, handle->sock.side))
+            return -PAL_ERROR_CONNFAILED;
+        mvnet_wait();
+        if (round == PAL_MVNET_ROUNDS - 1)
+            return -PAL_ERROR_CONNFAILED;
+    }
+
+    struct pal_mvnet_rep rep;
+    for (int round = 0; round < PAL_MVNET_ROUNDS; round++) {
+        uint32_t got = 0;
+        int rc = pal_chan_recv(&in, &rep, sizeof(rep), &got);
+        if (rc == 0) {
+            if (got != sizeof(rep) || rep.magic != PAL_MVNET_MAGIC)
+                return -PAL_ERROR_CONNFAILED;
+            /* The service's own codes are negative; it has already said
+               which kind of failure it was, and the application only gets
+               to know that the connection did not happen. */
+            return rep.status == 0 ? 0 : -PAL_ERROR_CONNFAILED;
+        }
+        if (rc == -2 || pal_chan_peer_gone(handle->sock.win, handle->sock.side))
+            return -PAL_ERROR_CONNFAILED;
+        mvnet_wait();
+    }
+    return -PAL_ERROR_CONNFAILED;
+}
+
 int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
                       struct pal_socket_addr* out_local_addr, bool* out_inprogress) {
-    __UNUSED(addr);
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_INVAL;
     if (handle->sock.win)
@@ -231,6 +332,16 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     handle->sock.side = 0;                  /* we asked, so we are side 0 */
     /* Ours, not an arrival: `accept` must not hand this back to us. */
     g_sock_claimed |= 1UL << (unsigned)win;
+
+    if (g_pal_svsm_net_protocol) {
+        int rc = mvnet_handshake(handle, addr);
+        if (rc < 0) {
+            pal_svsm_channel_close(handle->sock.widx);
+            g_sock_claimed &= ~(1UL << (unsigned)win);
+            handle->sock.win = 0;
+            return rc;
+        }
+    }
 
     if (out_local_addr)
         memset(out_local_addr, 0, sizeof(*out_local_addr));
