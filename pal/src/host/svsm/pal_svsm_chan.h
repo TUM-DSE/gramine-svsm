@@ -60,16 +60,22 @@ struct pal_chan_ring {
     unsigned long window;
 };
 
+/*
+ * VOLATILE, both of them. Everything they read - the directory's live
+ * bitmap, the region header, the geometry - is written by somebody else:
+ * the monitor when it grants a channel, the peer when it goes. A plain
+ * read is loop-invariant to a compiler that cannot see another agent, and
+ * at -O3 it is hoisted: `accept` then woke on the monitor's notify, looked
+ * at a copy of the bitmap taken before the channel existed, and went back
+ * to sleep for another poll interval. One word, one iteration late, every
+ * time.
+ */
 static inline uint64_t pal_chan_u64(unsigned long base, unsigned long off) {
-    uint64_t v;
-    memcpy(&v, (const void*)(base + off), sizeof v);
-    return v;
+    return *(const volatile uint64_t*)(base + off);
 }
 
 static inline uint32_t pal_chan_u32(unsigned long base, unsigned long off) {
-    uint32_t v;
-    memcpy(&v, (const void*)(base + off), sizeof v);
-    return v;
+    return *(const volatile uint32_t*)(base + off);
 }
 
 static inline unsigned long pal_chan_window_addr(unsigned long window) {

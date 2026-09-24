@@ -185,6 +185,10 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
 
         if (nonblock)
             return -PAL_ERROR_TRYAGAIN;
+        /* The monitor posts a cause when it publishes a new window, so this
+           is a wake rather than a poll interval; the timeout is the backstop
+           for a monitor that does not (and for the case where this vault is
+           not the scheduler's to park). */
         if (pal_svsm_sleep(50000) < 0)
             for (int i = 0; i < PAL_SOCK_SPINS * 50; i++)
                 __asm__ volatile("pause");
