@@ -40,6 +40,10 @@
 /* Spins before parking. A peer that is running answers in far less than the
  * monitor entry a park costs (PLAN.md's channel plan, D1). */
 #define PAL_SOCK_SPINS 200
+/* How many times a grant may be re-asked when the target is mid-dispatch.
+ * Each try waits ~200 us, so this is about a tenth of a second - longer
+ * than any dispatch and shorter than a client would notice. */
+#define PAL_GRANT_TRIES 500
 
 /* The grant request, exactly as monitor/kernel/src/ipc/mod.rs parses it. */
 struct pal_sock_grant {
@@ -235,6 +239,26 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
    up. The service is dispatched by the scheduler about every millisecond,
    so a few hundred rounds is a comfortable second or two. */
 #define PAL_MVNET_ROUNDS 2000
+/* How long a connect may wait for the service to answer, in microseconds.
+ * Wall clock, because a "round" is a park for a client the scheduler
+ * dispatches and a short spin for one inside an invoke - the same number
+ * of rounds was seconds for one and milliseconds for another. Two seconds
+ * is longer than a service with a full table takes to come round and
+ * short enough that a service which is not there loses the client. */
+#define PAL_MVNET_WAIT_US 2000000ULL
+
+static inline uint64_t mvnet_now(void) {
+    unsigned int lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static uint64_t mvnet_deadline(uint64_t us) {
+    uint64_t hz = pal_svsm_tsc_hz();
+    if (!hz)
+        hz = 1000000ULL;
+    return mvnet_now() + (hz / 1000000ULL) * us;
+}
 
 /* One round of waiting. A park if the monitor will grant one, a spin if
    it will not - which it will not for a vault running inside an invoke. */
@@ -275,20 +299,27 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr) {
        this first refused every connection it ever made, a millisecond
        before the service accepted it. The bound is rounds, so a service
        that never answers still loses the client rather than keeping it. */
-    for (int round = 0; round < PAL_MVNET_ROUNDS; round++) {
-        if (pal_chan_send(&out, &req, sizeof(req)) == 0) {
-            pal_svsm_channel_notify(handle->sock.widx);
-            break;
-        }
+    /* Bounded by the CLOCK, not by a number of rounds. A round is a park
+     * when the monitor allows one and a spin of a few tens of
+     * microseconds when it does not (a client inside an invoke is not
+     * the scheduler's to dispatch), so "2000 rounds" was four seconds
+     * for one client and forty milliseconds for another - and a service
+     * with eight connections in its table does not always come back
+     * within forty milliseconds. That is how a busy service looked like
+     * a refused connection (PLAN.md phase 4). */
+    uint64_t deadline = mvnet_deadline(PAL_MVNET_WAIT_US);
+    while (pal_chan_send(&out, &req, sizeof(req)) != 0) {
         if (pal_chan_peer_gone(handle->sock.win, handle->sock.side))
             return -PAL_ERROR_CONNFAILED;
-        mvnet_wait();
-        if (round == PAL_MVNET_ROUNDS - 1)
+        if (mvnet_now() > deadline)
             return -PAL_ERROR_CONNFAILED;
+        mvnet_wait();
     }
+    pal_svsm_channel_notify(handle->sock.widx);
 
     struct pal_mvnet_rep rep;
-    for (int round = 0; round < PAL_MVNET_ROUNDS; round++) {
+    deadline = mvnet_deadline(PAL_MVNET_WAIT_US);
+    for (;;) {
         uint32_t got = 0;
         int rc = pal_chan_recv(&in, &rep, sizeof(rep), &got);
         if (rc == 0) {
@@ -301,9 +332,10 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr) {
         }
         if (rc == -2 || pal_chan_peer_gone(handle->sock.win, handle->sock.side))
             return -PAL_ERROR_CONNFAILED;
+        if (mvnet_now() > deadline)
+            return -PAL_ERROR_CONNFAILED;
         mvnet_wait();
     }
-    return -PAL_ERROR_CONNFAILED;
 }
 
 int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
@@ -322,8 +354,26 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     req.endpoint = g_pal_svsm_net_endpoint;
     memcpy(req.name, g_pal_svsm_net_name, sizeof(req.name));
 
+    /* -3 (STATUS_BAD_STATE) from a grant is "the target is being entered
+     * or deleted - retry", not a refusal: the monitor needs the target's
+     * entry lock to map the region into it, and a RESIDENT service holds
+     * that lock every time the scheduler dispatches it. A service busy
+     * serving is exactly when a new client turns up, so one look was
+     * enough to lose roughly one connection in eight (PLAN.md phase 4).
+     *
+     * Bounded, and it gives the processor back between tries rather than
+     * spinning through the window: the target has to RUN and finish its
+     * dispatch for this to succeed. */
     uint64_t addr_out = 0;
-    int64_t win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
+    int64_t win = -1;
+    for (int try = 0; try < PAL_GRANT_TRIES; try++) {
+        win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
+        if (win >= 0 || win != -3)
+            break;
+        if (pal_svsm_sleep(200) < 0)
+            for (int i = 0; i < PAL_SOCK_SPINS * 50; i++)
+                __asm__ volatile("pause");
+    }
     if (win < 0)
         return -PAL_ERROR_CONNFAILED;
 
