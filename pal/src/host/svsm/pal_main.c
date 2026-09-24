@@ -297,6 +297,92 @@ noreturn void pal_svsm_main(void)
         }
     }
 
+    /* What the APPS on this base image may claim in their own frames -
+     * the delegate envelope (PLAN.md phase 2). One base zygote serves
+     * many apps, each app's frame carries its claims, and the monitor
+     * seals them at create; this is the measured bound on what such a
+     * claim may say. An app cannot widen it, and declaring one LOCKS this
+     * image out of sealing a channel policy of its own, because that
+     * policy would be inherited by every app on it.
+     *
+     *   [svsm.delegate]
+     *   policy = true                   # apps may seal a channel policy
+     *   device = false                  # apps on a DRIVER image: see below
+     *   endpoints = ["echo"]            # the only names an app may offer
+     *   max_accepts = 2                 # ceilings a claim may not exceed
+     *   max_channels = 8
+     *   levels = [0, 1, 3]
+     *   guest_visible = false
+     */
+    if (manifest_svsm_early) {
+        toml_table_t* del = toml_table_in(manifest_svsm_early, "delegate");
+        if (del) {
+            static uint8_t delegate_record[0x0C + 8 * 32] __attribute__((aligned(4096)));
+            memset(delegate_record, 0, sizeof(delegate_record));
+            memcpy(delegate_record, "MVD1", 4);
+            bool allow_policy = false, allow_device = false, guest_visible = false;
+            if (toml_bool_in(del, "policy", false, &allow_policy) < 0)
+                pal_svsm_fail("svsm.delegate.policy is not a boolean", 0);
+            if (toml_bool_in(del, "device", false, &allow_device) < 0)
+                pal_svsm_fail("svsm.delegate.device is not a boolean", 0);
+            if (toml_bool_in(del, "guest_visible", false, &guest_visible) < 0)
+                pal_svsm_fail("svsm.delegate.guest_visible is not a boolean", 0);
+            int64_t max_accepts = 0, max_channels = 0;
+            toml_int_in(del, "max_accepts", 0, &max_accepts);
+            toml_int_in(del, "max_channels", 0, &max_channels);
+            if (max_accepts < 0 || max_accepts > 8)
+                pal_svsm_fail("svsm.delegate.max_accepts is outside 0..8", (int)max_accepts);
+            if (max_channels < 0 || max_channels > 64)
+                pal_svsm_fail("svsm.delegate.max_channels is outside 0..64", (int)max_channels);
+            delegate_record[0x04] = allow_policy;
+            delegate_record[0x05] = allow_device;
+            delegate_record[0x06] = (uint8_t)max_accepts;
+            /* Which levels a claimed accept rule may admit. Absent means
+             * the monitor's default (0, 1 and 3 - never the guest's). */
+            uint8_t levels = 0;
+            toml_array_t* lv = toml_array_in(del, "levels");
+            if (lv) {
+                for (int i = 0; ; i++) {
+                    toml_datum_t d = toml_int_at(lv, i);
+                    if (!d.ok)
+                        break;
+                    if (d.u.i < 0 || d.u.i > 3)
+                        pal_svsm_fail("svsm.delegate.levels holds a level that is not 0..3",
+                                      (int)d.u.i);
+                    levels |= (uint8_t)(1u << d.u.i);
+                }
+            }
+            delegate_record[0x07] = levels;
+            delegate_record[0x08] = (uint8_t)(max_channels & 0xFF);
+            delegate_record[0x09] = (uint8_t)((max_channels >> 8) & 0xFF);
+            delegate_record[0x0A] = guest_visible;
+            /* The endpoint names an app may offer. No list means an app
+             * may offer nothing - it can still CONNECT OUT, which needs
+             * no policy of its own. */
+            int n_names = 0;
+            toml_array_t* eps = toml_array_in(del, "endpoints");
+            if (eps) {
+                for (int i = 0; ; i++) {
+                    toml_datum_t d = toml_string_at(eps, i);
+                    if (!d.ok)
+                        break;
+                    if (n_names >= 8)
+                        pal_svsm_fail("svsm.delegate.endpoints has more than 8 names", 0);
+                    size_t n = strlen(d.u.s);
+                    if (n == 0 || n > 32)
+                        pal_svsm_fail("svsm.delegate.endpoints holds an empty or "
+                                      "over-long name", (int)n);
+                    memcpy(delegate_record + 0x0C + n_names * 32, d.u.s, n);
+                    n_names++;
+                    free(d.u.s);
+                }
+            }
+            delegate_record[0x0B] = (uint8_t)n_names;
+            if (pal_svsm_delegate(delegate_record, 0x0C + n_names * 32) != 0)
+                pal_svsm_fail("svsm.delegate: the monitor refused the envelope", 0);
+        }
+    }
+
     /* And what it offers other VAULTS: the channel policy (PLAN.md,
      * "Vault-to-vault channels and an optional router"). Sealed here, from
      * the measured manifest, before any application code runs - that is

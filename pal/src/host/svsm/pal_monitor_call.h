@@ -87,6 +87,10 @@ int pal_svsm_service_declare(uint64_t name, uint64_t priority);
  * INFERENCE_VADDR in every trustlet of it. From the measured manifest,
  * in the zygote, because no trustlet can ask in time. */
 int pal_svsm_inference_declare(uint64_t want);
+/* Declare what the apps on this base image may claim in their frames
+ * (0x4FFFFFDC). Once, from the zygote, and it locks this image out of
+ * sealing a channel policy its apps would inherit. */
+int64_t pal_svsm_delegate(const void* record, uint64_t len);
 /* ChannelPolicy (0x4FFFFFE0): seal what this vault offers other vaults,
  * from the measured manifest, before any application code runs. */
 int64_t pal_svsm_channel_policy(const void* record, uint64_t len);

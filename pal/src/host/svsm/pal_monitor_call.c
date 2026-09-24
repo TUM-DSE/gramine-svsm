@@ -134,6 +134,19 @@ int pal_svsm_service_declare(uint64_t name, uint64_t priority) {
     return data.rcx == 0 ? 0 : -1;
 }
 
+/* Delegate (0x4FFFFFDC): rbx = the record, rcx = its length -> rcx = 0,
+ * or a negative status. Once, from the zygote: what the apps on this base
+ * image may claim in their frames. */
+int64_t pal_svsm_delegate(const void* record, uint64_t len) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFDC;
+    data.rbx = (uint64_t)record;
+    data.rcx = len;
+    data.rdx = 0;
+    monitor_call(&data);
+    return (int64_t)data.rcx;
+}
+
 /* InferenceDeclare (0x4FFFFFDD): rbx = 1 to take the inference scratch
  * -> rcx = 0 accepted. From the ZYGOTE only: the scratch has to exist
  * before any application code runs, because the inference client writes
