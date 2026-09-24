@@ -83,6 +83,10 @@ noreturn void pal_svsm_exception_return(PAL_CONTEXT* context);
 /* Declare what this vault offers other vaults - the thing that makes it a
  * service. `name` is up to eight ASCII bytes packed little-endian. */
 int pal_svsm_service_declare(uint64_t name, uint64_t priority);
+/* Take the inference scratch for this lineage - 512 pages at
+ * INFERENCE_VADDR in every trustlet of it. From the measured manifest,
+ * in the zygote, because no trustlet can ask in time. */
+int pal_svsm_inference_declare(uint64_t want);
 /* ChannelPolicy (0x4FFFFFE0): seal what this vault offers other vaults,
  * from the measured manifest, before any application code runs. */
 int64_t pal_svsm_channel_policy(const void* record, uint64_t len);

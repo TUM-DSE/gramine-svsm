@@ -272,6 +272,31 @@ noreturn void pal_svsm_main(void)
         }
     }
 
+    /* Does this image run inference? 512 pages at INFERENCE_VADDR in
+     * every trustlet of this lineage, or none - it used to be 2.00 of the
+     * 2.09 MiB a trustlet cost at creation, whether or not it ever ran
+     * inference, and almost none do.
+     *
+     * A trait of the image and not a runtime request, for a reason that
+     * is not about policy: the inference client writes the context page
+     * at INFERENCE_VADDR and only then calls REGISTER, so the first the
+     * monitor could otherwise hear of it is after the vault has faulted.
+     * Measured, like the service name above.
+     *
+     *   [svsm.inference]
+     *   enabled = true
+     */
+    if (manifest_svsm_early) {
+        toml_table_t* inf = toml_table_in(manifest_svsm_early, "inference");
+        if (inf) {
+            bool enabled = false;
+            if (toml_bool_in(inf, "enabled", false, &enabled) < 0)
+                pal_svsm_fail("svsm.inference.enabled is not a boolean", 0);
+            if (enabled && pal_svsm_inference_declare(1) < 0)
+                pal_svsm_fail("svsm.inference: the monitor refused the declaration", 0);
+        }
+    }
+
     /* And what it offers other VAULTS: the channel policy (PLAN.md,
      * "Vault-to-vault channels and an optional router"). Sealed here, from
      * the measured manifest, before any application code runs - that is

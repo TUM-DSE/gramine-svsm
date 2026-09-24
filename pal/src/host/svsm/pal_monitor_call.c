@@ -134,6 +134,20 @@ int pal_svsm_service_declare(uint64_t name, uint64_t priority) {
     return data.rcx == 0 ? 0 : -1;
 }
 
+/* InferenceDeclare (0x4FFFFFDD): rbx = 1 to take the inference scratch
+ * -> rcx = 0 accepted. From the ZYGOTE only: the scratch has to exist
+ * before any application code runs, because the inference client writes
+ * the context page before it calls REGISTER. */
+int pal_svsm_inference_declare(uint64_t want) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFDD;
+    data.rbx = want;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return data.rcx == 0 ? 0 : -1;
+}
+
 /* ChannelPolicy (0x4FFFFFE0): rbx = the record, rcx = its length.
  * -> rcx = 0, or a negative status. Once per lineage, from the zygote. */
 int64_t pal_svsm_channel_policy(const void* record, uint64_t len) {
