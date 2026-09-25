@@ -278,8 +278,10 @@ static int execute_loadcmd(const struct loadcmd* c, elf_addr_t base_diff,
         void* last_page_start = ALLOC_ALIGN_DOWN_PTR(zero_start);
 
         if ((c->prot & PROT_WRITE) == 0) {
+            /* This page is about to be memset, not run - see
+             * pal_prot_for_writing(). */
             if ((ret = PalVirtualMemoryProtect(last_page_start, ALLOC_ALIGNMENT,
-                                               pal_prot | PAL_PROT_WRITE) < 0)) {
+                                               pal_prot_for_writing(pal_prot)) < 0)) {
                 log_debug("cannot change memory protections");
                 return pal_to_unix_errno(ret);
             }

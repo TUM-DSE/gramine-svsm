@@ -21,9 +21,29 @@
 #define MANIFEST_START (void*)0x10000000000
 typedef void (*loader_callback)(void);
 
+/*
+ * The address space the LibOS may allocate in.
+ *
+ * It starts at PML4 slot 11 and not at slot 8, because slots 8, 9 and 10
+ * belong to the MONITOR - the model channel at 0x400_0000_0000, the GPU
+ * heap at 0x480_0000_0000 and the device window at 0x500_0000_0000 - and
+ * the monitor refuses any memory call that reaches one of them
+ * (process_runtime/process/memory.rs, `monitor_slot_touched`).
+ *
+ * The overlap was harmless for as long as every allocation was small: the
+ * LibOS hands them out from `memory_address_end` DOWNWARDS, and nothing
+ * ever walked the 3 TiB needed to reach slot 10. Reservations changed
+ * that in one step - V8 reserves 48 GB and then 32 GB four times - and
+ * the first vault to do it marched straight into slot 8 and was refused,
+ * which the program sees as an allocation failure it has no answer for.
+ *
+ * Slot 16 (channels) and slot 17 (the exception stacks) are above the end
+ * and were already out of reach; this closes the bottom the same way.
+ * What is left is 2.5 TiB, against a monitor pool of sixteen gigabytes.
+ */
 static void pal_initilize_memory() {
 
-   g_pal_public_state.memory_address_start = (void*)0x40000000000;
+   g_pal_public_state.memory_address_start = (void*)0x58000000000;
    g_pal_public_state.memory_address_end = (void*)0x80000000000;
    g_pal_public_state.initial_mem_ranges_len = 100;
 
@@ -294,6 +314,30 @@ noreturn void pal_svsm_main(void)
                 pal_svsm_fail("svsm.inference.enabled is not a boolean", 0);
             if (enabled && pal_svsm_inference_declare(1) < 0)
                 pal_svsm_fail("svsm.inference: the monitor refused the declaration", 0);
+        }
+    }
+
+    /* Does this image compile code at run time?
+     *
+     *   [svsm.jit]
+     *   enabled = true
+     *
+     * Without it a vault still gets executable pages - every ELF has
+     * text - but never a page that is writable and executable at the
+     * same moment, which is the one thing a JIT needs and the one thing
+     * that turns a memory bug into code execution. It is a trait of the
+     * IMAGE and not a runtime request for the obvious reason: a vault
+     * that could ask for it later would be asking after the attestation
+     * that said it could not.
+     */
+    if (manifest_svsm_early) {
+        toml_table_t* jit = toml_table_in(manifest_svsm_early, "jit");
+        if (jit) {
+            bool enabled = false;
+            if (toml_bool_in(jit, "enabled", false, &enabled) < 0)
+                pal_svsm_fail("svsm.jit.enabled is not a boolean", 0);
+            if (enabled && pal_svsm_jit_declare(1) < 0)
+                pal_svsm_fail("svsm.jit: the monitor refused the declaration", 0);
         }
     }
 

@@ -161,6 +161,22 @@ int pal_svsm_inference_declare(uint64_t want) {
     return data.rcx == 0 ? 0 : -1;
 }
 
+/* JitDeclare (0x4FFFFFDB): rbx = 1 to ask for pages that may be writable
+ * and executable at once -> rcx = 0 accepted. From the ZYGOTE only, like
+ * the two above: a permission a vault could grant itself at run time
+ * would be one its attestation never saw. Every vault gets executable
+ * memory without this; what this permits is W and X at the same moment,
+ * which is what a compiler needs and nothing else does. */
+int pal_svsm_jit_declare(uint64_t want) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFDB;
+    data.rbx = want;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return data.rcx == 0 ? 0 : -1;
+}
+
 /* ChannelPolicy (0x4FFFFFE0): rbx = the record, rcx = its length.
  * -> rcx = 0, or a negative status. Once per lineage, from the zygote. */
 int64_t pal_svsm_channel_policy(const void* record, uint64_t len) {

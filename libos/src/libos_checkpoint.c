@@ -327,7 +327,10 @@ static int receive_memory_on_stream(PAL_HANDLE handle, struct checkpoint_hdr* hd
                 continue;
             }
 
-            ret = PalVirtualMemoryAlloc(addr, size, prot | PAL_PROT_WRITE);
+            /* Writable to read the checkpoint into, not executable
+             * while it is - see pal_prot_for_writing(). */
+            pal_prot_flags_t load_prot = pal_prot_for_writing(prot);
+            ret = PalVirtualMemoryAlloc(addr, size, load_prot);
             if (ret < 0) {
                 log_error("failed allocating %p-%p", addr, addr + size);
                 return pal_to_unix_errno(ret);
@@ -338,7 +341,7 @@ static int receive_memory_on_stream(PAL_HANDLE handle, struct checkpoint_hdr* hd
                 return ret;
             }
 
-            if (!(prot & PAL_PROT_WRITE)) {
+            if (load_prot != prot) {
                 ret = PalVirtualMemoryProtect(addr, size, prot);
                 if (ret < 0) {
                     log_error("failed protecting %p-%p", addr, addr + size);

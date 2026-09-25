@@ -142,7 +142,10 @@ int generic_emulated_mmap(struct libos_handle* hdl, void* addr, size_t size, int
     int ret;
 
     pal_prot_flags_t pal_prot = LINUX_PROT_TO_PAL(prot, flags);
-    pal_prot_flags_t pal_prot_writable = pal_prot | PAL_PROT_WRITE;
+    /* A text segment mapped from a filesystem with no real mmap comes
+     * through here with R|X, and the region has to be writable to read
+     * the file into it - see pal_prot_for_writing(). */
+    pal_prot_flags_t pal_prot_writable = pal_prot_for_writing(pal_prot);
 
     ret = PalVirtualMemoryAlloc(addr, size, pal_prot_writable);
     if (ret < 0)

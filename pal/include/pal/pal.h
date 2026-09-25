@@ -259,6 +259,30 @@ typedef uint32_t pal_prot_flags_t; /* bitfield */
 #define PAL_PROT_WRITECOPY 0x8
 #define PAL_PROT_MASK      0xF
 
+/*!
+ * \brief The protection to use while WRITING a region that will end up
+ *        with `prot`.
+ *
+ * Loaders and checkpoint restore repeatedly need a region writable for a
+ * moment - to relocate it, to read a file into it, to zero its tail -
+ * and then put `prot` back. The obvious `prot | PAL_PROT_WRITE` makes a
+ * text segment WRITABLE AND EXECUTABLE for the length of that moment.
+ *
+ * The SVSM monitor refuses exactly that combination to any vault whose
+ * measured manifest did not declare `[svsm.jit]` (`refused_wx`,
+ * monitor/kernel/src/process_runtime/process/memory.rs), because it is
+ * what a JIT needs and what turns a memory bug into code execution.
+ * Nothing executes from a region while it is being written, so dropping
+ * EXEC costs nothing and keeps every loader inside the rule rather than
+ * exempting the code that loads programs from it.
+ *
+ * Callers restore `prot` afterwards, guarded on `pal_prot_for_writing(p)
+ * != p` so that a region that really was W|X gets its X back too.
+ */
+static inline pal_prot_flags_t pal_prot_for_writing(pal_prot_flags_t prot) {
+    return (prot & ~PAL_PROT_EXEC) | PAL_PROT_WRITE;
+}
+
 struct pal_initial_mem_range {
     uintptr_t start;
     uintptr_t end;

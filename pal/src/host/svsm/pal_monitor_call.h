@@ -87,6 +87,9 @@ int pal_svsm_service_declare(uint64_t name, uint64_t priority);
  * INFERENCE_VADDR in every trustlet of it. From the measured manifest,
  * in the zygote, because no trustlet can ask in time. */
 int pal_svsm_inference_declare(uint64_t want);
+/* JitDeclare: this lineage may hold a page that is writable and
+ * executable at once. Zygote only, from the measured manifest. */
+int pal_svsm_jit_declare(uint64_t want);
 /* Declare what the apps on this base image may claim in their frames
  * (0x4FFFFFDC). Once, from the zygote, and it locks this image out of
  * sealing a channel policy its apps would inherit. */

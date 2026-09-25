@@ -596,8 +596,12 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
      * (need to first change memory permissions to writable and then revert permissions back) */
     for (size_t i = 0; i < loadcmds_cnt; i++) {
         struct loadcmd* c = &loadcmds[i];
+        /* A text segment being relocated is the case this exists for:
+         * c->prot is R|X and the relocation needs W. Nothing runs from
+         * these pages until the loop below puts c->prot back - see
+         * pal_prot_for_writing(). */
         ret = _PalVirtualMemoryProtect((void*)c->start, c->alloc_end - c->start,
-                                       c->prot | PAL_PROT_WRITE);
+                                       pal_prot_for_writing(c->prot));
         if (ret < 0) {
             log_error("Failed to add write memory protection on the segment from ELF file");
             goto out;

@@ -1330,7 +1330,7 @@ static bool madvise_dontneed_visitor(struct libos_vma* vma, void* visitor_arg) {
     uintptr_t zero_end = MIN(ctx->end, vma->end);
 
     pal_prot_flags_t pal_prot = LINUX_PROT_TO_PAL(vma->prot, vma->flags);
-    pal_prot_flags_t pal_prot_writable = pal_prot | PAL_PROT_WRITE;
+    pal_prot_flags_t pal_prot_writable = pal_prot_for_writing(pal_prot);
 
     if (pal_prot != pal_prot_writable) {
         /* make the area writable so that it can be memset-to-zero */
@@ -1428,7 +1428,7 @@ static int reload_vma(struct libos_vma_info* vma_info) {
     size_t read = 0;
     file_off_t pos = (file_off_t)vma_info->file_offset;
     pal_prot_flags_t pal_prot = LINUX_PROT_TO_PAL(vma_info->prot, vma_info->flags);
-    pal_prot_flags_t pal_prot_writable = pal_prot | PAL_PROT_WRITE;
+    pal_prot_flags_t pal_prot_writable = pal_prot_for_writing(pal_prot);
 
     if (pal_prot != pal_prot_writable) {
         /* make the area writable so that it can be reloaded */
