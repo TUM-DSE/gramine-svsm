@@ -129,8 +129,18 @@ void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on);
  * against the whole class and re-tests when woken. pal_svsm_poll_wake is
  * what a pipe write (or close) calls. */
 enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us);
+/* What the calling thread is about to wait on, so that the PAL's
+ * scheduler can ask the monitor to watch those words rather than giving
+ * the processor back blind. See pal_threading.c. */
+void pal_svsm_thread_arm(const uint64_t* arms, size_t count, bool partial);
+/* The manifest declared [svsm.service]: this vault means to be resident,
+ * so the PAL may Park it and let a host invoke end with GETRESULT. */
+extern bool g_pal_svsm_is_service;
 
 /* Socket readiness, from the ring's own indices (pal_sockets.c). */
+/* The ring word that would make this socket ready for `want`. Returns
+ * the number of arms written (0 or 1). */
+int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_arm);
 bool pal_svsm_sock_readable(PAL_HANDLE handle);
 bool pal_svsm_sock_writable(PAL_HANDLE handle);
 

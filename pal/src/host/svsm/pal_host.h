@@ -15,6 +15,13 @@ struct pal_svsm_pipe_pair;
 #error "cannot be included outside PAL"
 #endif
 
+/* How many ring words one blocked thread may ask the monitor to watch.
+ * The monitor's budget is `queue::PARK_ARMS` (3 today); this is the
+ * PAL-side array and the gather in pick_next() clamps to whatever the
+ * Park call accepts, so raising one does not require raising the other
+ * in the same commit. */
+#define PAL_SVSM_THREAD_ARMS 4
+
 /* Named, unlike the other hosts' anonymous version, because a thread handle
  * links to the next one in the scheduler's ring (see pal_threading.c). */
 struct pal_handle_inner;
@@ -68,6 +75,19 @@ struct pal_handle_inner {
             bool       has_deadline;
             bool       interrupted;  /* _PalThreadResume landed */
             bool       timed_out;
+            /* The ring words that would make this thread runnable, as
+             * `pal_chan_arm` encodes them. A blocked thread leaves them
+             * here so that the PAL's scheduler, which is the thing that
+             * actually gives the processor back, can tell the monitor
+             * what to watch - without which a vault waiting in poll()
+             * wakes on its timeout rather than on its peer's send.
+             *
+             * `arms_partial` means there were more waitable channels
+             * than arms, so a wake may be missed and the park needs a
+             * bounded fallback: late rather than invisible. */
+            uint64_t   arms[PAL_SVSM_THREAD_ARMS];
+            uint8_t    n_arms;
+            bool       arms_partial;
         } thread;
 
         struct {
