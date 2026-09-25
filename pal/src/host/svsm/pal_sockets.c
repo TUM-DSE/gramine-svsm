@@ -585,6 +585,35 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
     return ret;
 }
 
+/* The ring word that would make this socket ready for `want`, for a
+ * thread that is about to give the processor back.
+ *
+ * This is the difference between a vault that wakes when its peer sends
+ * and one that wakes when its poll timeout expires. The baseline is what
+ * THIS side last saw, not what the word says now: if the peer wrote
+ * between the poll and the park, the word already differs and the
+ * monitor ends the park before it begins, rather than waiting for a
+ * write that has already happened.
+ *
+ * Returns the number of arms written (0 or 1). A socket with residue
+ * already buffered writes none and reports itself ready instead.
+ */
+int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_arm) {
+    if (handle->hdr.type != PAL_TYPE_SOCKET || !handle->sock.win)
+        return 0;
+    struct pal_chan_ring in, out;
+    ring_for(handle, &in, &out);
+    if ((want & PAL_WAIT_READ) && !pal_svsm_sock_readable(handle)) {
+        *out_arm = pal_chan_arm(handle->sock.widx, PAL_CHAN_ARM_TAIL, *in.peer_tail);
+        return 1;
+    }
+    if ((want & PAL_WAIT_WRITE) && !pal_svsm_sock_writable(handle)) {
+        *out_arm = pal_chan_arm(handle->sock.widx, PAL_CHAN_ARM_HEAD, *out.peer_head);
+        return 1;
+    }
+    return 0;
+}
+
 bool pal_svsm_sock_readable(PAL_HANDLE handle) {
     if (!handle->sock.win)
         return false;

@@ -18,6 +18,11 @@
 #include "toml_utils.h"
 
 #define MONITOR_PAGE_SIZE 4096
+
+/* This vault's measured manifest declared [svsm.service], so it means to
+ * be resident and the PAL's scheduler may Park it. See pal_threading.c's
+ * park_on(). */
+bool g_pal_svsm_is_service = false;
 #define MANIFEST_START (void*)0x10000000000
 typedef void (*loader_callback)(void);
 
@@ -286,8 +291,17 @@ noreturn void pal_svsm_main(void)
             toml_int_in(manifest_svsm_early, "priority", 4, &priority);
             if (priority < 0) priority = 0;
             if (priority > 7) priority = 7;
-            if (packed)
+            if (packed) {
                 pal_svsm_service_declare(packed, (uint64_t)priority);
+                /* And remember it, because it is the PAL's only honest
+                 * answer to "does this vault MEAN to be resident?". A
+                 * Park ends a host invoke and hands the host GETRESULT;
+                 * for a service that is how it becomes resident, and for
+                 * an ordinary vault it would return a result nobody
+                 * wrote. The manifest says which this is, and the
+                 * manifest is measured. */
+                g_pal_svsm_is_service = true;
+            }
             free(service_name);
         }
     }

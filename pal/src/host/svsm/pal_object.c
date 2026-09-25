@@ -87,9 +87,34 @@ int _PalStreamsWaitEvents(size_t count, PAL_HANDLE* handle_array, pal_wait_flags
         if (any)
             break;
 
-        /* Nothing yet. Park until a pipe moves or the deadline passes -
-         * there is one CPU, so spinning here would stop the very thread
-         * that would have made one of these ready. */
+        /* Nothing yet, so say WHAT would change that before giving the
+         * processor back. Without this the vault parks blind and wakes
+         * on its own timeout - a server polling ten sockets learns about
+         * a request when its poll expires, not when the request
+         * arrives - and `epoll_wait(-1)` had nothing that could ever
+         * end it, which the PAL used to call a deadlock and die on.
+         *
+         * A socket already readable contributes nothing: it is ready,
+         * and `any` above would have seen it. More sockets than arms is
+         * not an error, it is `partial`, and the scheduler turns that
+         * into a bounded park. */
+        uint64_t arms[PAL_SVSM_THREAD_ARMS];
+        size_t n_arms = 0;
+        bool partial = false;
+        for (size_t i = 0; i < count; i++) {
+            if (!handle_array[i] || handle_array[i]->hdr.type != PAL_TYPE_SOCKET)
+                continue;
+            uint64_t arm;
+            if (!pal_svsm_sock_arm(handle_array[i], events[i], &arm))
+                continue;
+            if (n_arms == PAL_SVSM_THREAD_ARMS) {
+                partial = true;
+                break;
+            }
+            arms[n_arms++] = arm;
+        }
+        pal_svsm_thread_arm(arms, n_arms, partial);
+
         enum pal_svsm_wait_result wr = pal_svsm_poll_block(timeout_us ? &deadline_us : NULL);
         if (wr == PAL_SVSM_WAIT_TIMEOUT) {
             ret = -PAL_ERROR_TRYAGAIN;

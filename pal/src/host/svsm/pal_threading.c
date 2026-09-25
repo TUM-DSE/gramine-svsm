@@ -92,6 +92,76 @@ static void reap_stack(void) {
     free(stack);
 }
 
+/* How long a park waits when nobody asked for a deadline: insurance, not
+ * a wait anybody requested. A missed wake then costs a late dispatch
+ * instead of a vault that never runs again - the same trade the
+ * scheduler's own device watch makes. The shorter one is for a park that
+ * could not arm everything it wanted to. */
+#define SVSM_PARK_FALLBACK_US  1000000UL
+#define SVSM_PARK_PARTIAL_US     20000UL
+
+/*
+ * The words that would make any blocked thread runnable, gathered for a
+ * Park.
+ *
+ * The PAL's scheduler is the thing that actually gives the processor
+ * back, but the thread that knows WHY it is waiting is the one that
+ * blocked. So a blocking thread leaves its arms on its own handle and
+ * this collects them. A thread that had more waitable channels than it
+ * could arm sets `arms_partial`, and so does an overflow here, because
+ * both mean the same thing downstream: a wake may be missed, so the
+ * park needs a bounded fallback.
+ */
+static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
+    size_t n = 0;
+    *partial = false;
+    PAL_HANDLE t = g_current;
+    do {
+        if (t->thread.state == PAL_SVSM_THREAD_BLOCKED) {
+            if (t->thread.arms_partial)
+                *partial = true;
+            for (unsigned i = 0; i < t->thread.n_arms; i++) {
+                if (n == max) {
+                    *partial = true;
+                    break;
+                }
+                arms[n++] = t->thread.arms[i];
+            }
+        }
+        t = t->thread.next;
+    } while (t != g_current);
+    return n;
+}
+
+/*
+ * Give the processor back until one of `arms` moves or `usec` passes.
+ *
+ * Park (0x4FFFFFE1), not Sleep (0x4FFFFFDE), and the difference is the
+ * whole of why a LibOS application can be a resident service at all. A
+ * Park issued inside a host invoke RETURNS GETRESULT to the host: the
+ * invoke ends, the vault becomes parked and resident, and the scheduler
+ * dispatches it again when one of these words changes, when a peer
+ * notifies it, when a peer goes, or when the timeout expires. Sleep is
+ * refused in that position on purpose (channel_calls.rs:148), which is
+ * why everything here used to spin instead.
+ *
+ * Refused for a vault that never declared a service name, because the
+ * scheduler has no slot to park it in. That is not an error: it is an
+ * ordinary vault doing an ordinary invoke, and the caller falls back to
+ * what it did before.
+ */
+static bool park_on(const uint64_t* arms, size_t n, uint64_t usec) {
+    /* Only a vault whose MEASURED manifest declared a service. For
+     * anything else a Park would end the host invoke it is sitting in
+     * and hand the host a GETRESULT for a result nobody has written -
+     * which is exactly why Sleep refuses in that position. The manifest
+     * is the only signal available here that says "this vault means to
+     * be resident", and being measured is what makes it a safe one. */
+    if (!g_pal_svsm_is_service)
+        return false;
+    return pal_svsm_park(n ? arms : NULL, n, usec) >= 0;
+}
+
 /* Give the vCPU back until `deadline_us`, in slices, so that the monitor and
  * the host both still get a turn while this vault has nothing to run. */
 static void idle_until(uint64_t deadline_us) {
@@ -101,13 +171,31 @@ static void idle_until(uint64_t deadline_us) {
             return;
         uint64_t left = deadline_us - now;
 
-        /* Every context is blocked and only the clock can change that, so
-         * there is nothing for this vault to do with a processor. Ask the
-         * monitor for the time back: it parks this vault and dispatches it
-         * when the deadline passes, which costs one dispatch instead of the
-         * whole wait. Refused while a host invoke is on the stack - a park
-         * returns GETRESULT and would end the invoke - and then we spin as
-         * we always did. */
+        /* Every context is blocked, so there is nothing for this vault
+         * to do with a processor. Ask the monitor for it back, WATCHING
+         * whatever words would make a blocked thread runnable - without
+         * them this waits out the whole deadline even though the peer
+         * may have sent in the first microsecond, which is what a
+         * poll-based service spent its life doing.
+         *
+         * Park rather than Sleep, because a Park in this position is
+         * what makes the vault resident (see park_on). If the vault has
+         * no service slot the monitor refuses, and then the Sleep and
+         * the spin that were here before are still what happens. */
+        uint64_t arms[PAL_SVSM_THREAD_ARMS];
+        bool partial = false;
+        size_t n = gather_arms(arms, PAL_SVSM_THREAD_ARMS, &partial);
+        if (park_on(arms, n, left)) {
+            /* RETURN, do not loop. A park can end because a watched word
+             * moved, and that is a state change the waiter has to see -
+             * looping here would re-park until the deadline passed and
+             * throw away the very wake this was armed for. Every poller
+             * becomes runnable and re-tests its handles; the ones that
+             * are still not ready block again, which is one more park
+             * and is correct. */
+            pal_svsm_poll_wake();
+            return;
+        }
         if (pal_svsm_sleep(left) >= 0)
             continue;
 
@@ -163,8 +251,26 @@ static PAL_HANDLE pick_next(void) {
         if (g_current->thread.state == PAL_SVSM_THREAD_RUNNING)
             return g_current;
 
-        if (!have_deadline)
+        if (!have_deadline) {
+            /* No deadline. Before this that was a deadlock by
+             * definition, and for a vault with no channels it still is -
+             * but a thread waiting on a ring has something that can wake
+             * it, and `epoll_wait(-1)` on a channel socket is the
+             * ordinary shape of a server rather than a bug. */
+            uint64_t arms[PAL_SVSM_THREAD_ARMS];
+            bool partial = false;
+            size_t n = gather_arms(arms, PAL_SVSM_THREAD_ARMS, &partial);
+            if (!n && !partial)
+                return NULL;
+            if (park_on(arms, n, partial ? SVSM_PARK_PARTIAL_US
+                                         : SVSM_PARK_FALLBACK_US)) {
+                pal_svsm_poll_wake();
+                continue;
+            }
+            /* No service slot, so this vault cannot be parked and a wait
+             * with no deadline really is one that nothing can end. */
             return NULL;
+        }
 
         idle_until(earliest);
     }
@@ -529,6 +635,13 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
 
     self->thread.waiting_on   = NULL;
     self->thread.has_deadline = false;
+    /* The arms belonged to this wait. Anything that runs now re-tests
+     * what it is waiting for, so a stale word would only make the next
+     * park end early - but it would also make it end early for a
+     * DIFFERENT thread's wait, which is a bug that would look like a
+     * spurious wake and be very hard to see. */
+    self->thread.n_arms       = 0;
+    self->thread.arms_partial = false;
 
     if (self->thread.interrupted) {
         self->thread.interrupted = false;
@@ -555,6 +668,27 @@ static const char g_poll_token_storage;
 
 enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
     return pal_svsm_thread_block(POLL_TOKEN, deadline_us);
+}
+
+/*
+ * What this thread is about to wait on, in words the monitor can watch.
+ *
+ * Called just before blocking, by whoever knows what the wait is for.
+ * `partial` says the caller had more it wanted watched than it could
+ * fit, which the scheduler turns into a bounded fallback rather than an
+ * indefinite park.
+ */
+void pal_svsm_thread_arm(const uint64_t* arms, size_t count, bool partial) {
+    if (!g_current)
+        return;
+    if (count > PAL_SVSM_THREAD_ARMS) {
+        count   = PAL_SVSM_THREAD_ARMS;
+        partial = true;
+    }
+    for (size_t i = 0; i < count; i++)
+        g_current->thread.arms[i] = arms[i];
+    g_current->thread.n_arms       = (uint8_t)count;
+    g_current->thread.arms_partial = partial;
 }
 
 void pal_svsm_poll_wake(void) {
