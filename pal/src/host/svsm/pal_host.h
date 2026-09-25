@@ -99,6 +99,15 @@ struct pal_handle_inner {
             uint64_t sendtimeout_us;
             bool     is_nonblocking;
             bool     broken;        /* a malformed length: the stream is over */
+            /* What a message had left over when the caller's buffer was
+             * smaller than it. A channel carries MESSAGES and a stream
+             * socket is read in whatever pieces the program felt like,
+             * so the two have to meet somewhere: the whole message is
+             * taken from the ring (which keeps the ring safe for the
+             * several holders a fork makes) and the rest waits here. */
+            char*    rx;            /* one slot's worth, allocated on demand */
+            uint32_t rx_len;        /* bytes in it */
+            uint32_t rx_off;        /* how many the caller has had */
             bool     bound;
             bool     listening;
             unsigned int backlog;

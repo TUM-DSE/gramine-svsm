@@ -488,30 +488,58 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
     bool nonblock = force_nonblocking || handle->sock.is_nonblocking;
     uint64_t room = iov_total(iov, iov_len);
-    char* buf = malloc(in.slot);
-    if (!buf)
-        return -PAL_ERROR_NOMEM;
+
+    /* The residue buffer. A channel carries MESSAGES; a stream socket is
+     * read in whatever pieces the program chose, and those are not the
+     * same size. The whole message comes out of the ring in one go - so
+     * the ring stays safe for the several holders a fork makes, and the
+     * head advances immediately - and what the caller could not take
+     * waits in the handle for its next read.
+     *
+     * Before this, a read smaller than a message was answered with the
+     * SAME -2 as a malformed length, and `broken` then made every later
+     * call on the handle fail with EACCES. Any ordinary program that
+     * reads in 512-byte pieces, or peeks a byte, was dead on its first
+     * read. */
+    if (!handle->sock.rx) {
+        handle->sock.rx = malloc(in.slot);
+        if (!handle->sock.rx)
+            return -PAL_ERROR_NOMEM;
+        handle->sock.rx_len = handle->sock.rx_off = 0;
+    }
 
     int ret;
     for (;;) {
-        uint32_t got = 0;
-        int rc = pal_chan_recv(&in, buf, (uint32_t)(room < in.slot ? room : in.slot), &got);
-        if (rc == 0) {
+        /* Serve what is already here first. */
+        if (handle->sock.rx_off < handle->sock.rx_len) {
+            uint64_t have = handle->sock.rx_len - handle->sock.rx_off;
             uint64_t off = 0;
-            for (size_t i = 0; i < iov_len && off < got; i++) {
+            for (size_t i = 0; i < iov_len && off < have && off < room; i++) {
                 uint64_t take = iov[i].iov_len;
-                if (take > got - off)
-                    take = got - off;
-                memcpy(iov[i].iov_base, buf + off, take);
+                if (take > have - off)
+                    take = have - off;
+                memcpy(iov[i].iov_base, handle->sock.rx + handle->sock.rx_off + off, take);
                 off += take;
             }
+            handle->sock.rx_off += (uint32_t)off;
+            if (handle->sock.rx_off >= handle->sock.rx_len)
+                handle->sock.rx_len = handle->sock.rx_off = 0;
             *out_total_size = off;
-            ret = 0;
-            break;
+            return 0;
+        }
+
+        uint32_t got = 0;
+        int rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
+        if (rc == 0) {
+            handle->sock.rx_len = got;
+            handle->sock.rx_off = 0;
+            continue;                   /* serve it from the buffer above */
         }
         if (rc == -2) {
-            /* A length that cannot be right. The head is not advanced, so
-             * nothing is silently skipped; the stream is over. */
+            /* A length that cannot be right - not "your buffer is small",
+             * which is now impossible here because the whole slot is
+             * always offered. The head is not advanced, so nothing is
+             * silently skipped; the stream is over. */
             handle->sock.broken = true;
             ret = -PAL_ERROR_DENIED;
             break;
@@ -538,13 +566,16 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             for (int i = 0; i < PAL_SOCK_SPINS; i++)
                 __asm__ volatile("pause");
     }
-    free(buf);
     return ret;
 }
 
 bool pal_svsm_sock_readable(PAL_HANDLE handle) {
     if (!handle->sock.win)
         return false;
+    /* What a previous read could not take is readable too, or a poll
+     * after a short read says "nothing here" with bytes in hand. */
+    if (handle->sock.rx_off < handle->sock.rx_len)
+        return true;
     struct pal_chan_ring in;
     ring_for(handle, &in, NULL);
     return pal_chan_readable(&in) || pal_chan_peer_gone(handle->sock.win, handle->sock.side);
@@ -603,6 +634,7 @@ static void sock_destroy(PAL_HANDLE handle) {
         g_sock_claimed &= ~(1UL << handle->sock.widx);
     if (handle->sock.win)
         pal_svsm_channel_close(handle->sock.widx);
+    free(handle->sock.rx);          /* the residue buffer, if it was ever needed */
     free(handle);
 }
 
