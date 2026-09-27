@@ -87,8 +87,15 @@ struct pal_svsm_preempt_ctl {
 
 extern struct pal_svsm_preempt_ctl g_pal_svsm_preempt;
 
+/*
+ * The quantum a vault asks for when nothing is waiting on a sooner
+ * deadline: a scheduling quantum, not a timer tick - the longest a runnable
+ * sibling should wait behind a thread that never blocks.
+ */
+#define PAL_SVSM_PREEMPT_DEFAULT_US 4000
 /* Keep `wanted` in step with the ready queue. Called by the scheduler. */
 void pal_svsm_preempt_update(bool others_runnable);
+
 
 /*
  * Threads (pal_threading.c). Cooperative contexts inside the one CPL3

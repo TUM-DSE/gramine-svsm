@@ -237,6 +237,27 @@ static PAL_HANDLE pick_next(void) {
             t = t->thread.next;
         } while (t != g_current);
 
+        /*
+         * This is the one place that knows the earliest deadline in the
+         * vault, and it is tempting to tell the monitor so - to ask to be
+         * interrupted in time for a timer sooner than the default quantum,
+         * since the scheduler only runs when somebody yields and nobody is
+         * going to. It was tried (2026-09-27) and it costs far more than it
+         * buys, so it is deliberately not done:
+         *
+         * every Python vault has a LibOS async-worker context whose
+         * deadline is usually a millisecond or two away, so "arm the
+         * monitor's clock at the earliest deadline" means arming it at a
+         * millisecond for every vault, all the time. Measured: 30,959 tick
+         * returns in two lane sections against 37,566 for a whole lane
+         * before, and a resident 1 ms service losing 19 ms across a vault
+         * create - the stall the service classes exist to prevent.
+         *
+         * A deadline sooner than the quantum is therefore a vault's own
+         * business until something shows it is not: the quantum bounds how
+         * long a sibling waits behind a thread that never blocks, which is
+         * what it was chosen for.
+         */
         /* Round robin: start after whoever ran last, so a thread that yields
          * goes to the back. */
         PAL_HANDLE start = g_current->thread.next;

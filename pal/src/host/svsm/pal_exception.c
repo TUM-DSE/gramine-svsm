@@ -51,7 +51,7 @@
  */
 struct pal_svsm_preempt_ctl g_pal_svsm_preempt = {
     .wanted = 0,
-    .min_interval_us = 4000,
+    .min_interval_us = PAL_SVSM_PREEMPT_DEFAULT_US,
     .count = 0,
     .text_start = 0,
     .text_end = 0,
