@@ -74,8 +74,8 @@ int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec);
  * that thread's alternate stack - the stack a fault is delivered on, which
  * must not be the one it interrupted. `preempt_ctl` is the three-word block
  * that governs preemption (struct pal_svsm_preempt_ctl). */
-int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
-                                 void* preempt_ctl);
+uint64_t pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
+                                      void* preempt_ctl);
 /* ExceptionReturn (0x4FFFFFE8): resume from `context`. Does not return -
  * restoring rip, rsp and rflags together is what an iretq is for, and this
  * side of the boundary runs at CPL3 and has none. */

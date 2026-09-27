@@ -286,16 +286,21 @@ void pal_svsm_nop(void) {
 
 /* SetExceptionEntry (0x4FFFFFE9): rbx = the entry, rcx = where in the TCB
  * the alternate stack is described, rdx = the preempt control block
- * -> rcx = 0 accepted. */
-int pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
-                                 void* preempt_ctl) {
+ * -> rcx = what the monitor can do for this vault (PAL_SVSM_CAP_*).
+ *
+ * It answered a bare 0 until 2026-09-27 and this returned an error for
+ * anything else, which is why the answer is a BITMAP and not a version:
+ * a vault built before a capability existed sees 0 for it and keeps the
+ * path it always had. */
+uint64_t pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
+                                      void* preempt_ctl) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFE9;
     data.rbx = (uint64_t)entry;
     data.rcx = tcb_alt_stack_offset;
     data.rdx = (uint64_t)preempt_ctl;
     monitor_call(&data);
-    return data.rcx == 0 ? 0 : -1;
+    return data.rcx;
 }
 
 /* ExceptionReturn (0x4FFFFFE8): rbx = the context. The monitor overwrites

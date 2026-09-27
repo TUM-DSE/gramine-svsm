@@ -57,6 +57,9 @@ struct pal_svsm_preempt_ctl g_pal_svsm_preempt = {
     .text_end = 0,
 };
 
+/* Whether the fault-return gate exists; see PAL_SVSM_CAP_RET_GATE. */
+uint8_t g_pal_svsm_ret_gate = 0;
+
 void pal_svsm_preempt_update(bool others_runnable) {
     __atomic_store_n(&g_pal_svsm_preempt.wanted, others_runnable ? 1 : 0,
                      __ATOMIC_RELEASE);
@@ -140,12 +143,13 @@ void pal_svsm_exception_init(void) {
     g_pal_svsm_preempt.text_start = g_pal_text_start;
     g_pal_svsm_preempt.text_end   = g_pal_text_end;
 
-    int ret = pal_svsm_set_exception_entry(&pal_svsm_exception_trampoline,
-                                           offsetof(PAL_SVSM_TCB, alt_stack_top),
-                                           &g_pal_svsm_preempt);
-    if (ret < 0) {
-        /* Not fatal: without it a fault retires the vault exactly as it
-         * did before, which is the behaviour every vault has had so far. */
-        log_error("the monitor refused an exception entry - faults stay fatal");
-    }
+    uint64_t caps = pal_svsm_set_exception_entry(&pal_svsm_exception_trampoline,
+                                                offsetof(PAL_SVSM_TCB, alt_stack_top),
+                                                &g_pal_svsm_preempt);
+    /* The answer used to be a bare 0 and there is no failure to report: the
+     * monitor either has an entry for this vault or the vault is hosted and
+     * gets none of the capabilities. What WOULD be fatal is assuming one it
+     * was not given - `int $0x81` in a hosted vault is a #GP on the first
+     * fault return - so the flag is set from the answer and nowhere else. */
+    g_pal_svsm_ret_gate = (caps & PAL_SVSM_CAP_RET_GATE) ? 1 : 0;
 }

@@ -93,6 +93,22 @@ extern struct pal_svsm_preempt_ctl g_pal_svsm_preempt;
  * sibling should wait behind a thread that never blocks.
  */
 #define PAL_SVSM_PREEMPT_DEFAULT_US 4000
+
+/*
+ * What the monitor told this vault it can do (SetExceptionEntry's answer).
+ *
+ * RET_GATE: the trustlet IDT has a DPL-3 gate at 0x81 that resumes a
+ * PAL_CONTEXT, so finishing a fault costs an `int` rather than a monitor
+ * call - no VMPL round trip and no walk of this vault's page table by the
+ * monitor. A HOSTED vault (VMPL0, CPL3 inside the monitor) is told 0,
+ * because it traps into the SVSM's own IDT where that gate does not exist.
+ */
+#define PAL_SVSM_CAP_RET_GATE 1
+
+/* Set once at startup from the capability word. A byte rather than the whole
+ * word because the only reader is three instructions of assembly on the
+ * fault-return path (arch/x86_64/pal_switch.S). */
+extern uint8_t g_pal_svsm_ret_gate;
 /* Keep `wanted` in step with the ready queue. Called by the scheduler. */
 void pal_svsm_preempt_update(bool others_runnable);
 
