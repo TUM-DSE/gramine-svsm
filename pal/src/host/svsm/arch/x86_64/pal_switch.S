@@ -122,20 +122,38 @@ pal_svsm_exception_trampoline:
 /*
  * void pal_svsm_exception_resume(PAL_CONTEXT* ctx, void* xsave_area)
  *
- * Put the extended state back and ask the monitor to resume from `ctx`.
- * Nothing between the XRSTOR and the call may touch vector state, which is
- * why this is written out rather than left to a compiler.
+ * Put the extended state back and resume from `ctx`. Nothing between the
+ * XRSTOR and the resume may touch vector state, which is why this is written
+ * out rather than left to a compiler.
+ *
+ * Two ways out, and rbx carries the context for both.
+ *
+ * `int $0x81` is a gate in the trustlet IDT - a stub at CPL0 in this vault's
+ * own address space rebuilds the iretq frame from the context and returns,
+ * which costs an interrupt and no more. The monitor call below does the same
+ * work from VMPL0 and pays a VMPL round trip and a walk of this vault's page
+ * table for it: 4.7 us of `excret` plus about 23,000 cycles, on every fault,
+ * every trapped syscall and every preemption.
+ *
+ * The gate is used only when the monitor said it exists
+ * (PAL_SVSM_CAP_RET_GATE). A hosted vault traps into the SVSM's own IDT and
+ * has no such gate, so assuming it would be a #GP on the first fault return.
  */
     .globl pal_svsm_exception_resume
     .type pal_svsm_exception_resume, @function
     .align 16
 pal_svsm_exception_resume:
     .cfi_startproc
-    movq  %rdi, %rbx                 /* the monitor reads the context here */
+    movq  %rdi, %rbx                 /* the context, for either route */
     movl  $-1, %eax
     movl  $-1, %edx
     xrstor64 (%rsi)
 
+    cmpb  $0, g_pal_svsm_ret_gate(%rip)
+    je    .Lresume_by_call
+    int   $0x81                      /* does not return */
+    ud2
+.Lresume_by_call:
     movl  $0x4FFFFFE8, %eax          /* ExceptionReturn */
     cpuid                            /* does not return */
     ud2
