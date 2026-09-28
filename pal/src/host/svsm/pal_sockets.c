@@ -31,6 +31,8 @@
 #include "pal_svsm.h"
 #include "pal_svsm_chan.h"
 #include "socket_utils.h"
+#include "toml.h"
+#include "toml_utils.h"
 
 /* How long a blocking call parks before looking again. Not a timeout the
  * application can see - the loop goes round - but the interval at which a
@@ -62,6 +64,155 @@ struct pal_sock_grant {
 char     g_pal_svsm_net_name[32];
 uint64_t g_pal_svsm_net_endpoint;
 int      g_pal_svsm_net_protocol;
+
+/*
+ * Where a socket goes: a table, not a single peer.
+ *
+ * `[svsm.net]` above is one service/endpoint pair from the ZYGOTE's
+ * manifest, which is the image's, which is shared by every app on a base
+ * image. So with it alone a socket app has exactly one peer it can ever
+ * reach, whatever address it connects to - `_PalSocketConnect` ignored the
+ * sockaddr entirely - and a deployment of several services could not be
+ * built out of unmodified socket applications at all (PLAN.md R3).
+ *
+ * The table comes from the APP's own manifest, carried in its MVF1 frame
+ * (`hostctl --app-manifest`), which is covered by the function measurement
+ * and therefore by the vault's identity. So who a client may reach is
+ * measured per app rather than per image, and two apps on one base image
+ * have different peers - which is what the base-image split promised and
+ * what a compose file needs:
+ *
+ *     [[svsm.connect]]
+ *     addr     = "127.0.0.2"     # what the application connects to
+ *     port     = 7001
+ *     service  = "a"             # the vault that answers
+ *     endpoint = "rpc"
+ *     protocol = "mvnet"         # optional, per ENTRY: some peers are
+ *                                # network services and some are not
+ *
+ * Read lazily, at the first connect, and not at startup: `pal_main` runs
+ * in the zygote and a trustlet never runs it again, so a table parsed at
+ * startup would be the zygote's - which is to say nobody's.
+ */
+#define PAL_CONNECT_MAX 8
+
+struct pal_connect_entry {
+    uint32_t addr;                /* IPv4, host order */
+    uint16_t port;
+    char     name[32];
+    uint64_t endpoint;
+    int      protocol;
+};
+
+static struct pal_connect_entry g_connect[PAL_CONNECT_MAX];
+static int  g_connect_n;
+static bool g_connect_loaded;
+
+static uint32_t pal_parse_ipv4(const char* s) {
+    uint32_t v = 0;
+    for (int part = 0; part < 4; part++) {
+        unsigned b = 0, digits = 0;
+        while (*s >= '0' && *s <= '9') { b = b * 10 + (unsigned)(*s++ - '0'); digits++; }
+        if (!digits || b > 255)
+            return 0;
+        v = (v << 8) | b;
+        if (part < 3) {
+            if (*s != '.')
+                return 0;
+            s++;
+        }
+    }
+    return *s ? 0 : v;
+}
+
+static void pal_connect_load(void) {
+    if (g_connect_loaded)
+        return;
+    g_connect_loaded = true;      /* once, however it goes */
+
+    /* The frame, at the address every vault's function blob is mapped at.
+     * A blob that is not framed, or a frame with no manifest, simply
+     * leaves the table empty and the single [svsm.net] in charge. */
+    const volatile uint8_t* f = (const volatile uint8_t*)0x14000000000ULL;
+    if (f[0] != 'M' || f[1] != 'V' || f[2] != 'F' || f[3] != 'N')
+        return;
+    uint64_t m_off = 0, m_len = 0;
+    memcpy(&m_off, (const void*)(f + 8 + 16), 8);
+    memcpy(&m_len, (const void*)(f + 8 + 24), 8);
+    if (!m_len || m_len > 64 * 1024)
+        return;
+
+    char* text = malloc((size_t)m_len + 1);
+    if (!text)
+        return;
+    memcpy(text, (const void*)(f + m_off), (size_t)m_len);
+    text[m_len] = 0;
+
+    char errbuf[256];
+    toml_table_t* root = toml_parse(text, errbuf, sizeof(errbuf));
+    free(text);
+    if (!root)
+        return;
+    toml_table_t* svsm = toml_table_in(root, "svsm");
+    toml_array_t* arr = svsm ? toml_array_in(svsm, "connect") : NULL;
+    for (int i = 0; arr && i < toml_array_nelem(arr) && g_connect_n < PAL_CONNECT_MAX; i++) {
+        toml_table_t* e = toml_table_at(arr, i);
+        if (!e)
+            continue;
+        struct pal_connect_entry ent;
+        memset(&ent, 0, sizeof(ent));
+
+        char* s = NULL;
+        if (toml_string_in(e, "addr", &s) != 0 || !s)
+            continue;
+        ent.addr = pal_parse_ipv4(s);
+        free(s);
+        if (!ent.addr)
+            continue;
+
+        int64_t port = 0;
+        if (toml_int_in(e, "port", 0, &port) != 0 || port <= 0 || port > 65535)
+            continue;
+        ent.port = (uint16_t)port;
+
+        s = NULL;
+        if (toml_string_in(e, "service", &s) != 0 || !s)
+            continue;
+        size_t n = strlen(s);
+        if (n == 0 || n > sizeof(ent.name)) { free(s); continue; }
+        memcpy(ent.name, s, n);
+        free(s);
+
+        s = NULL;
+        if (toml_string_in(e, "endpoint", &s) != 0 || !s)
+            continue;
+        for (size_t k = 0; k < 8 && s[k]; k++)
+            ent.endpoint |= (uint64_t)(unsigned char)s[k] << (k * 8);
+        free(s);
+        if (!ent.endpoint)
+            continue;
+
+        s = NULL;
+        if (toml_string_in(e, "protocol", &s) == 0 && s) {
+            ent.protocol = !strcmp(s, "mvnet");
+            free(s);
+        }
+        g_connect[g_connect_n++] = ent;
+    }
+    toml_free(root);
+}
+
+/* The entry for an address, or NULL. */
+static const struct pal_connect_entry* pal_connect_find(struct pal_socket_addr* addr) {
+    if (!addr || addr->domain != PAL_IPV4)
+        return NULL;
+    uint32_t want = __builtin_bswap32(addr->ipv4.addr);
+    uint16_t port = __builtin_bswap16(addr->ipv4.port);
+    for (int i = 0; i < g_connect_n; i++)
+        if (g_connect[i].addr == want && g_connect[i].port == port)
+            return &g_connect[i];
+    return NULL;
+}
 
 /* The record a vault sends a NETWORK service before anything else, and
  * the answer it waits for. Mirrored from tools/netsvc/src/mvnet.h - both
@@ -344,15 +495,38 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
         return -PAL_ERROR_INVAL;
     if (handle->sock.win)
         return -PAL_ERROR_INVAL;
-    if (!g_pal_svsm_net_name[0])
+    /* Which peer, from the address the application asked for.
+     *
+     * With a table (the app's own measured manifest, see pal_connect_load)
+     * the address DECIDES, and an address that is not in it is refused -
+     * which is the point. Before this, connect() ignored the sockaddr and
+     * opened the one channel `[svsm.net]` named, so a getaddrinfo miss or
+     * a typo did not fail: it wrote whatever the application sent - a DNS
+     * query, say - into some other service's ring as data.
+     *
+     * Without a table the single `[svsm.net]` still decides, exactly as
+     * before, so every vault built before this keeps its behaviour. */
+    pal_connect_load();
+    const struct pal_connect_entry* ent = pal_connect_find(addr);
+    const char* peer_name = g_pal_svsm_net_name;
+    uint64_t peer_endpoint = g_pal_svsm_net_endpoint;
+    int peer_protocol = g_pal_svsm_net_protocol;
+    if (g_connect_n) {
+        if (!ent)
+            return -PAL_ERROR_CONNFAILED;
+        peer_name = ent->name;
+        peer_endpoint = ent->endpoint;
+        peer_protocol = ent->protocol;
+    }
+    if (!peer_name[0])
         return -PAL_ERROR_DENIED;
 
     struct pal_sock_grant req;
     memset(&req, 0, sizeof(req));
     memcpy(&req.magic, "MVG1", 4);
     req.selector = 1;                       /* by name */
-    req.endpoint = g_pal_svsm_net_endpoint;
-    memcpy(req.name, g_pal_svsm_net_name, sizeof(req.name));
+    req.endpoint = peer_endpoint;
+    memcpy(req.name, peer_name, strnlen(peer_name, sizeof(req.name)));
 
     /* -3 (STATUS_BAD_STATE) from a grant is "the target is being entered
      * or deleted - retry", not a refusal: the monitor needs the target's
@@ -383,7 +557,7 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     /* Ours, not an arrival: `accept` must not hand this back to us. */
     g_sock_claimed |= 1UL << (unsigned)win;
 
-    if (g_pal_svsm_net_protocol) {
+    if (peer_protocol) {
         int rc = mvnet_handshake(handle, addr);
         if (rc < 0) {
             pal_svsm_channel_close(handle->sock.widx);
