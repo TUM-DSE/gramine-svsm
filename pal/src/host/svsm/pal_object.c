@@ -55,6 +55,22 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
 }
 
 /*
+ * Is anything this blocked thread is polling ready now?
+ *
+ * Called by the scheduler, for a thread that is not the running one, so it
+ * must only read: `poll_one` is loads from rings and ring headers and does
+ * nothing else.
+ */
+bool pal_svsm_poller_ready(PAL_HANDLE thread) {
+    for (size_t i = 0; i < thread->thread.n_watch; i++) {
+        PAL_HANDLE h = thread->thread.watch_handles[i];
+        if (h && poll_one(h, thread->thread.watch_events[i]))
+            return true;
+    }
+    return false;
+}
+
+/*
  * Wait until one of these handles has one of these events, or the timeout
  * runs out.
  *
@@ -114,6 +130,10 @@ int _PalStreamsWaitEvents(size_t count, PAL_HANDLE* handle_array, pal_wait_flags
             arms[n_arms++] = arm;
         }
         pal_svsm_thread_arm(arms, n_arms, partial);
+        /* And leave the set itself where the scheduler can re-test it, for
+         * the far more common case where this vault keeps running (an
+         * async worker, another thread) and so never parks at all. */
+        pal_svsm_thread_watch(count, handle_array, events);
 
         enum pal_svsm_wait_result wr = pal_svsm_poll_block(timeout_us ? &deadline_us : NULL);
         if (wr == PAL_SVSM_WAIT_TIMEOUT) {

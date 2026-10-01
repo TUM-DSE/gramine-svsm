@@ -88,6 +88,25 @@ struct pal_handle_inner {
             uint64_t   arms[PAL_SVSM_THREAD_ARMS];
             uint8_t    n_arms;
             bool       arms_partial;
+            /* What a thread blocked in poll() is watching, so that the
+             * scheduler can re-test it without a monitor call.
+             *
+             * The arms above are for the MONITOR, and they only reach it
+             * when this vault parks. A vault with a LibOS async worker
+             * never gets that far: the worker's deadline is a
+             * millisecond or two away, so there is always something
+             * runnable, `idle_until` is never reached, and a poller
+             * stayed blocked until its own timeout expired even though
+             * its peer had answered - `settimeout(5)` on an ordinary
+             * socket meant a five-second wait for a reply that was
+             * already in the ring (next.md 124).
+             *
+             * These point into the frame of the thread's own
+             * `_PalStreamsWaitEvents`, which is alive for exactly as
+             * long as it is blocked there. */
+            PAL_HANDLE* watch_handles;
+            uint32_t*   watch_events;   /* pal_wait_flags_t, not declared yet here */
+            size_t      n_watch;
         } thread;
 
         struct {
