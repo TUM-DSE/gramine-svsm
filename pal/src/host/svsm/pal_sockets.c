@@ -91,6 +91,13 @@ struct pal_mvnet_rep {
  * `accept`, which found one. A bit per window, which is also how the monitor
  * publishes them in the directory. Without it `accept` would hand out this
  * vault's own outgoing connections, and hand the same arrival out twice. */
+/* Defined at the bottom of this file. Declared here because the two places
+ * a socket handle is made are above it, and `g_pal_handle_ops[]` carries no
+ * entry for PAL_TYPE_SOCKET - so without attaching this per handle,
+ * HANDLE_OPS() returns NULL and every attribute call on a socket answers
+ * BADHANDLE. */
+extern struct handle_ops g_sock_ops;
+
 static uint64_t g_sock_claimed;
 
 static void ring_for(PAL_HANDLE handle, struct pal_chan_ring* in,
@@ -112,6 +119,14 @@ int _PalSocketCreate(enum pal_socket_domain domain, enum pal_socket_type type,
     if (!hdl)
         return -PAL_ERROR_NOMEM;
     init_handle_hdr(hdl, PAL_TYPE_SOCKET);
+    /* `g_pal_handle_ops[]` has no PAL_TYPE_SOCKET entry and HANDLE_OPS()
+     * prefers a per-handle table, so this is what makes attributes work at
+     * all. Without it every attribute call returned BADHANDLE, which the
+     * LibOS turns into EBADF - so `socket.settimeout(5)` raised
+     * `OSError: [Errno 9] Bad file descriptor` and an application could not
+     * bound a wait. The ops table itself has been complete and unreachable
+     * at the bottom of this file since sockets were written. */
+    hdl->hdr.ops = &g_sock_ops;
     hdl->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
     hdl->sock.domain         = domain;
     hdl->sock.type           = type;
@@ -196,6 +211,7 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
             if (!cli)
                 return -PAL_ERROR_NOMEM;
             init_handle_hdr(cli, PAL_TYPE_SOCKET);
+            cli->hdr.ops = &g_sock_ops;      /* as in _PalSocketCreate */
             cli->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
             cli->sock.domain         = handle->sock.domain;
             cli->sock.type           = handle->sock.type;
@@ -641,6 +657,13 @@ static void sock_destroy(PAL_HANDLE handle) {
 static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
     __UNUSED(mode);
     if (handle->sock.win) {
+        /* Release the claim BEFORE clearing `win`, because `sock_destroy`
+         * guards its own release on `win` being set and would then never
+         * run: the window index would stay claimed for the life of the
+         * vault and `accept` would skip it for ever. Unreachable until the
+         * ops table above was attached, and reachable now, so it is fixed
+         * in the same change that reaches it. */
+        g_sock_claimed &= ~(1UL << handle->sock.widx);
         pal_svsm_channel_close(handle->sock.widx);
         handle->sock.win = 0;
     }
