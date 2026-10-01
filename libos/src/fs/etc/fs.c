@@ -132,12 +132,69 @@ out:
     return ret;
 }
 
+/*
+ * /etc/hosts, from the PAL.
+ *
+ * The host cannot put a file in here: a vault's filesystem comes from its
+ * measured runtime image. But the vault knows the names and addresses of the
+ * peers it may reach, because they are in its own measured manifest, and
+ * `PalExtraHostsFile` renders that table as the file a resolver expects. So
+ * the name a program looks up and the peer it reaches come from one attested
+ * source, and an application can say a NAME rather than an address.
+ */
+static int provide_etc_hosts(struct libos_dentry* dent, char** out_data, size_t* out_size) {
+    __UNUSED(dent);
+
+    /* Fetched at READ time, not at mount time: in a vault the table comes
+     * from the function blob, and the blob belongs to a trustlet - a zygote
+     * does not map it. By the time anything opens this file, the app is
+     * running and it does. */
+    const char* hosts = PalExtraHostsFile();
+    if (!hosts)
+        return -ENOENT;
+
+    size_t len = strlen(hosts);
+    char* buf = malloc(len + 1);
+    if (!buf)
+        return -ENOMEM;
+    memcpy(buf, hosts, len + 1);
+
+    *out_data = buf;
+    *out_size = len;
+    return 0;
+}
+
 int init_etcfs(void) {
     pseudo_add_str(NULL, "emulated-etc-resolv-conf", &provide_etc_resolv_conf);
+    pseudo_add_str(NULL, "emulated-etc-hosts", &provide_etc_hosts);
     return 0;
 }
 
 int mount_etcfs(void) {
+    int ret;
+
+    /* Independent of the one below: a host may have a hosts file to offer and
+     * no DNS configuration at all, which is exactly the vault case.
+     *
+     * A failure here is logged and not fatal. This is the first thing in
+     * this tree to mount anything under /etc, the mount depends on what the
+     * image's own manifest put in the namespace, and an image that cannot
+     * take it should run exactly as it did before rather than refuse to
+     * start - which is what it did when this was fatal: "the zygote died
+     * during its bootstrap", with nothing saying why. */
+    if (g_pal_public_state->extra_hosts_provider) {
+        ret = mount_fs(&(struct libos_mount_params){
+            .type = "pseudo",
+            .path = "/etc/hosts",
+            .uri = "emulated-etc-hosts",
+        });
+        if (ret < 0)
+            log_warning("could not mount /etc/hosts (%d): names will not resolve, "
+                        "addresses still will", ret);
+        else
+            log_debug("mounted /etc/hosts from the connect table");
+    }
+
     if (!g_pal_public_state->extra_runtime_domain_names_conf)
         return 0;
 

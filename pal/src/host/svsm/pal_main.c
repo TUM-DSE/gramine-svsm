@@ -252,6 +252,10 @@ noreturn void pal_svsm_main(void)
     //pal_svsm_fail("Test error", 0);
 
     // Parsing the Manifest located at a fixed address
+    /* This PAL can render an /etc/hosts from a vault's own connect table.
+     * The content is fetched when something reads the file, because it comes
+     * from the function blob and only a trustlet has one. */
+    g_pal_public_state.extra_hosts_provider = true;
     g_pal_public_state.manifest_root = toml_parse(raw_manifest, errbuf, sizeof(errbuf));
     if(!g_pal_public_state.manifest_root)
         INIT_FAIL_MANIFEST(errbuf);

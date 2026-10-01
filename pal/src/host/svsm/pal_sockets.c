@@ -34,6 +34,10 @@
 #include "toml.h"
 #include "toml_utils.h"
 
+/* Defined at the bottom of this file; named here because the two places that
+ * make a socket handle have to attach it. */
+extern struct handle_ops g_sock_ops;
+
 /* How long a blocking call parks before looking again. Not a timeout the
  * application can see - the loop goes round - but the interval at which a
  * vault whose wake was missed notices anyway. */
@@ -105,6 +109,8 @@ struct pal_connect_entry {
 };
 
 static struct pal_connect_entry g_connect[PAL_CONNECT_MAX];
+/* The same table as the file a resolver reads; see PalExtraHostsFile. */
+static const char* g_hosts_file;
 static int  g_connect_n;
 static bool g_connect_loaded;
 
@@ -200,6 +206,44 @@ static void pal_connect_load(void) {
         g_connect[g_connect_n++] = ent;
     }
     toml_free(root);
+
+    /* And the same table as the file a resolver reads, so an application
+     * can use a NAME. Built here because this is where the names and the
+     * addresses are both known, and published through the public state the
+     * LibOS already reads (`extra_hosts_file`); the LibOS mounts
+     * /etc/hosts when it is not NULL.
+     *
+     * A vault's filesystem comes from its measured runtime image, so the
+     * host's generated hosts file cannot be mounted in - and should not be:
+     * this one is rendered from the vault's OWN measured manifest, so the
+     * name a program resolves and the peer it reaches come from the same
+     * attested source. */
+    if (g_connect_n) {
+        size_t cap = 64 + (size_t)g_connect_n * 64;
+        char* hosts = malloc(cap);
+        if (hosts) {
+            size_t n = (size_t)snprintf(hosts, cap, "127.0.0.1 localhost\n");
+            for (int i = 0; i < g_connect_n && n < cap; i++) {
+                uint32_t a = g_connect[i].addr;
+                n += (size_t)snprintf(hosts + n, cap - n, "%u.%u.%u.%u %s\n",
+                                      (a >> 24) & 255, (a >> 16) & 255,
+                                      (a >> 8) & 255, a & 255, g_connect[i].name);
+            }
+            g_hosts_file = hosts;
+        }
+    }
+}
+
+/* The hosts file for this vault, loading the table if nothing has yet.
+ *
+ * Called by the LibOS when it decides whether to mount /etc/hosts, which it
+ * does before anything has connected - so this is the one place the table
+ * has to be loaded eagerly rather than at the first connect. Loading it
+ * twice is free: `pal_connect_load` is idempotent.
+ */
+const char* PalExtraHostsFile(void) {
+    pal_connect_load();
+    return g_hosts_file;
 }
 
 /* The entry for an address, or NULL. */
@@ -263,6 +307,20 @@ int _PalSocketCreate(enum pal_socket_domain domain, enum pal_socket_type type,
     if (!hdl)
         return -PAL_ERROR_NOMEM;
     init_handle_hdr(hdl, PAL_TYPE_SOCKET);
+    /* Attach the operations, which `g_pal_handle_ops[]` does not carry for
+     * PAL_TYPE_SOCKET - `HANDLE_OPS` prefers a per-handle table and the
+     * socket path is the one that uses it.
+     *
+     * Without this, EVERY attribute call on a socket returned BADHANDLE,
+     * which the LibOS turns into EBADF. What that looked like from inside a
+     * vault was `socket.settimeout(5)` raising
+     * `OSError: [Errno 9] Bad file descriptor` - because settimeout is
+     * fcntl(F_SETFL), which is `setflags`, which queries the PAL first - so
+     * an application could not bound a wait at all, and a blocking recv in a
+     * host invoke held the ring's single slot for ever (next.md 123). The
+     * ops table has been sitting at the bottom of this file, correct and
+     * unreachable, since sockets were written. */
+    hdl->hdr.ops = &g_sock_ops;
     hdl->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
     hdl->sock.domain         = domain;
     hdl->sock.type           = type;
@@ -347,6 +405,7 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
             if (!cli)
                 return -PAL_ERROR_NOMEM;
             init_handle_hdr(cli, PAL_TYPE_SOCKET);
+            cli->hdr.ops = &g_sock_ops;      /* as in _PalSocketCreate */
             cli->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
             cli->sock.domain         = handle->sock.domain;
             cli->sock.type           = handle->sock.type;

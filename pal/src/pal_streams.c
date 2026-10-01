@@ -22,6 +22,12 @@ extern struct handle_ops g_proc_ops;
 extern struct handle_ops g_event_ops;
 extern struct handle_ops g_eventfd_ops;
 
+/* A host that has no notion of a generated hosts file needs to do nothing:
+ * this is what it gets. The SVSM PAL overrides it (pal_sockets.c). */
+__attribute__((weak)) const char* PalExtraHostsFile(void) {
+    return NULL;
+}
+
 const struct handle_ops* g_pal_handle_ops[PAL_HANDLE_TYPE_BOUND] = {
     [PAL_TYPE_FILE]    = &g_file_ops,
     [PAL_TYPE_PIPE]    = &g_pipe_ops,

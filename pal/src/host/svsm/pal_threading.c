@@ -196,15 +196,52 @@ static void idle_until(uint64_t deadline_us) {
             pal_svsm_poll_wake();
             return;
         }
-        if (pal_svsm_sleep(left) >= 0)
-            continue;
+        /* The Park was refused: no service slot, so this vault has
+         * nothing the scheduler could park it in. Sleep instead - but
+         * sleep the SAME WAY, watching the same words and bounded, so a
+         * missed wake costs a slice rather than the whole wait.
+         *
+         * `pal_svsm_sleep(left)` was here: no arms, and the entire
+         * remaining deadline. Sleep takes arms in exactly the format Park
+         * does, so there was never a reason for that; nothing could end
+         * it early, and a poller underneath it waited out its own
+         * timeout. */
+        uint64_t slice = left;
+        if (n || partial) {
+            uint64_t cap = partial ? SVSM_PARK_PARTIAL_US : SVSM_PARK_FALLBACK_US;
+            if (slice > cap)
+                slice = cap;
+        }
+        if (pal_svsm_sleep_arms(n ? arms : NULL, n, slice) >= 0) {
+            /* As in the Park branch: a watched word may have moved, and
+             * that is a state change every poller has to see. Return
+             * rather than loop, so `pick_next` runs them. */
+            pal_svsm_poll_wake();
+            return;
+        }
 
+        /* The monitor refused the Sleep as well, which is what happens
+         * to a vault inside a HOST INVOKE: a park in that position would
+         * end the invoke and hand the host a GETRESULT for a result
+         * nobody wrote, so `park_common` refuses anything the scheduler
+         * did not dispatch. An ordinary client vault - which is what
+         * every socket application is - therefore spins its wait out.
+         *
+         * Spin a SLICE and hand control back, rather than spinning the
+         * whole deadline here. The loop was internal to this function,
+         * so nothing re-tested a thread blocked in poll() until the
+         * deadline passed: a client with `settimeout(5)` burned five
+         * seconds of its own vCPU and then found the reply that had been
+         * in the ring since the first millisecond. `pick_next` re-tests
+         * blocked pollers on every pass, so returning here is what turns
+         * this into a 100 us poll interval instead of a 5 s one. */
         uint64_t until = now + (left < SVSM_IDLE_SLICE_US ? left : SVSM_IDLE_SLICE_US);
         /* Bare pause, not CPU_RELAX: yielding from the idle loop would come
          * straight back here. */
         while (pal_svsm_now_usec() < until)
             __asm__ volatile("pause");
         pal_svsm_nop();
+        return;
     }
 }
 
@@ -223,6 +260,20 @@ static PAL_HANDLE pick_next(void) {
 
         PAL_HANDLE t = g_current;
         do {
+            /* A poller whose handles have become ready is runnable NOW,
+             * whatever its deadline says. Nothing else re-tests it: a
+             * peer's send runs no code in this vault, and the only other
+             * place that looks is `idle_until`, which a vault with an
+             * async worker never reaches. Plain loads from the ring's
+             * control words - no monitor call - so this costs two loads
+             * per watched socket per scheduler pass, and only while
+             * something is actually blocked in poll(). */
+            if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
+                    && pal_svsm_poller_ready(t)) {
+                t->thread.waiting_on = NULL;
+                t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+                pal_svsm_preempt_update(true);
+            }
             if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.has_deadline) {
                 if (now >= t->thread.deadline_us) {
                     t->thread.timed_out  = true;
@@ -663,6 +714,10 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
      * spurious wake and be very hard to see. */
     self->thread.n_arms       = 0;
     self->thread.arms_partial = false;
+    /* Points into this call's own frame, which is about to go. */
+    self->thread.n_watch       = 0;
+    self->thread.watch_handles = NULL;
+    self->thread.watch_events  = NULL;
 
     if (self->thread.interrupted) {
         self->thread.interrupted = false;
@@ -710,6 +765,21 @@ void pal_svsm_thread_arm(const uint64_t* arms, size_t count, bool partial) {
         g_current->thread.arms[i] = arms[i];
     g_current->thread.n_arms       = (uint8_t)count;
     g_current->thread.arms_partial = partial;
+}
+
+/*
+ * The handles a thread about to block in poll() is waiting on.
+ *
+ * Stored rather than copied: these point into the caller's frame, which
+ * is alive for exactly as long as the thread is blocked in it, and
+ * `pal_svsm_thread_block` clears them on the way out.
+ */
+void pal_svsm_thread_watch(size_t count, PAL_HANDLE* handles, pal_wait_flags_t* events) {
+    if (!g_current)
+        return;
+    g_current->thread.watch_handles = handles;
+    g_current->thread.watch_events  = events;
+    g_current->thread.n_watch       = handles && events ? count : 0;
 }
 
 void pal_svsm_poll_wake(void) {

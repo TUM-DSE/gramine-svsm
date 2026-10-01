@@ -240,6 +240,15 @@ struct pal_public_state {
     struct pal_topo_info topo_info; /* received from untrusted host, but sanitized */
 
     bool extra_runtime_domain_names_conf;
+    /*
+     * This host can render an /etc/hosts for the instance (see
+     * `PalExtraHostsFile`). A flag rather than the content, because the
+     * content may not be READABLE yet when the LibOS decides what to mount:
+     * in a vault it comes from the function blob, which a ZYGOTE does not
+     * map at all - reading it at LibOS init killed every zygote in the tree
+     * with "died during its bootstrap" and nothing saying why.
+     */
+    bool extra_hosts_provider;
     struct pal_dns_host_conf dns_host;
 };
 
@@ -913,6 +922,21 @@ typedef uint32_t pal_wait_flags_t; /* bitfield */
 #define PAL_WAIT_WRITE    2
 #define PAL_WAIT_ERROR    4
 #define PAL_WAIT_HANG_UP  8
+
+/*!
+ * \brief The contents of /etc/hosts for this instance, or NULL.
+ *
+ * A vault's filesystem comes from its measured runtime image, so a hosts file
+ * the HOST generates cannot be mounted into it - and should not be. A vault
+ * does know the names and addresses of the peers it may reach, because they
+ * are in its own measured manifest, so this renders that table as the file a
+ * resolver expects: the name a program looks up and the peer it reaches come
+ * from the same attested source.
+ *
+ * Weakly defined to return NULL, so a host PAL that has no such notion needs
+ * to do nothing at all.
+ */
+const char* PalExtraHostsFile(void);
 
 /*!
  * \brief Poll - wait for an event to happen on at least one handle.

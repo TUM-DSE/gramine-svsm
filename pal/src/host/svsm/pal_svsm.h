@@ -156,6 +156,12 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us);
  * scheduler can ask the monitor to watch those words rather than giving
  * the processor back blind. See pal_threading.c. */
 void pal_svsm_thread_arm(const uint64_t* arms, size_t count, bool partial);
+
+/* What a thread about to block in poll() is watching, and the test the
+ * scheduler makes on it. Together these are what wakes a poller when its
+ * peer sends rather than when its timeout runs out. */
+void pal_svsm_thread_watch(size_t count, PAL_HANDLE* handles, pal_wait_flags_t* events);
+bool pal_svsm_poller_ready(PAL_HANDLE thread);
 /* The manifest declared [svsm.service]: this vault means to be resident,
  * so the PAL may Park it and let a host invoke end with GETRESULT. */
 extern bool g_pal_svsm_is_service;
