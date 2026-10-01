@@ -150,6 +150,17 @@ struct pal_handle_inner {
             bool     bound;
             bool     listening;
             unsigned int backlog;
+            /* Which of this vault's endpoints this listening socket is
+             * for, from the port it was bound to and the measured
+             * `[[svsm.listen]]` table. Zero means the vault declared no
+             * table, and then accept takes any window - which is what it
+             * did before there was more than one endpoint to take.
+             *
+             * Without this a vault that binds two ports cross-connects
+             * its clients: accept took the first unclaimed live window
+             * whatever it had been opened to. */
+            uint16_t bind_port;
+            uint64_t listen_endpoint;
         } sock;
 
         struct {

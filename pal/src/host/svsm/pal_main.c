@@ -474,7 +474,11 @@ noreturn void pal_svsm_main(void)
     if (manifest_svsm_early) {
         /* Page-aligned: the monitor copies the record from one page,
          * which is all a call argument may span. */
-        static uint8_t policy_record[0x44 + 8 * 0x68] __attribute__((aligned(4096)));
+        /* Room for the accept array and, after it, the endpoints beyond
+         * the first - see the wire format in monitor ipc/mod.rs. */
+        static uint8_t policy_record[0x44 + 8 * 0x68 + 8 * 8] __attribute__((aligned(4096)));
+        uint64_t extra_eps[8];
+        int n_extra_eps = 0;
         memset(policy_record, 0, sizeof(policy_record));
         memcpy(policy_record, "VCP1", 4);
         bool wanted = false;
@@ -552,6 +556,30 @@ noreturn void pal_svsm_main(void)
                 pal_svsm_fail("svsm.endpoint.id is empty", 0);
             memcpy(policy_record + 0x24, &packed, 8);
             free(id);
+
+            /* Other endpoints this one vault answers on:
+             *
+             *   id   = "http"
+             *   also = ["https"]
+             *
+             * One vault, several ports - a service on 80 and 443 is one
+             * measured identity rather than two, and which listening
+             * socket a connection lands on is decided by the
+             * `[[svsm.listen]]` table below. The ring geometry is shared:
+             * a message is the same size whichever port asked for it. */
+            toml_array_t* also = toml_array_in(ep, "also");
+            for (int i = 0; also && i < toml_array_nelem(also); i++) {
+                toml_datum_t d = toml_string_at(also, i);
+                if (!d.ok)
+                    pal_svsm_fail("svsm.endpoint.also holds something that is not an id", 0);
+                if (n_extra_eps == 8)
+                    pal_svsm_fail("svsm.endpoint offers more than eight endpoints", 0);
+                uint64_t e = pal_svsm_pack_endpoint(d.u.s);
+                free(d.u.s);
+                if (!e)
+                    pal_svsm_fail("svsm.endpoint.also holds an empty id", 0);
+                extra_eps[n_extra_eps++] = e;
+            }
 
             uint8_t dir = 3;
             char* direction = NULL;
@@ -683,10 +711,20 @@ noreturn void pal_svsm_main(void)
             wanted = true;
         }
         policy_record[0x40] = (uint8_t)n_accepts;
+        policy_record[0x41] = (uint8_t)n_extra_eps;
+        for (int i = 0; i < n_extra_eps; i++)
+            memcpy(policy_record + 0x44 + (size_t)n_accepts * 0x68 + (size_t)i * 8,
+                   &extra_eps[i], 8);
+
+        /* Which port means which of them. Measured, like the endpoints
+         * themselves, and read here rather than from the frame because a
+         * vault sealed from its own manifest has no frame to read. */
+        pal_svsm_listen_from_toml(manifest_svsm_early);
 
         if (wanted) {
-            int64_t sealed = pal_svsm_channel_policy(policy_record,
-                                                     0x44 + (uint64_t)n_accepts * 0x68);
+            int64_t sealed = pal_svsm_channel_policy(
+                policy_record,
+                0x44 + (uint64_t)n_accepts * 0x68 + (uint64_t)n_extra_eps * 8);
             if (sealed != 0)
                 pal_svsm_fail("the monitor refused this vault's channel policy", sealed);
         }

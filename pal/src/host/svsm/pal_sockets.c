@@ -131,6 +131,75 @@ static uint32_t pal_parse_ipv4(const char* s) {
     return *s ? 0 : v;
 }
 
+/*
+ * What this vault answers on, and on which port.
+ *
+ * The mirror of the connect table: that one says which peer an ADDRESS
+ * means, this one says which of this vault's endpoints a PORT means. Both
+ * come from measured manifests, so "nginx listens on 443" is a fact about
+ * the image rather than a line of application code.
+ *
+ * The monitor does not need it. Admission is its business and it decides
+ * that from the sealed policy's endpoint list; a port is a label a program
+ * uses, and the monitor has no opinion about labels.
+ */
+#define PAL_LISTEN_MAX 8
+struct pal_listen_entry {
+    uint16_t port;
+    uint64_t endpoint;
+};
+static struct pal_listen_entry g_listen[PAL_LISTEN_MAX];
+static int g_listen_n;
+
+/* Pack an endpoint id the way the monitor and the manifest both do: the
+ * first eight bytes of the string, little-endian. */
+uint64_t pal_svsm_pack_endpoint(const char* s) {
+    uint64_t packed = 0;
+    for (size_t i = 0; i < 8 && s[i]; i++)
+        packed |= (uint64_t)(unsigned char)s[i] << (i * 8);
+    return packed;
+}
+
+void pal_svsm_listen_add(uint16_t port, uint64_t endpoint) {
+    if (!port || !endpoint || g_listen_n == PAL_LISTEN_MAX)
+        return;
+    for (int i = 0; i < g_listen_n; i++)
+        if (g_listen[i].port == port)
+            return;                     /* first wins; a repeat says nothing new */
+    g_listen[g_listen_n].port     = port;
+    g_listen[g_listen_n].endpoint = endpoint;
+    g_listen_n++;
+}
+
+/* Read a `[[svsm.listen]]` array out of an already-parsed manifest. Used
+ * for the image's manifest (in the zygote, inherited) and for an app's own
+ * one in its frame. */
+void pal_svsm_listen_from_toml(void* svsm_table) {
+    toml_table_t* svsm = (toml_table_t*)svsm_table;
+    toml_array_t* arr = svsm ? toml_array_in(svsm, "listen") : NULL;
+    for (int i = 0; arr && i < toml_array_nelem(arr); i++) {
+        toml_table_t* e = toml_table_at(arr, i);
+        if (!e)
+            continue;
+        int64_t port = 0;
+        if (toml_int_in(e, "port", 0, &port) != 0 || port <= 0 || port > 65535)
+            continue;
+        char* id = NULL;
+        if (toml_string_in(e, "endpoint", &id) != 0 || !id)
+            continue;
+        pal_svsm_listen_add((uint16_t)port, pal_svsm_pack_endpoint(id));
+        free(id);
+    }
+}
+
+/* Which endpoint a port means, or 0 if this vault declared no table. */
+static uint64_t pal_listen_find(uint16_t port) {
+    for (int i = 0; i < g_listen_n; i++)
+        if (g_listen[i].port == port)
+            return g_listen[i].endpoint;
+    return 0;
+}
+
 static void pal_connect_load(void) {
     if (g_connect_loaded)
         return;
@@ -160,6 +229,10 @@ static void pal_connect_load(void) {
     if (!root)
         return;
     toml_table_t* svsm = toml_table_in(root, "svsm");
+    /* An app's own frame may also say which ports it listens on - the
+     * image's manifest cannot, because on a shared base image it is not
+     * this app's to speak for. */
+    pal_svsm_listen_from_toml(svsm);
     toml_array_t* arr = svsm ? toml_array_in(svsm, "connect") : NULL;
     for (int i = 0; arr && i < toml_array_nelem(arr) && g_connect_n < PAL_CONNECT_MAX; i++) {
         toml_table_t* e = toml_table_at(arr, i);
@@ -224,6 +297,16 @@ static void pal_connect_load(void) {
         if (hosts) {
             size_t n = (size_t)snprintf(hosts, cap, "127.0.0.1 localhost\n");
             for (int i = 0; i < g_connect_n && n < cap; i++) {
+                /* One line per NAME. A service that offers two ports is two
+                 * entries in the connect table and one host. */
+                int seen = 0;
+                for (int k = 0; k < i; k++)
+                    if (g_connect[k].addr == g_connect[i].addr
+                            && !memcmp(g_connect[k].name, g_connect[i].name,
+                                       sizeof(g_connect[i].name)))
+                        seen = 1;
+                if (seen)
+                    continue;
                 uint32_t a = g_connect[i].addr;
                 n += (size_t)snprintf(hosts + n, cap - n, "%u.%u.%u.%u %s\n",
                                       (a >> 24) & 255, (a >> 16) & 255,
@@ -342,10 +425,33 @@ int _PalSocketCreate(enum pal_socket_domain domain, enum pal_socket_type type,
 int _PalSocketBind(PAL_HANDLE handle, struct pal_socket_addr* addr) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_INVAL;
-    /* The address itself is not kept: what this vault answers on is the
-     * endpoint its measured manifest declares, and a port here would only
-     * be a label for it. */
-    __UNUSED(addr);
+
+    /* The PORT is kept, because a vault can offer more than one endpoint
+     * and the port is how a program says which of them it means. The
+     * ADDRESS still is not: a vault does not have one.
+     *
+     * What a port means comes from `[[svsm.listen]]`, which is measured -
+     * so "this program serves 443" is a fact about the image. A vault that
+     * declared no table keeps the old behaviour exactly: the port is a
+     * label, and accept takes whatever arrives. */
+    uint16_t port = 0;
+    if (addr && addr->domain == PAL_IPV4)
+        port = __builtin_bswap16(addr->ipv4.port);
+    else if (addr && addr->domain == PAL_IPV6)
+        port = __builtin_bswap16(addr->ipv6.port);
+
+    /* The app's own frame may carry the table; this is also what loads the
+     * connect table, and it is idempotent. */
+    pal_connect_load();
+
+    handle->sock.bind_port       = port;
+    handle->sock.listen_endpoint = pal_listen_find(port);
+    if (g_listen_n && !handle->sock.listen_endpoint) {
+        /* A table that does not name this port. Refusing is the honest
+         * answer: accepting would hand this socket every connection meant
+         * for the ports that ARE declared. */
+        return -PAL_ERROR_INVAL;
+    }
     handle->sock.bound = true;
     return 0;
 }
@@ -399,6 +505,19 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
                 continue;
             unsigned long win = pal_chan_window_addr(w);
             if (pal_chan_u64(win, 0) != PAL_CHAN_HDR_MAGIC)
+                continue;
+            /* Which of this vault's ports the peer asked for. Both ends of
+             * the header carry the endpoint the channel was opened ON, so
+             * this needs no call and no agreement with the peer.
+             *
+             * Without this test a vault that binds two ports cross-connects
+             * its clients - accept took the first unclaimed live window
+             * whatever it had been opened to, and the https listener would
+             * answer the http client. A vault with no listen table has one
+             * endpoint and takes anything, as before. */
+            if (handle->sock.listen_endpoint
+                    && pal_chan_u64(win, PAL_CHAN_HDR_END(0) + PAL_CHAN_END_ENDPOINT)
+                       != handle->sock.listen_endpoint)
                 continue;
 
             PAL_HANDLE cli = calloc(1, HANDLE_SIZE(sock));

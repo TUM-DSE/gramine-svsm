@@ -29,6 +29,10 @@
 #define PAL_CHAN_HDR_STATE    0x040
 #define PAL_CHAN_HDR_END(s)   (0x100 + (s) * 0x200)
 #define PAL_CHAN_END_PID      0x004
+/* The endpoint this channel was opened ON. The monitor writes the SAME id
+ * into both ends, so a server can tell which of its ports a connection
+ * came to without asking anybody. */
+#define PAL_CHAN_END_ENDPOINT 0x010
 
 /* The directory, window 0 of every vault that holds a channel. */
 #define PAL_CHAN_DIR_VADDR    PAL_CHAN_START_VADDR
