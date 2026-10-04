@@ -545,8 +545,37 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
         }
 
         uint32_t got = 0;
+        /* Was the ring FULL before this read? If it was, a writer may be
+         * unable to write, and freeing this slot is the only thing that
+         * will ever change that - so it has to be announced.
+         *
+         * _PalSocketSend notifies the peer on every successful send, and
+         * its blocking branch arms on PAL_CHAN_ARM_HEAD ("Room is the
+         * peer's HEAD moving"), so a writer waiting for room is MEANT to
+         * be woken when the head moves. Nothing fired that notify: recv
+         * advanced the head and told nobody. A BLOCKING writer survived
+         * anyway, because it armed on the word itself and the monitor ends
+         * a park when the armed word changes. A NON-BLOCKING writer never
+         * arms, so it got no wake at all and had to wait for its next
+         * ordinary dispatch.
+         *
+         * That is the whole cost of a relay that sends with MSG_DONTWAIT:
+         * measured on a 1 MiB download, the channel (4 slots, ~8 KB) was
+         * refilled about every 95 ms, for ~70 KB/s, while the same path
+         * with a blocking send ran at ~6 MB/s. Not chunking, not the
+         * window, not the ACK timer - the reader simply never said that
+         * it had made room.
+         *
+         * Only on the full -> not-full edge. A notify is a monitor call,
+         * and one per message would put a VMGEXIT on every 2044 bytes;
+         * one per ring-full episode is what a blocked writer needs and
+         * nothing more. */
+        bool was_full = pal_chan_present(&in)
+                        && (uint32_t)(*in.peer_tail - *in.head) >= in.depth;
         int rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
         if (rc == 0) {
+            if (was_full)
+                pal_svsm_channel_notify(handle->sock.widx);
             handle->sock.rx_len = got;
             handle->sock.rx_off = 0;
             continue;                   /* serve it from the buffer above */
