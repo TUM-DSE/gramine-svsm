@@ -45,6 +45,11 @@ static struct vfs_super* g_vfs;
 static struct vfs_entry* g_vfs_table;
 static char* g_vfs_data;
 static uint32_t g_vfs_data_pages;
+/* Derived from the region's size by vfs_layout(), so every member agrees
+   without being told. Both scale with the region: a fixed one-page bitmap
+   capped the filesystem at 96 MiB however much the manifest declared. */
+static uint32_t g_vfs_entries;
+static uint8_t* g_vfs_bitmap;
 
 /* ---------------------------------------------------------------- the lock */
 
@@ -77,7 +82,7 @@ static void vfs_unlock(void) {
 /* ------------------------------------------------------- the page allocator */
 
 static uint8_t* vfs_bitmap(void) {
-    return (uint8_t*)g_vfs + VFS_BITMAP_OFF;
+    return g_vfs_bitmap;
 }
 
 static bool vfs_page_taken(uint32_t i) {
@@ -153,7 +158,7 @@ static int vfs_path_of(struct libos_dentry* dent, char* out) {
  * without it by lookup, where a torn read can only produce a miss or a stale
  * size, both of which the caller already has to tolerate. */
 static struct vfs_entry* vfs_find(const char* path) {
-    for (uint32_t i = 0; i < VFS_ENTRIES; i++) {
+    for (uint32_t i = 0; i < g_vfs_entries; i++) {
         struct vfs_entry* e = &g_vfs_table[i];
         if (e->type != VFS_FILE && e->type != VFS_DIR)
             continue;
@@ -164,7 +169,7 @@ static struct vfs_entry* vfs_find(const char* path) {
 }
 
 static struct vfs_entry* vfs_free_slot(void) {
-    for (uint32_t i = 0; i < VFS_ENTRIES; i++)
+    for (uint32_t i = 0; i < g_vfs_entries; i++)
         if (g_vfs_table[i].type == VFS_FREE)
             return &g_vfs_table[i];
     return NULL;
@@ -263,16 +268,18 @@ static int vfs_attach(void) {
     int ret = PalLineageFsAttach((uint64_t)want, &base, &size);
     if (ret < 0)
         return pal_to_unix_errno(ret);
-    if (!base || size < (size_t)(1 + VFS_TABLE_PAGES + 1) * VFS_PAGE) {
+    /* The smallest region that can hold a superblock, one bitmap page, the
+       minimum table, and a data page to put something in. */
+    if (!base || size < (size_t)(1 + 1 + VFS_TABLE_PAGES_MIN + 1) * VFS_PAGE) {
         log_error("vaultfs: the lineage region is too small (%lu bytes)", size);
         return -ENODEV;
     }
 
     struct vfs_super* sb = base;
-    uint32_t total = (uint32_t)(size / VFS_PAGE);
-    uint32_t data_pages = total - 1 - VFS_TABLE_PAGES;
-    if (data_pages > VFS_BITMAP_MAX) {
-        log_error("vaultfs: %u data pages is more than the bitmap holds", data_pages);
+    struct vfs_layout L;
+    vfs_layout((uint32_t)(size / VFS_PAGE), &L);
+    if (!L.data_pages) {
+        log_error("vaultfs: a %lu byte region leaves no room for data", size);
         return -EINVAL;
     }
 
@@ -283,35 +290,51 @@ static int vfs_attach(void) {
     g_vfs = sb;    /* vfs_lock needs it */
     vfs_lock();
     if (sb->magic != VFS_MAGIC) {
+        /* Zeroing the bitmap and the table is what COMMITS their pages: the
+         * region is reserved address space and the monitor spends a page when
+         * one is touched, so a 512 MiB filesystem costs its own metadata and
+         * nothing else until a file is written. */
         memset(sb, 0, VFS_PAGE);
-        sb->version     = VFS_VERSION;
-        sb->entries     = VFS_ENTRIES;
-        sb->data_first  = 1 + VFS_TABLE_PAGES;
-        sb->data_pages  = data_pages;
-        sb->generation  = 1;
-        memset((char*)base + VFS_PAGE, 0, (size_t)VFS_TABLE_PAGES * VFS_PAGE);
+        sb->version      = VFS_VERSION;
+        sb->entries      = L.entries;
+        sb->bitmap_pages = L.bitmap_pages;
+        sb->table_pages  = L.table_pages;
+        sb->data_first   = L.data_first;
+        sb->data_pages   = L.data_pages;
+        sb->generation   = 1;
+        memset((char*)base + VFS_BITMAP_PAGE * VFS_PAGE, 0,
+               (size_t)L.bitmap_pages * VFS_PAGE);
+        memset((char*)base + (size_t)(VFS_BITMAP_PAGE + L.bitmap_pages) * VFS_PAGE, 0,
+               (size_t)L.table_pages * VFS_PAGE);
         /* The root directory is an entry like any other, so a readdir of the
          * mount point and a lookup of "/" need no special case. */
-        struct vfs_entry* root = (struct vfs_entry*)((char*)base + VFS_PAGE);
+        struct vfs_entry* root =
+            (struct vfs_entry*)((char*)base
+                                + (size_t)(VFS_BITMAP_PAGE + L.bitmap_pages) * VFS_PAGE);
         root->type = VFS_DIR;
         root->mode = PERM_rwxrwxrwx;
         root->path[0] = '\0';
         /* Last, with a release, so no member can mistake a half-formatted
          * superblock for a formatted one. */
         __atomic_store_n(&sb->magic, VFS_MAGIC, __ATOMIC_RELEASE);
-    } else if (sb->version != VFS_VERSION || sb->data_pages != data_pages) {
+    } else if (sb->version != VFS_VERSION || sb->data_pages != L.data_pages) {
         vfs_unlock();
-        log_error("vaultfs: region says version %u / %u data pages, this build wants %u / %u",
-                  sb->version, sb->data_pages, VFS_VERSION, data_pages);
+        log_error("vaultfs: region says version %u / %u data pages, this build derives %u / %u",
+                  sb->version, sb->data_pages, VFS_VERSION, L.data_pages);
         g_vfs = NULL;
         return -EINVAL;
     }
     vfs_unlock();
 
-    g_vfs_table      = (struct vfs_entry*)((char*)base + VFS_PAGE);
+    g_vfs_bitmap     = (uint8_t*)base + VFS_BITMAP_PAGE * VFS_PAGE;
+    g_vfs_table      = (struct vfs_entry*)((char*)base
+                         + (size_t)(VFS_BITMAP_PAGE + sb->bitmap_pages) * VFS_PAGE);
     g_vfs_data       = (char*)base + (size_t)sb->data_first * VFS_PAGE;
-    g_vfs_data_pages = data_pages;
-    log_debug("vaultfs: %u data pages at %p, %u entries", data_pages, base, VFS_ENTRIES);
+    g_vfs_data_pages = sb->data_pages;
+    g_vfs_entries    = sb->entries;
+    log_debug("vaultfs: %u data pages (%u MiB) at %p, %u entries, %u bitmap pages",
+              g_vfs_data_pages, g_vfs_data_pages / 256, base, g_vfs_entries,
+              sb->bitmap_pages);
     return 0;
 }
 
@@ -391,7 +414,7 @@ static int vfs_make(struct libos_dentry* dent, uint32_t type, mode_t perm,
     struct vfs_entry* e = vfs_free_slot();
     if (!e) {
         vfs_unlock();
-        log_error("vaultfs: all %u entries are in use", VFS_ENTRIES);
+        log_error("vaultfs: all %u entries are in use", g_vfs_entries);
         return -ENOSPC;
     }
     e->mode       = perm;
@@ -472,7 +495,7 @@ static int vaultfs_unlink(struct libos_dentry* dent) {
     if (e->type == VFS_DIR) {
         /* Emptiness is asked of the REGION, not of this process's dcache: a
          * child another member created still makes the directory non-empty. */
-        for (uint32_t i = 0; i < VFS_ENTRIES; i++) {
+        for (uint32_t i = 0; i < g_vfs_entries; i++) {
             struct vfs_entry* o = &g_vfs_table[i];
             const char* name;
             if (o == e || (o->type != VFS_FILE && o->type != VFS_DIR))
@@ -568,7 +591,7 @@ static int vaultfs_readdir(struct libos_dentry* dent, readdir_callback_t callbac
      * this process created. Under the lock, so the table does not change
      * shape mid-walk; the callback only copies a name out. */
     vfs_lock();
-    for (uint32_t i = 0; i < VFS_ENTRIES; i++) {
+    for (uint32_t i = 0; i < g_vfs_entries; i++) {
         struct vfs_entry* e = &g_vfs_table[i];
         const char* name;
         if (e->type != VFS_FILE && e->type != VFS_DIR)
