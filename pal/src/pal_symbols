@@ -2,6 +2,7 @@ PalVirtualMemoryAlloc
 PalVirtualMemoryFree
 PalVirtualMemoryProtect
 PalRuntimeImageMap
+PalLineageFsAttach
 PalSetMemoryBookkeepingUpcalls
 PalThreadCreate
 PalThreadYieldExecution

@@ -218,6 +218,7 @@ int _PalVirtualMemoryAlloc(void* addr, uint64_t size, pal_prot_flags_t prot);
 int _PalVirtualMemoryFree(void* addr, uint64_t size);
 int _PalVirtualMemoryProtect(void* addr, uint64_t size, pal_prot_flags_t prot);
 int _PalRuntimeImageMap(void* addr, uint64_t size, pal_prot_flags_t prot, uint64_t image_off);
+int _PalLineageFsAttach(uint64_t pages, void** base, size_t* size);
 
 /* PalObject calls */
 void _PalObjectDestroy(PAL_HANDLE object_handle);

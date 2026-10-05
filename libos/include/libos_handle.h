@@ -35,6 +35,7 @@ enum libos_handle_type {
                       * functions */
     TYPE_PSEUDO,     /* pseudo nodes (currently directories), handled by `pseudo_*` functions */
     TYPE_TMPFS,      /* string-based files (with data inside dentry), used by `tmpfs` filesystem */
+    TYPE_VAULTFS,    /* files in the LINEAGE's shared region, used by `vaultfs` (fs/vault/fs.c) */
     TYPE_SYNTHETIC,  /* synthetic files, used by `synthetic` filesystem */
     TYPE_PATH,       /* path to a file (the file is not actually opened) */
     TYPE_SHM,        /* shared files, used by `shm` filesystem */

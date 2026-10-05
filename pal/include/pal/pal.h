@@ -134,6 +134,26 @@ struct pal_runtime_image {
 };
 #define PAL_MAX_RUNTIME_IMAGES 4
 
+/* The filesystem this vault's LINEAGE shares (svsm: the monitor places the
+ * pages and maps them into every member; see the LineageFs process call and
+ * libos/src/fs/vault/fs.c). size 0 = none, which is the default: a vault gets
+ * one only when its manifest asks, because it costs real pool.
+ *
+ * Unlike a runtime image this is WRITABLE and shared with other processes -
+ * every member of the lineage, which is what POSIX fork means by sharing a
+ * filesystem. The monitor never reads what is in it. */
+struct pal_lineage_fs {
+    /* What the manifest asked for: data pages, 0 = the host's default, and
+     * NEGATIVE = the manifest did not ask at all, which is the default and is
+     * why adding vaultfs changed nothing for a manifest that does not mention
+     * it. A missing key cannot be read as 0: they are different answers.
+     *
+     * Only the request lives here. Where the region IS cannot, because this
+     * struct is filled in the zygote and inherited by every instance cloned
+     * from it - see #PalLineageFsAttach. */
+    int64_t pages;
+};
+
 /* Memory this process and the HOST can both see (svsm: the monitor carves it
  * from its pool, converts it to host-shared and maps it without the
  * encryption bit; see the DeviceWindow process call). It exists only when
@@ -205,6 +225,8 @@ struct pal_public_state {
 
     struct pal_runtime_image runtime_images[PAL_MAX_RUNTIME_IMAGES]; /*!< see above; unused
                                                                         entries have size 0 */
+
+    struct pal_lineage_fs lineage_fs;       /*!< see above; size 0 = none */
 
     struct pal_device_window device_window; /*!< see above; size 0 = none */
     struct pal_device_mmio device_mmio;     /*!< see above; size 0 = none */
@@ -346,6 +368,31 @@ int PalVirtualMemoryProtect(void* addr, size_t size, pal_prot_flags_t prot);
  * range into a private copy. Hosts without runtime images return -PAL_ERROR_NOTIMPLEMENTED.
  */
 int PalRuntimeImageMap(void* addr, size_t size, pal_prot_flags_t prot, uint64_t image_off);
+
+/*!
+ * \brief Attach to the filesystem this vault's LINEAGE shares, creating it if
+ *        this vault is the lineage's root.
+ *
+ * \param pages  Data pages wanted; 0 asks for the host's default.
+ * \param base   Out: where it is mapped.
+ * \param size   Out: how big it is, in bytes.
+ *
+ * Called LAZILY, on the first access to a vaultfs mount, and that is not an
+ * optimisation. The heavy init of a vault runs in its ZYGOTE, which is cloned
+ * copy-on-write into every instance; a region acquired there would be
+ * inherited by every instance of that zygote, so two unrelated invocations
+ * would share one filesystem. Asking at first use instead means the caller is
+ * the running instance, which is the lineage root it should be. (The svsm host
+ * refuses a zygote outright, so this is belt and braces.)
+ *
+ * Idempotent: a vault already in a lineage is told where its filesystem is
+ * rather than given a second one. That is how a forked child - which inherits
+ * its parent's mapping - and an exec'd program - which keeps it, the mapping
+ * not being a VMA the LibOS can free - both find the SAME filesystem.
+ *
+ * Hosts without lineages return -PAL_ERROR_NOTIMPLEMENTED.
+ */
+int PalLineageFsAttach(uint64_t pages, void** base, size_t* size);
 
 /*!
  * \brief Set upcalls for memory bookkeeping

@@ -29,6 +29,7 @@ void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size);
  * buffers they point at. `pages` = 0 only asks what this vault already has.
  * The guest-physical address is not returned here; it is the second word of
  * the header the monitor writes at the start of the window. */
+void pal_svsm_lineage_fs(uint64_t pages, void** out_base, size_t* out_size);
 void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
 /* DeviceMmio: a device's registers. `id` is vendor | device << 16, 0 only
  * asks what this vault already has. `bar` says which BAR to map, because a

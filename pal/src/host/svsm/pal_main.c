@@ -268,6 +268,30 @@ noreturn void pal_svsm_main(void)
             break;
     }
 
+    /* The lineage's shared filesystem (PLAN.md "vaultfs"), when the manifest
+     * asks for one. Gated on the manifest key rather than always asked,
+     * because the region costs real pool and most vaults share with nobody -
+     * and because the default must stay "no region", so that adding this
+     * changes nothing for a vault that does not mention it.
+     *
+     * `fs.lineage_pages = 0` is a request for the monitor's default size; the
+     * key being ABSENT is a request for no region at all. The two are
+     * different answers and a missing key cannot be read as 0. */
+    {
+        int64_t lineage_pages = -1;
+        toml_table_t* manifest_fs = toml_table_in(g_pal_public_state.manifest_root, "fs");
+        if (manifest_fs && toml_int_in(manifest_fs, "lineage_pages",
+                                       /*defaultval=*/-1, &lineage_pages) < 0)
+            INIT_FAIL("Cannot parse 'fs.lineage_pages'");
+        /* The REQUEST only. Asking the monitor here would be wrong: this
+         * code runs in the ZYGOTE, which is cloned copy-on-write into every
+         * instance, so a region acquired now would be inherited by every
+         * instance of this zygote and two unrelated invocations would share
+         * one filesystem. The LibOS asks on first use instead, by which
+         * time the caller is the running instance. */
+        g_pal_public_state.lineage_fs.pages = lineage_pages;
+    }
+
     /* What this vault offers other vaults, if anything - the declaration
      * that makes it a service. From the manifest, so it is measured: a
      * vault cannot decide at runtime that it is something else. A device is

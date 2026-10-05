@@ -61,6 +61,26 @@ void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size) {
     *out_base = (void*)data.rdx;
 }
 
+/* LineageFs (0x4FFFFFD4): rbx = data pages wanted (0 = the monitor's default)
+ * -> rcx = size in bytes (0 = none), rdx = base VA. Deliberately the same
+ * shape as RuntimeInfo and DeviceWindow.
+ *
+ * Idempotent, and that is the whole mechanism: holding the region IS being in
+ * the lineage, so a vault that already holds one is told where rather than
+ * given a second. A forked child holds its parent's (the monitor maps it in at
+ * fork) and an execve keeps it (the mapping is not a VMA the LibOS can free),
+ * so both find the same filesystem by asking the same question. */
+void pal_svsm_lineage_fs(uint64_t pages, void** out_base, size_t* out_size) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFD4;
+    data.rbx = pages;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    *out_size = data.rcx;
+    *out_base = (void*)data.rdx;
+}
+
 /* DeviceWindow (0x4FFFFFEE): rbx = pages wanted (0 = only ask) -> rcx = size
  * in bytes (0 = none), rdx = base VA. Deliberately the same shape as
  * RuntimeInfo. The window's first four words are {magic, guest-physical

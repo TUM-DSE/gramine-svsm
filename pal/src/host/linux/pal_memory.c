@@ -27,6 +27,13 @@ bool is_in_vdso(uintptr_t addr) {
     return (g_vdso_start || g_vdso_end) && g_vdso_start <= addr && addr < g_vdso_end;
 }
 
+int _PalLineageFsAttach(uint64_t pages, void** base, size_t* size) {
+    __UNUSED(pages);
+    __UNUSED(base);
+    __UNUSED(size);
+    return -PAL_ERROR_NOTIMPLEMENTED;   /* no lineages on this host */
+}
+
 int _PalRuntimeImageMap(void* addr, uint64_t size, pal_prot_flags_t prot, uint64_t image_off) {
     __UNUSED(addr);
     __UNUSED(size);
