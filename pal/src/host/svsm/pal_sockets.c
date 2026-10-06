@@ -98,7 +98,34 @@ struct pal_mvnet_rep {
  * BADHANDLE. */
 extern struct handle_ops g_sock_ops;
 
-static uint64_t g_sock_claimed;
+/* Which IPC windows this vault has already turned into a socket.
+ *
+ * EIGHT words, not one, because the monitor publishes eight: a vault has
+ * IPC_WINDOWS = 512 windows and `write_directory` fills `0x040 + i*8` for
+ * i in 0..8 (monitor ipc/mod.rs). A single u64 could only ever name windows
+ * 0..63, so a channel granted into window 64 or above was invisible here -
+ * `_PalSocketAccept` never saw it and the peer waited for an accept that
+ * could not arrive. Harmless while a service held at most sixteen
+ * connections; the first thing to break when that cap is raised, and silent
+ * when it breaks. */
+#define PAL_CHAN_LIVE_WORDS  8
+#define PAL_CHAN_WINDOWS     (PAL_CHAN_LIVE_WORDS * 64)
+
+static uint64_t g_sock_claimed[PAL_CHAN_LIVE_WORDS];
+
+static inline bool sock_claimed(unsigned w) {
+    return w < PAL_CHAN_WINDOWS && (g_sock_claimed[w / 64] & (1UL << (w % 64)));
+}
+
+static inline void sock_claim(unsigned w) {
+    if (w < PAL_CHAN_WINDOWS)
+        g_sock_claimed[w / 64] |= 1UL << (w % 64);
+}
+
+static inline void sock_unclaim(unsigned w) {
+    if (w < PAL_CHAN_WINDOWS)
+        g_sock_claimed[w / 64] &= ~(1UL << (w % 64));
+}
 
 static void ring_for(PAL_HANDLE handle, struct pal_chan_ring* in,
                      struct pal_chan_ring* out) {
@@ -198,10 +225,12 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
     bool nonblock = handle->sock.is_nonblocking || (options & PAL_OPTION_NONBLOCK);
 
     for (;;) {
-        uint64_t live = pal_chan_u64(PAL_CHAN_DIR_VADDR, PAL_CHAN_DIR_LIVE);
-        for (unsigned w = 1; w < 64; w++) {
-            uint64_t bit = 1UL << w;
-            if (!(live & bit) || (g_sock_claimed & bit))
+        /* All eight published words, not just the first. Window 0 is the
+           directory page itself, so the scan starts at 1. */
+        for (unsigned w = 1; w < PAL_CHAN_WINDOWS; w++) {
+            uint64_t live = pal_chan_u64(PAL_CHAN_DIR_VADDR,
+                                         PAL_CHAN_DIR_LIVE + (w / 64) * 8);
+            if (!(live & (1UL << (w % 64))) || sock_claimed(w))
                 continue;
             unsigned long win = pal_chan_window_addr(w);
             if (pal_chan_u64(win, 0) != PAL_CHAN_HDR_MAGIC)
@@ -219,7 +248,7 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
             cli->sock.win            = win;
             cli->sock.widx           = w;
             cli->sock.side           = 1;   /* they asked, we were asked */
-            g_sock_claimed |= bit;
+            sock_claim(w);
 
             if (out_client_addr)
                 memset(out_client_addr, 0, sizeof(*out_client_addr));
@@ -397,13 +426,13 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     handle->sock.widx = (unsigned long)win;
     handle->sock.side = 0;                  /* we asked, so we are side 0 */
     /* Ours, not an arrival: `accept` must not hand this back to us. */
-    g_sock_claimed |= 1UL << (unsigned)win;
+    sock_claim((unsigned)win);
 
     if (g_pal_svsm_net_protocol) {
         int rc = mvnet_handshake(handle, addr);
         if (rc < 0) {
             pal_svsm_channel_close(handle->sock.widx);
-            g_sock_claimed &= ~(1UL << (unsigned)win);
+            sock_unclaim((unsigned)win);
             handle->sock.win = 0;
             return rc;
         }
@@ -705,7 +734,7 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 
 static void sock_destroy(PAL_HANDLE handle) {
     if (handle->sock.win)
-        g_sock_claimed &= ~(1UL << handle->sock.widx);
+        sock_unclaim((unsigned)handle->sock.widx);
     if (handle->sock.win)
         pal_svsm_channel_close(handle->sock.widx);
     free(handle->sock.rx);          /* the residue buffer, if it was ever needed */
@@ -721,7 +750,7 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
          * vault and `accept` would skip it for ever. Unreachable until the
          * ops table above was attached, and reachable now, so it is fixed
          * in the same change that reaches it. */
-        g_sock_claimed &= ~(1UL << handle->sock.widx);
+        sock_unclaim((unsigned)handle->sock.widx);
         pal_svsm_channel_close(handle->sock.widx);
         handle->sock.win = 0;
     }
