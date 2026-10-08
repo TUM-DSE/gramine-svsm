@@ -151,6 +151,30 @@ struct pal_handle_inner {
             uint64_t sendtimeout_us;
             bool     is_nonblocking;
             bool     broken;        /* a malformed length: the stream is over */
+            /* The service sent a FIN frame for this connection: the far end
+             * is finished and there will be no more data.
+             *
+             * NOT `broken`, which is an error and makes every later call
+             * return EACCES. A FIN is the ordinary end of a stream and recv(2)
+             * answers it with 0, so it needs a flag of its own. It exists
+             * because a shared channel cannot carry a close: the channel
+             * outlives any one connection on it, so `pal_chan_peer_gone` -
+             * which is how an unshared socket learns this - stays false. */
+            bool     fin_seen;
+            /* Does every message on this channel carry a mux frame header?
+             *
+             * True only for a socket this vault CONNECTED through a network
+             * service (side 0, and only when [svsm.net] named one). An
+             * accepted socket is the service's end and must see the frame
+             * bytes, because the service is what demultiplexes them; and a
+             * vault-to-vault channel socket that never went through a service
+             * is not framed at all. So this is a property of the handle, not
+             * of the build. */
+            bool     muxed;
+            /* Which connection this handle is on the shared channel: a slot in
+             * the low 16 bits and a GENERATION in the high 16. Only meaningful
+             * when `muxed`. 0 is never a live id. */
+            uint32_t conn_id;
             /* What a message had left over when the caller's buffer was
              * smaller than it. A channel carries MESSAGES and a stream
              * socket is read in whatever pieces the program felt like,
@@ -163,6 +187,25 @@ struct pal_handle_inner {
             bool     bound;
             bool     listening;
             unsigned int backlog;
+            /* --- MVNET_PROTO_UDP only -------------------------------------
+             * A datagram socket's addresses live here rather than in the
+             * channel, because a channel has exactly one far end and a
+             * datagram socket has as many peers as it has datagrams. The
+             * local port is what bind() asked for, which the service needs
+             * at open time; the peer is what connect() named, which send()
+             * uses when the caller gives no address of its own. */
+            /* What the network service said when it answered the MVN1
+             * handshake: its own address and the local port it bound. This
+             * is what getsockname() reports, and glibc's getaddrinfo
+             * asserts if it is not a real AF_INET address. */
+            struct {
+                uint16_t local_port;
+                uint8_t  local_addr[4];
+            } local;
+            uint16_t bind_port;
+            uint16_t peer_port;
+            uint8_t  peer_addr[4];
+            bool     has_peer;
         } sock;
 
         struct {

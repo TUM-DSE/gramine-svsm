@@ -23,6 +23,32 @@ static int close(struct libos_handle* handle) {
     free(handle->info.sock.peek.buf);
     /* No need for atomics - we are releasing the last reference, nothing can access it anymore. */
     if (handle->info.sock.pal_handle) {
+        /*
+         * PalStreamDelete FIRST, and it is what actually releases the
+         * host-side resource, at close(2) rather than whenever the last
+         * reference happens to go. It was also the ONLY thing that released
+         * it for a while: PalObjectDestroy was `return; // ignore` (8dcb294d,
+         * "TMP: skip some initialization (fix later)"), so `sock_destroy`
+         * never ran and with it `pal_svsm_channel_close`. That stub is gone
+         * now, but this stays: close(2) is where a socket's host resource
+         * should go, and the two are idempotent (`sock_delete` clears `win`,
+         * which is what `sock_destroy` guards on).
+         *
+         * Nobody noticed for TCP because the network service tears a
+         * connection down from the TCP state machine instead, and
+         * tools/netsvc/src/relay.c works around it on its own side by
+         * calling shutdown() before close() - with a comment saying exactly
+         * this. UDP has no state machine to hide behind: a vault's datagram
+         * socket held its channel, its relay slot and its lwIP pcb for the
+         * life of the service, and ten getaddrinfo calls exhausted it.
+         *
+         * PAL_DELETE_ALL because this is close(2), not shutdown(2): there is
+         * no half of the socket left to keep. The PalObjectDestroy below is
+         * kept so that un-stubbing it later frees the handle memory too -
+         * `sock_delete` clears `win`, so `sock_destroy` would then find
+         * nothing to release and the two cannot double-close.
+         */
+        PalStreamDelete(handle->info.sock.pal_handle, PAL_DELETE_ALL);
         PalObjectDestroy(handle->info.sock.pal_handle);
     }
     return 0;

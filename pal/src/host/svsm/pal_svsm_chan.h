@@ -157,9 +157,24 @@ static inline void pal_chan_unlock(struct pal_chan_ring* r) {
  * ring is full, empty, busy or malformed - the caller decides which of
  * those is EAGAIN and which is an error, because only it knows whether the
  * ring said "not yet" or "never". */
-static inline int pal_chan_send(struct pal_chan_ring* r, const void* msg, uint32_t len) {
-    if (!pal_chan_present(r) || r->slot < 4 || len > r->slot - 4)
-        return -1;
+/* TWO PARTS, one message: a header and a body, concatenated into the slot.
+ *
+ * Exists so a caller that must prepend something - a mux frame header, a
+ * datagram address - does not have to build a combined buffer first. That
+ * buffer was the whole of the per-send malloc problem: a full-slot gather is
+ * 16,380 bytes, the PAL slab's top level is 8,272 (slabmgr.h:86-98), so every
+ * one fell to system_malloc and cost an mmap AND a munmap through the monitor.
+ *
+ * Both copies happen inside the ring lock, which is where the length check and
+ * the tail publish already are, so there is no window in which a slot holds
+ * half a message.
+ *
+ * `hdr` may be NULL with hdr_len 0, which makes this exactly pal_chan_send. */
+static inline int pal_chan_send2(struct pal_chan_ring* r, const void* hdr, uint32_t hdr_len,
+                                 const void* body, uint32_t body_len) {
+    uint32_t len = hdr_len + body_len;
+    if (!pal_chan_present(r) || r->slot < 4 || len > r->slot - 4 || len < hdr_len)
+        return -1;                      /* the < hdr_len test catches overflow */
     if (pal_chan_lock(r) != 0)
         return -1;
     uint32_t t = *r->tail, h = *r->peer_head;
@@ -168,11 +183,55 @@ static inline int pal_chan_send(struct pal_chan_ring* r, const void* msg, uint32
         return -1;
     }
     unsigned char* s = r->slots + (unsigned long)(t & (r->depth - 1)) * r->slot;
-    memcpy(s + 4, msg, len);
+    if (hdr_len)
+        memcpy(s + 4, hdr, hdr_len);
+    if (body_len)
+        memcpy(s + 4 + hdr_len, body, body_len);
     memcpy(s, &len, 4);
     __atomic_store_n(r->tail, t + 1, __ATOMIC_RELEASE);
     pal_chan_unlock(r);
     return 0;
+}
+
+static inline int pal_chan_send(struct pal_chan_ring* r, const void* msg, uint32_t len) {
+    return pal_chan_send2(r, NULL, 0, msg, len);
+}
+
+/* The head message's first `n` bytes, WITHOUT consuming it.
+ *
+ * This is what makes demultiplexing one channel among many connections
+ * possible. A reader has to know which connection a message belongs to before
+ * it can decide whether it has anywhere to put it - and if it does not, the
+ * message must stay in the ring, because there is nowhere else to hold it. A
+ * recv that consumed first would have to buffer for every connection at once.
+ *
+ * Returns 0 and fills `out_len` with the WHOLE message's length (not n), -1 if
+ * the ring is empty or busy, -2 if the length at the head cannot be right. */
+static inline int pal_chan_peek(struct pal_chan_ring* r, void* hdr, uint32_t n,
+                                uint32_t* out_len) {
+    if (!pal_chan_present(r) || r->slot < 4)
+        return -1;
+    if (pal_chan_lock(r) != 0)
+        return -1;
+    uint32_t h = *r->head, t = *r->peer_tail;
+    if (h == t) {
+        pal_chan_unlock(r);
+        return -1;                      /* empty */
+    }
+    unsigned char* s = r->slots + (unsigned long)(h & (r->depth - 1)) * r->slot;
+    uint32_t len;
+    memcpy(&len, s, 4);
+    if (len > r->slot - 4) {
+        pal_chan_unlock(r);
+        return -2;
+    }
+    if (n > len)
+        n = len;
+    if (n)
+        memcpy(hdr, s + 4, n);
+    *out_len = len;
+    pal_chan_unlock(r);
+    return 0;                           /* head NOT advanced */
 }
 
 static inline int pal_chan_recv(struct pal_chan_ring* r, void* msg, uint32_t max,
