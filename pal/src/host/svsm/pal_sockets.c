@@ -79,6 +79,7 @@ int      g_pal_svsm_net_protocol;
 #define PAL_MVMUX_OP_CONNECT  1
 #define PAL_MVMUX_OP_FIN      2
 #define PAL_MVMUX_OP_RST      3
+#define PAL_MVMUX_OP_CREDIT   4
 #define PAL_MVMUX_HDR_BYTES   8
 
 /* Does a second socket SHARE the vault's channel, or get one of its own?
@@ -254,6 +255,199 @@ static unsigned long sock_widx(PAL_HANDLE handle) {
     return sock_shares(handle) ? g_pal_svsm_mux_widx : handle->sock.widx;
 }
 
+/* --------------------------------------------------- the frame pool, client
+ *
+ * The mirror of the service's (relay.c): one buffer per frame a peer may have
+ * in flight, shared by every socket on the channel and allocated on first use.
+ *
+ * 32 floors, not MUX_MAX_CONNS of them: 256 would be 4 MiB of buffers for a
+ * vault that will realistically hold tens of sockets, and 32 is the service's
+ * session table, which is the real limit on how many connections one vault can
+ * have open at once. The rest is headroom so a few can run at the cap.
+ */
+#define PAL_MUX_FLOORS 32
+#define PAL_MUX_POOL   (PAL_MUX_FLOORS + 3 * (PAL_MUX_CREDIT_CAP - 1))
+
+static void* g_mux_pool[PAL_MUX_POOL];
+static bool  g_mux_pool_used[PAL_MUX_POOL];
+static int   g_mux_pool_busy;
+
+static int mux_pool_take(uint32_t slot) {
+    for (int i = 0; i < PAL_MUX_POOL; i++) {
+        if (g_mux_pool_used[i])
+            continue;
+        if (!g_mux_pool[i]) {
+            g_mux_pool[i] = malloc(slot);
+            if (!g_mux_pool[i])
+                return -1;
+        }
+        g_mux_pool_used[i] = true;
+        g_mux_pool_busy++;
+        return i;
+    }
+    return -1;
+}
+
+static void mux_pool_put_ptr(void* p) {
+    if (!p)
+        return;
+    for (int i = 0; i < PAL_MUX_POOL; i++)
+        if (g_mux_pool[i] == p && g_mux_pool_used[i]) {
+            g_mux_pool_used[i] = false;
+            g_mux_pool_busy--;
+            return;
+        }
+}
+
+/* Forward: the poll path's router is written beside the other poll helpers,
+ * and the SEND path needs it too - a socket waiting on its window is waiting
+ * for a credit frame, and routing the head is what collects one. */
+static bool mux_poll_route(PAL_HANDLE handle, struct pal_chan_ring* in);
+
+/* One buffer for a message being ROUTED rather than served. Grown once to the
+ * channel's slot and kept: a vault that routed one frame will route more. */
+static char* mux_scratch(uint32_t slot) {
+    static char*    buf;
+    static uint32_t have;
+    if (!buf || have < slot) {
+        char* n = malloc(slot);
+        if (!n)
+            return NULL;
+        free(buf);
+        buf  = n;
+        have = slot;
+    }
+    return buf;
+}
+
+/* Hand a handle a pool buffer that ALREADY HOLDS the frame.
+ *
+ * By pointer, never by copy. The frame was read out of the ring straight into
+ * this buffer, so a socket's message costs exactly the one copy it has always
+ * cost - the ring to the buffer it is read from. An earlier version copied into
+ * scratch, then into a pool buffer, then into `rx`: three copies where there
+ * had been one, and it took 1 MiB from 125 MB/s to 100.
+ *
+ * `off` is where the BODY starts, so the frame header travels with the buffer
+ * and is skipped rather than moved. False means there was no room, and then the
+ * caller must put the buffer back. */
+static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
+    if (h->sock.rx_off >= h->sock.rx_len) {
+        /* `rx` is spent: this buffer becomes it, and the old one goes back to
+         * the pool if that is where it came from. */
+        if (h->sock.rx_pooled)
+            mux_pool_put_ptr(h->sock.rx);
+        else
+            free(h->sock.rx);
+        h->sock.rx        = buf;
+        h->sock.rx_pooled = true;
+        h->sock.rx_len    = len;
+        h->sock.rx_off    = off;
+        return true;
+    }
+    if (h->sock.q_count >= PAL_MUX_QUEUE)
+        return false;
+    int t = (h->sock.q_head + h->sock.q_count) % PAL_MUX_QUEUE;
+    h->sock.q[t]     = buf;
+    h->sock.q_len[t] = len;
+    h->sock.q_off[t] = off;
+    h->sock.q_count++;
+    return true;
+}
+
+/* `rx` is drained: move the next queued frame into it. */
+static bool mux_rx_refill(PAL_HANDLE h) {
+    if (h->sock.rx_off < h->sock.rx_len)
+        return true;
+    if (!h->sock.q_count)
+        return false;
+    int i = h->sock.q_head;
+    /* A SWAP: the spent buffer goes back to the pool and the queue's head
+     * becomes `rx`. No bytes move. */
+    if (h->sock.rx_pooled)
+        mux_pool_put_ptr(h->sock.rx);
+    else
+        free(h->sock.rx);
+    h->sock.rx        = h->sock.q[i];
+    h->sock.rx_pooled = true;
+    h->sock.rx_len    = h->sock.q_len[i];
+    h->sock.rx_off    = h->sock.q_off[i];
+    h->sock.q[i]      = NULL;
+    h->sock.q_head    = (h->sock.q_head + 1) % PAL_MUX_QUEUE;
+    h->sock.q_count--;
+    return h->sock.rx_off < h->sock.rx_len;
+}
+
+static void mux_queue_release(PAL_HANDLE h) {
+    if (h->sock.rx_pooled) {
+        mux_pool_put_ptr(h->sock.rx);
+        h->sock.rx        = NULL;
+        h->sock.rx_pooled = false;
+        h->sock.rx_len = h->sock.rx_off = 0;
+    }
+    while (h->sock.q_count) {
+        int i = h->sock.q_head;
+        mux_pool_put_ptr(h->sock.q[i]);
+        h->sock.q[i]   = NULL;
+        h->sock.q_head = (h->sock.q_head + 1) % PAL_MUX_QUEUE;
+        h->sock.q_count--;
+    }
+}
+
+/* How many frames the service may have in flight for this socket, now: the
+ * floor always, plus what the pool can spare once every other live connection's
+ * floor is covered, capped. The service's up_grant is the same rule from the
+ * other end. */
+static uint32_t mux_grant(PAL_HANDLE h) {
+    __UNUSED(h);
+    int others = pal_svsm_mux_count();
+    if (others > 0)
+        others -= 1;
+    int spare = PAL_MUX_POOL - g_mux_pool_busy - others * PAL_MUX_CREDIT_FLOOR;
+    uint32_t g = (uint32_t)PAL_MUX_CREDIT_FLOOR + (spare > 0 ? (uint32_t)spare : 0u);
+    if (g > PAL_MUX_CREDIT_CAP)
+        g = PAL_MUX_CREDIT_CAP;
+    return g;
+}
+
+/* Tell the service this socket's limit, when saying so is worth a message.
+ *
+ * At once when the socket has nothing left coming, because then a message is
+ * the only thing that will restart it; otherwise only when the window has
+ * opened by two, so a steady stream costs one credit frame per two data frames
+ * rather than one per one. A drop is harmless - the limit is cumulative. */
+static void mux_credit_maybe(PAL_HANDLE h) {
+    if (!sock_shares(h) || !h->sock.conn_id)
+        return;
+    uint32_t want = h->sock.rx_done + mux_grant(h);
+    if (want == h->sock.rx_advert)
+        return;
+    bool blocked = (int32_t)(h->sock.rx_advert - h->sock.rx_done) <= 3;
+    if (!blocked && (int32_t)(want - h->sock.rx_advert) < 4)
+        return;
+    struct pal_chan_ring out;
+    ring_for(h, NULL, &out);
+    struct pal_mvmux_hdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.conn = h->sock.conn_id;
+    mh.op   = PAL_MVMUX_OP_CREDIT;
+    /* NO NOTIFY, deliberately.
+     *
+     * A notify is a monitor call, and it also WAKES the service - which for a
+     * credit frame buys nothing: the frame carries no data, it only widens a
+     * window, and the service is dispatched on its own clock every
+     * MIN_PERIOD_US whether anybody rings or not. Seventeen of these per MiB
+     * were seventeen monitor calls and seventeen service dispatches that had
+     * nothing to do.
+     *
+     * Safe because nobody ever WAITS on a credit frame: the only party a window
+     * stalls is the service, and a stalled service is a running one - it has
+     * data to send and is being dispatched. The client waits on data, which is
+     * still notified. */
+    if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, &want, 4) == 0)
+        h->sock.rx_advert = want;
+}
+
 /*
  * What to do with the message at the head of a SHARED channel, for a caller
  * that wants its OWN connection's next message.
@@ -296,87 +490,103 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
 
     PAL_HANDLE target = pal_svsm_mux_conn_of(ph.conn);
 
-    /* Scratch for a message that is not going to a caller. This handle's own
-     * residue buffer is free by construction: a caller only looks at the head
-     * when it has nothing left of its own. */
-    if (!handle->sock.rx) {
-        handle->sock.rx = malloc(in->slot);
-        if (!handle->sock.rx)
+    /* WHO OWNS THIS FRAME: the router, or a caller?
+     *
+     * FIN, RST and CREDIT are the router's - they change a handle's state and
+     * carry nothing anybody reads, so they are consumed here whoever they are
+     * for. Everything else belongs to a CALLER: DATA to whoever is reading the
+     * socket, and a CONNECT reply to whoever is inside mvnet_handshake, which
+     * reads the ring directly rather than through `rx`.
+     *
+     * Getting that second case wrong is how this was first written and it cost
+     * every connection: a handshake reply is a CONNECT-op frame, the switch
+     * below had no case for it, and "an op this build does not know" consumed
+     * and dropped the one message the connecting socket was waiting for. */
+    bool ctl = (ph.op == PAL_MVMUX_OP_FIN || ph.op == PAL_MVMUX_OP_RST
+                || ph.op == PAL_MVMUX_OP_CREDIT);
+
+    if (target == handle && !ctl) {
+        /* Ours to read. Straight out of the ring into `rx` if there is room -
+         * the one path that does not copy - and otherwise into our own queue,
+         * because a frame of OURS left at the head because we are slow blocks
+         * every other socket on this channel just as surely as somebody
+         * else's would. A CONNECT reply is never queued: only the handshake
+         * can read it, and it reads the ring. */
+        if (ph.op != PAL_MVMUX_OP_DATA
+            || (handle->sock.rx_off >= handle->sock.rx_len && !handle->sock.q_count))
+            return MUX_HEAD_MINE;
+    } else if (target && !ctl && ph.op != PAL_MVMUX_OP_DATA) {
+        /* Another socket's handshake reply, which only that socket can read.
+         * Left at the head for it - briefly, because the service answers a
+         * CONNECT in the pass it arrives in. */
+        return MUX_HEAD_BLOCKED;
+    }
+
+    /* A DATA frame is read straight into the buffer it will be READ FROM - the
+     * pool's - so a message costs one copy, the same one it cost before any of
+     * this existed. Control frames go into scratch: they are a handful of bytes
+     * and they must never need a pool buffer, or a FIN could not be delivered
+     * to a socket whose queue is full. */
+    bool pooled = (ph.op == PAL_MVMUX_OP_DATA) && target;
+    int pb = -1;
+    char* into;
+    if (pooled) {
+        pb = mux_pool_take(in->slot);
+        if (pb < 0)
+            return MUX_HEAD_BLOCKED;    /* no buffer: leave it, come back */
+        into = g_mux_pool[pb];
+    } else {
+        into = mux_scratch(in->slot);
+        if (!into)
             return MUX_HEAD_NOMEM;
-        handle->sock.rx_len = handle->sock.rx_off = 0;
     }
+    uint32_t got = 0;
+    if (pal_chan_recv(in, into, in->slot, &got) != 0) {
+        if (pooled)
+            mux_pool_put_ptr(into);
+        return MUX_HEAD_EMPTY;
+    }
+    if (was_full)
+        pal_svsm_channel_notify(sock_widx(handle));
 
-    if (target == handle) {
-        /* OUR OWN control frame is consumed HERE rather than left for the
-         * reader, and that is not a tidy-up.
-         *
-         * The mux made end of stream IN-BAND: a FIN is a message in the ring,
-         * where before it was the channel being closed and `pal_chan_peer_gone`
-         * answered it out of band. A marker that only exists once somebody
-         * READS it cannot tell a POLLER anything - measured as `sock_poll_hup`
-         * reporting POLLIN for five seconds and never POLLHUP, with the FIN
-         * sitting at the head of the ring the whole time. So it is consumed at
-         * the one place both the read path and the poll path pass, and it
-         * carries nothing a reader wanted anyway. */
-        if (ph.op == PAL_MVMUX_OP_FIN || ph.op == PAL_MVMUX_OP_RST) {
-            uint32_t cgot = 0;
-            if (pal_chan_recv(in, handle->sock.rx, in->slot, &cgot) != 0)
-                return MUX_HEAD_MINE;       /* could not take it: leave it */
-            if (was_full)
-                pal_svsm_channel_notify(sock_widx(handle));
-            handle->sock.rx_len = handle->sock.rx_off = 0;
-            if (ph.op == PAL_MVMUX_OP_FIN)
-                handle->sock.fin_seen = true;
-            else
-                handle->sock.broken = true;
-            return MUX_HEAD_MOVED;
+    if (pooled && got > PAL_MVMUX_HDR_BYTES) {
+        if (!mux_sink_buf(target, into, got, PAL_MVMUX_HDR_BYTES)) {
+            /* Nowhere to put it, and it is already out of the ring. Dropping
+             * would silently corrupt the stream, so the socket is marked rather
+             * than lied to. Unreachable while the advertised window holds. */
+            mux_pool_put_ptr(into);
+            target->sock.broken = true;
         }
-        return MUX_HEAD_MINE;
+        return MUX_HEAD_MOVED;
     }
-
-    if (!target) {
-        /* A frame for a connection that has closed. Consume and DROP: the id
-         * carries a generation, so this cannot be mistaken for the next
-         * occupant of the slot. */
-        uint32_t drop = 0;
-        if (pal_chan_recv(in, handle->sock.rx, in->slot, &drop) != 0)
-            return MUX_HEAD_EMPTY;
-        if (was_full)
-            pal_svsm_channel_notify(sock_widx(handle));
-        handle->sock.rx_len = handle->sock.rx_off = 0;
+    if (pooled) {
+        mux_pool_put_ptr(into);          /* a DATA frame with no body */
         return MUX_HEAD_MOVED;
     }
 
-    if (target->sock.rx_off < target->sock.rx_len)
-        return MUX_HEAD_BLOCKED;
-    if (!target->sock.rx) {
-        target->sock.rx = malloc(in->slot);
-        if (!target->sock.rx)
-            return MUX_HEAD_NOMEM;
+    char* scratch = into;
+    if (!target || got < PAL_MVMUX_HDR_BYTES) {
+        /* A frame for a connection that has closed, or one that cannot be a
+         * frame at all. Consumed and DROPPED: the id carries a generation, so a
+         * late frame cannot be mistaken for the next occupant of the slot. */
+        return MUX_HEAD_MOVED;
     }
-    uint32_t tgot = 0;
-    if (pal_chan_recv(in, target->sock.rx, in->slot, &tgot) != 0)
-        return MUX_HEAD_EMPTY;
-    if (was_full)
-        pal_svsm_channel_notify(sock_widx(handle));
-    if (tgot < PAL_MVMUX_HDR_BYTES) {
+
+    if (ph.op == PAL_MVMUX_OP_FIN) {
+        /* A FIN costs no queue room, so a stream can always be ended - even one
+         * whose reader has stopped and whose queue is full. */
+        target->sock.fin_seen = true;
+    } else if (ph.op == PAL_MVMUX_OP_RST) {
         target->sock.broken = true;
-        target->sock.rx_len = target->sock.rx_off = 0;
-    } else if (ph.op == PAL_MVMUX_OP_FIN || ph.op == PAL_MVMUX_OP_RST) {
-        /* Its stream is over. A FIN reads as EOF and an RST as a reset, which
-         * is the difference between `fin_seen` and `broken` - and the frame is
-         * consumed either way, so the head moves and the OTHER sockets on this
-         * channel keep running. */
-        if (ph.op == PAL_MVMUX_OP_FIN)
-            target->sock.fin_seen = true;
-        else
-            target->sock.broken = true;
-        target->sock.rx_len = target->sock.rx_off = 0;
-    } else {
-        target->sock.rx_len = tgot;
-        target->sock.rx_off = PAL_MVMUX_HDR_BYTES;
-        if (target->sock.rx_off >= target->sock.rx_len)
-            target->sock.rx_len = target->sock.rx_off = 0;   /* header only */
+    } else if (ph.op == PAL_MVMUX_OP_CREDIT) {
+        if (got >= PAL_MVMUX_HDR_BYTES + 4) {
+            uint32_t lim;
+            memcpy(&lim, scratch + PAL_MVMUX_HDR_BYTES, 4);
+            /* Cumulative, so an older frame arriving after a newer one cannot
+             * shrink the window: only a strictly greater limit is taken. */
+            if ((int32_t)(lim - target->sock.tx_limit) > 0)
+                target->sock.tx_limit = lim;
+        }
     }
     return MUX_HEAD_MOVED;
 }
@@ -805,6 +1015,9 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
         handle->sock.muxed = true;
         handle->sock.win   = 0;          /* the MUX owns the channel, not this */
         handle->sock.side  = g_pal_svsm_mux_side;
+        /* The window each side ASSUMES before being told one, so a brand-new
+         * connection's first frame needs no round trip (mvmux.h). */
+        handle->sock.tx_limit = PAL_MUX_CREDIT_FLOOR;
         int cl = pal_svsm_mux_claim(handle, &handle->sock.conn_id);
         if (cl < 0)
             return cl;                   /* the table said no, not the monitor */
@@ -875,8 +1088,9 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
             g_pal_svsm_mux_widx = (unsigned long)win;
             g_pal_svsm_mux_side = 0;
             g_pal_svsm_mux_open = true;
-            handle->sock.win    = 0;
-            handle->sock.side   = 0;
+            handle->sock.win      = 0;
+            handle->sock.side     = 0;
+            handle->sock.tx_limit = PAL_MUX_CREDIT_FLOOR;
         } else {
             handle->sock.win  = addr_out;
             handle->sock.widx = (unsigned long)win;
@@ -1222,6 +1436,39 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
     int ret = -PAL_ERROR_TRYAGAIN;
     for (;;) {
+        /* THE SERVICE'S WINDOW, before the ring's.
+         *
+         * A ring that is not full says only that the CHANNEL has room; it says
+         * nothing about whether the service has anywhere to put another frame
+         * for THIS connection. Sending past the window is what would leave a
+         * frame stuck at the head with nowhere to go, which is the head-of-line
+         * blocking the window exists to prevent - so a socket at its limit
+         * waits here, and every other socket on the channel keeps running.
+         *
+         * Only for a sharing socket: one that owns its channel is the only
+         * connection on it, so the ring's own fullness is the whole truth. */
+        if (sock_shares(handle)
+            && (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
+            if (sock_chan_gone(handle)) {
+                ret = -PAL_ERROR_CONNFAILED;
+                break;
+            }
+            if (nonblock)
+                break;
+            /* Room is a CREDIT frame arriving, which arrives as a message like
+             * any other - so wait on the peer's tail, and let the read path
+             * route it. */
+            struct pal_chan_ring in;
+            ring_for(handle, &in, NULL);
+            uint32_t seen = *in.peer_tail;
+            uint64_t arm  = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, seen);
+            if (pal_svsm_sleep_arms(&arm, 1, PAL_SOCK_PARK_US) < 0)
+                for (int i = 0; i < PAL_SOCK_SPINS; i++)
+                    __asm__ volatile("pause");
+            mux_poll_route(handle, &in);     /* which is what collects it */
+            continue;
+        }
+
         /* Header and body in one message, without building a combined buffer:
          * that buffer was a 16,380-byte malloc that missed the PAL slab and
          * cost an mmap and a munmap through the monitor on every send. */
@@ -1229,6 +1476,8 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             /* The peer may be parked on this index; the monitor turns that
              * into one dispatch however many messages went in. */
             pal_svsm_channel_notify(sock_widx(handle));
+            if (sock_shares(handle))
+                handle->sock.tx_sent++;
             *out_size = total;
             ret = 0;
             break;
@@ -1269,7 +1518,11 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
      * ring, because the ring may well have another connection's traffic in it
      * and a blocking read here would otherwise wait on data that is not
      * coming. */
-    if (handle->sock.fin_seen && handle->sock.rx_off >= handle->sock.rx_len) {
+    if (handle->sock.fin_seen && handle->sock.rx_off >= handle->sock.rx_len
+        && !handle->sock.q_count) {
+        /* A FIN costs no queue room, so it can arrive while frames are still
+         * queued behind `rx`. Those are data the caller has not had yet and
+         * reporting end of stream over them would lose them. */
         *out_total_size = 0;
         return 0;
     }
@@ -1307,7 +1560,9 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
     int ret;
     for (;;) {
-        /* Serve what is already here first. */
+        /* Serve what is already here first - `rx`, then the queue behind it. */
+        if (handle->sock.rx_off >= handle->sock.rx_len)
+            mux_rx_refill(handle);
         if (handle->sock.rx_off < handle->sock.rx_len) {
             uint64_t have = handle->sock.rx_len - handle->sock.rx_off;
             uint64_t off = 0;
@@ -1319,8 +1574,14 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 off += take;
             }
             handle->sock.rx_off += (uint32_t)off;
-            if (handle->sock.rx_off >= handle->sock.rx_len)
+            if (handle->sock.rx_off >= handle->sock.rx_len) {
                 handle->sock.rx_len = handle->sock.rx_off = 0;
+                /* One frame FINISHED, which is what earns the service more
+                 * window - not one frame received, or the limit would promise
+                 * room that is still occupied. */
+                handle->sock.rx_done++;
+                mux_credit_maybe(handle);
+            }
             *out_total_size = off;
             return 0;
         }
@@ -1416,6 +1677,8 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                     /* A DATA frame with no body. Nothing for this caller;
                      * go round for the next message. */
                     handle->sock.rx_len = handle->sock.rx_off = 0;
+                    handle->sock.rx_done++;
+                    mux_credit_maybe(handle);
                     continue;
                 }
             }
@@ -1562,7 +1825,7 @@ bool pal_svsm_sock_readable(PAL_HANDLE handle) {
         return false;
     /* What a previous read could not take is readable too, or a poll
      * after a short read says "nothing here" with bytes in hand. */
-    if (handle->sock.rx_off < handle->sock.rx_len)
+    if (handle->sock.rx_off < handle->sock.rx_len || handle->sock.q_count)
         return true;
     if (handle->sock.fin_seen)
         return true;                /* readable, and the read returns 0 */
@@ -1641,6 +1904,7 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
+    mux_queue_release(handle);      /* the pool is the vault's, not this socket's */
     if (handle->sock.win)
         sock_unclaim((unsigned)handle->sock.widx);
     if (handle->sock.win)

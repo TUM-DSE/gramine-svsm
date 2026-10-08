@@ -22,6 +22,15 @@ struct pal_svsm_pipe_pair;
  * in the same commit. */
 #define PAL_SVSM_THREAD_ARMS 4
 
+/* How many DATA frames one socket on a SHARED channel may have in flight, and
+ * so how deep its inbound queue is. Must equal MVMUX_CREDIT_CAP in the
+ * service's mvmux.h: neither end can negotiate it, both are measured
+ * separately, so CHANGE ONE AND CHANGE THE OTHER. `rx` holds the message being
+ * read and the queue holds the rest, which is why this is CAP - 1. */
+#define PAL_MUX_CREDIT_CAP   16
+#define PAL_MUX_CREDIT_FLOOR 1
+#define PAL_MUX_QUEUE        (PAL_MUX_CREDIT_CAP - 1)
+
 /* Named, unlike the other hosts' anonymous version, because a thread handle
  * links to the next one in the scheduler's ring (see pal_threading.c). */
 struct pal_handle_inner;
@@ -184,6 +193,34 @@ struct pal_handle_inner {
             char*    rx;            /* one slot's worth, allocated on demand */
             uint32_t rx_len;        /* bytes in it */
             uint32_t rx_off;        /* how many the caller has had */
+            /* AND A QUEUE BEHIND IT, on a shared channel.
+             *
+             * `rx` alone holds one message, which is all a socket with its own
+             * channel ever needs. Sharing changes that: the channel's head may
+             * be any socket's, so a socket that is not being read stops every
+             * other socket on the channel - head-of-line blocking at the vault.
+             * The receiver therefore has to be able to take the head ALWAYS,
+             * which means somewhere to put it, which means a bounded queue and
+             * credit (MVMUX_OP_CREDIT) to keep the sender inside it.
+             *
+             * Entries are [q_head, q_head + q_count) modulo the array, so a
+             * zeroed handle is an empty queue. The buffers come from a pool
+             * shared by every socket, so idle sockets cost nothing. */
+            /* Is `rx` itself a pool buffer? When it is, a refill is a POINTER
+             * SWAP rather than a copy, which is what keeps a frame's cost at
+             * the one copy it always had: into the buffer it will be read
+             * from, straight out of the ring. */
+            bool     rx_pooled;
+            void*    q[PAL_MUX_QUEUE];
+            uint32_t q_len[PAL_MUX_QUEUE];
+            uint32_t q_off[PAL_MUX_QUEUE];
+            int      q_head, q_count;
+            /* The window this socket ADVERTISES, for frames coming down. */
+            uint32_t rx_done;       /* DATA frames fully consumed, cumulative */
+            uint32_t rx_advert;     /* the limit last advertised to the service */
+            /* And the window it RESPECTS, for frames going up. */
+            uint32_t tx_sent;       /* DATA frames sent, cumulative */
+            uint32_t tx_limit;      /* the limit the service advertised */
             bool     bound;
             bool     listening;
             unsigned int backlog;
