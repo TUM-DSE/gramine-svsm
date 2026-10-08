@@ -221,7 +221,11 @@ long libos_syscall_fcntl(int fd, int cmd, unsigned long arg) {
             if (ret < 0)
                 break;
 
-            ret = file_lock_set(hdl->dentry, &file_lock, /*wait=*/cmd == F_SETLKW);
+            /* A lineage filesystem answers for its own files, locally and
+             * without IPC - and owns the answer either way, so a refusal is
+             * never retried through the leader. */
+            if (!vaultfs_lock_set(hdl, &file_lock, /*wait=*/cmd == F_SETLKW, &ret))
+                ret = file_lock_set(hdl->dentry, &file_lock, /*wait=*/cmd == F_SETLKW);
             break;
         }
 
@@ -250,7 +254,8 @@ long libos_syscall_fcntl(int fd, int cmd, unsigned long arg) {
             }
 
             struct libos_file_lock file_lock2;
-            ret = file_lock_get(hdl->dentry, &file_lock, &file_lock2);
+            if (!vaultfs_lock_get(hdl, &file_lock, &file_lock2, &ret))
+                ret = file_lock_get(hdl->dentry, &file_lock, &file_lock2);
             if (ret < 0)
                 break;
 
@@ -342,7 +347,8 @@ long libos_syscall_flock(unsigned int fd, unsigned int cmd) {
         .type = lock_type,
         .handle_id = hdl->id,
     };
-    ret = file_lock_set(hdl->dentry, &file_lock, !(cmd & LOCK_NB));
+    if (!vaultfs_lock_set(hdl, &file_lock, !(cmd & LOCK_NB), &ret))
+        ret = file_lock_set(hdl->dentry, &file_lock, !(cmd & LOCK_NB));
 out:
     put_handle(hdl);
     return ret;

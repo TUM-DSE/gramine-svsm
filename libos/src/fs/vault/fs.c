@@ -35,47 +35,149 @@
 #include "pal_error.h"
 #include "perm.h"
 #include "stat.h"
+#include "vault_internal.h"
 
 #define USEC_IN_SEC 1000000
 
 /* The region, as this member sees it. One per process: every mount of
  * vaultfs in one vault is the same lineage region (the monitor's call is
  * idempotent), so there is nothing to key this by. */
-static struct vfs_super* g_vfs;
-static struct vfs_entry* g_vfs_table;
+struct vfs_super* g_vfs;
+struct vfs_entry* g_vfs_table;
 static char* g_vfs_data;
 static uint32_t g_vfs_data_pages;
 /* Derived from the region's size by vfs_layout(), so every member agrees
    without being told. Both scale with the region: a fixed one-page bitmap
    capped the filesystem at 96 MiB however much the manifest declared. */
-static uint32_t g_vfs_entries;
+uint32_t g_vfs_entries;
 static uint8_t* g_vfs_bitmap;
+/* The lock area (v2). Pages the monitor places and never reads, like the rest
+ * of the region; what lives in them is lock.c's business. */
+struct vfs_flock* g_vfs_locks;
+
 
 /* ---------------------------------------------------------------- the lock */
 
 /*
- * A test-and-set over shared memory, held across a table mutation.
+ * This member's own serial, or VFS_LOCK_ANON if the monitor would not say.
  *
- * The members of a lineage are cooperative by construction, and no monitor
- * call arbitrates this - so there is no priority inheritance and no owner
- * death detection. A member descheduled while holding it makes the others
- * spin. That is the acknowledged cost of keeping the filesystem out of VMPL0
- * (PLAN.md's risk list), and it is bounded in practice because every critical
- * section here is a bounded scan or memcpy with no monitor call inside it.
+ * NOT CACHED, and that is not an oversight. A copy-on-write fork hands the
+ * child every byte of its parent's memory, so a serial memoised in a LibOS
+ * global would be the PARENT's - and a child that signed a lock with it would
+ * be indistinguishable from its parent to everyone, including itself: it could
+ * take a lock its parent holds, and its parent's death would look like its
+ * own. _PalLineageSelf carries the same warning for the same reason.
+ *
+ * The cost of not caching is a read of a word in this process's own channel
+ * directory, which the monitor maps per-process. Against the table scan every
+ * caller is about to do, it does not register.
  */
-static void vfs_lock(void) {
-    while (__atomic_exchange_n(&g_vfs->lock, 1, __ATOMIC_ACQUIRE) != 0) {
-        /* A plain spin. Every critical section below is a bounded scan or a
-         * memcpy with no monitor call in it, so the hold time is short and
-         * yielding would cost more than it saves - but this IS a spin, and a
-         * member descheduled while holding the lock makes the others burn
-         * their slice until it runs again. That is the acknowledged price of
-         * keeping the filesystem out of VMPL0. */
+uint64_t vfs_self(void) {
+    uint64_t me = 0;
+    if (PalLineageSelf(&me) < 0 || !me) {
+        /* We do not know who we are, so nobody may ever conclude we died.
+         * The high bit is never a real serial, and vfs_holder_dead() treats
+         * any such value as alive - which degrades this lock to exactly v1's
+         * behaviour for this member, spinning forever on a dead holder. That
+         * is the honest answer: a steal decided on an unknown identity is
+         * worse than a stall. */
+        return VFS_LOCK_ANON;
+    }
+    return me;
+}
+
+/* Has the member holding the lock stopped existing?
+ *
+ * Only ever asked after a long bound, and answered by the MONITOR's roster of
+ * this lineage's live members, not by anything a vault wrote - a member that
+ * could lie here could lie about the table too, but the roster is the one
+ * thing in the region that VMPL0 writes and nobody else can. */
+bool vfs_holder_dead(uint64_t holder) {
+    if (!holder || (holder & VFS_LOCK_ANON))
+        return false;   /* free, or a holder whose identity we cannot judge */
+    bool alive = true;
+    if (PalLineageMemberAlive(holder, &alive) < 0)
+        return false;   /* no answer is not a death certificate */
+    return !alive;
+}
+
+/*
+ * The lock every mutation takes, held across a table mutation.
+ *
+ * Still a spin, and still not arbitrated by the monitor: the members of a
+ * lineage are cooperative by construction, every critical section below is a
+ * bounded scan or a memcpy with no monitor call inside it, and a member
+ * descheduled while holding it makes the others burn their slice until it runs
+ * again. That is the acknowledged price of keeping the filesystem out of VMPL0
+ * (PLAN.md's risk list).
+ *
+ * What v2 adds is that the word says WHO holds it, so "descheduled" and "gone"
+ * are no longer the same observation. After VFS_LOCK_PATIENCE_US of failing to
+ * take it - orders of magnitude longer than any critical section here - we ask
+ * the monitor whether the holder still exists, and only if it does not do we
+ * take the lock from it. A live holder is never stolen from, however long it
+ * holds, so a slow member is never raced; only a dead one is stepped over.
+ */
+void vfs_lock(void) {
+    uint64_t me = vfs_self();
+    uint64_t waited_from = 0;
+
+    for (;;) {
+        uint64_t free_word = 0;
+        if (__atomic_compare_exchange_n(&g_vfs->lock, &free_word, me, /*weak=*/false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            return;
+
+        /* `free_word` now holds whoever has it. Spin first; ask questions only
+         * after the wait stops looking like contention. */
+        uint64_t now = 0;
+        if (PalSystemTimeQuery(&now) < 0) {
+            CPU_RELAX();
+            continue;   /* no clock, no bound: spin, exactly as v1 did */
+        }
+        if (!waited_from) {
+            waited_from = now;
+            CPU_RELAX();
+            continue;
+        }
+        if (now - waited_from < VFS_LOCK_PATIENCE_US) {
+            CPU_RELAX();
+            continue;
+        }
+
+        if (vfs_holder_dead(free_word)) {
+            /* Take it from the dead holder by CAS, not by a store: another
+             * member may have reached this conclusion in the same moment, and
+             * exactly one of us may win. The loser sees the winner's serial
+             * and starts its patience over, which is right - the winner is
+             * alive and is now doing the work. */
+            uint64_t dead = free_word;
+            if (__atomic_compare_exchange_n(&g_vfs->lock, &dead, me, /*weak=*/false,
+                                            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+                /* The table may be mid-mutation. Every mutation below is
+                 * ordered so that an interrupted one leaves the table
+                 * consistent for a reader - type is published last on create
+                 * and first on remove, precisely because lookups run unlocked
+                 * - so there is nothing to repair here. What a dead holder CAN
+                 * leave behind is its byte-range locks, and those are reclaimed
+                 * by owner in lock.c, not here. */
+                /* log_ERROR, not a warning, and the level is the reason: a
+                 * measured manifest runs at log_level = "error" because a
+                 * console write costs a monitor call, so a warning here would
+                 * never be seen by anyone - which would make it not a log but
+                 * a comment. And it deserves the level: it only ever prints
+                 * when a member died holding its lineage's filesystem. */
+                log_error("vaultfs: took the superblock lock from member %lu, "
+                          "which the monitor says is gone", dead);
+                return;
+            }
+        }
+        waited_from = now;
         CPU_RELAX();
     }
 }
 
-static void vfs_unlock(void) {
+void vfs_unlock(void) {
     __atomic_store_n(&g_vfs->lock, 0, __ATOMIC_RELEASE);
 }
 
@@ -201,12 +303,80 @@ static uint64_t vfs_now(void) {
 
 /* -------------------------------------------------------------- inode glue */
 
-/* The inode carries the entry pointer, so read and write do not re-scan. It
- * is a pointer into shared memory and stays valid for as long as the entry
- * does: the table is a fixed array in a region that is never remapped, and a
- * slot is reset in place rather than moved - the same property the monitor's
- * process store relies on for the same reason. An entry freed by another
- * member becomes type VFS_FREE, which every user below rechecks. */
+/*
+ * What an inode carries: the entry pointer, so read and write do not re-scan,
+ * plus the (idx, gen) that says WHICH FILE that slot held when this inode was
+ * made.
+ *
+ * The pointer alone was not an identity. It stays valid for as long as the
+ * region does - the table is a fixed array in memory that is never remapped,
+ * and a slot is reset in place rather than moved, the same property the
+ * monitor's process store relies on for the same reason - but validity is not
+ * identity. A slot whose file another member unlinks is handed to the next
+ * file created, and an inode still pointing at it then named that other file:
+ * a read on a handle opened before the recycle returned the new file's bytes,
+ * and (once there are byte-range locks) a lock keyed on the slot would have
+ * been inherited by whoever got it next.
+ *
+ * So the generation is captured here and rechecked on every use. `type !=
+ * VFS_FREE` was never enough on its own, because a recycled slot is not free.
+ */
+struct vfs_ino {
+    struct vfs_entry* e;
+    uint32_t idx;      /* index in the table; derived, kept for lock.c's key */
+    uint64_t gen;      /* that entry's generation when this inode was made */
+};
+
+/* The entry this inode names, or NULL.
+ *
+ * NULL means one of two things, and both callers below already handle it the
+ * same way: the mount root, which has no entry in the region at all, or a slot
+ * that has since been handed to a different file. The second is logged because
+ * it is rare and surprising; the first is the common case and silent. */
+static struct vfs_entry* vfs_entry_of(struct libos_inode* inode) {
+    if (!inode || !inode->data)
+        return NULL;                 /* the mount root */
+    struct vfs_ino* ino = inode->data;
+    uint64_t gen = __atomic_load_n(&ino->e->gen, __ATOMIC_ACQUIRE);
+    if (gen != ino->gen) {
+        log_debug("vaultfs: entry %u is generation %lu, this handle holds %lu - "
+                  "the file it was opened on is gone", ino->idx, gen, ino->gen);
+        return NULL;
+    }
+    return ino->e;
+}
+
+/*
+ * The file identity behind an open handle, for lock.c.
+ *
+ * The HANDLE's inode and never the dentry's, which is the distinction that
+ * matters: a dentry is a name and its inode can be replaced under it - another
+ * member unlinks the file, a lookup re-runs, and `dent->inode` is a different
+ * file - while a handle's inode is the file the caller opened and holds open.
+ * A lock belongs to the second. Gramine's own lock API is keyed on the dentry,
+ * which is why every dispatch site passes the handle it already has rather
+ * than letting the dentry decide.
+ *
+ * Does NOT check that the file is still live; lock.c does that under the
+ * superblock lock, where the answer cannot go stale between test and use.
+ */
+bool vaultfs_handle_fileid(struct libos_handle* hdl, struct vfs_fileid* out) {
+    if (!hdl || hdl->type != TYPE_VAULTFS)
+        return false;
+    if (!hdl->inode || !hdl->inode->data)
+        return false;   /* the mount root: a directory with no entry to lock */
+    struct vfs_ino* ino = hdl->inode->data;
+    out->idx = ino->idx;
+    out->gen = ino->gen;
+    return true;
+}
+
+/* Frees what vfs_setup_dentry allocated. The mount root's inode has no
+ * vfs_ino, so NULL is normal here and not an error. */
+static void vaultfs_idrop(struct libos_inode* inode) {
+    free(inode->data);
+    inode->data = NULL;
+}
 /* The mount root: a directory that exists because the mount does, with no
    entry in the region behind it. See the comment in vaultfs_lookup. */
 static int vfs_setup_root(struct libos_dentry* dent) {
@@ -225,11 +395,25 @@ static int vfs_setup_dentry(struct libos_dentry* dent, struct vfs_entry* e) {
     assert(locked(&g_dcache_lock));
     assert(!dent->inode);
 
+    struct vfs_ino* ino = malloc(sizeof(*ino));
+    if (!ino)
+        return -ENOMEM;
+    ino->e   = e;
+    ino->idx = (uint32_t)(e - g_vfs_table);
+    /* Read AFTER the entry was found, so a slot recycled in between is named
+     * by its new generation rather than its old one. That is not a hole: this
+     * inode then simply names a file that this lookup did not find, and the
+     * first use of it fails the generation check like any other stale handle.
+     * Lookups are deliberately unlocked - see vfs_find. */
+    ino->gen = __atomic_load_n(&e->gen, __ATOMIC_ACQUIRE);
+
     mode_t type = (e->type == VFS_DIR) ? S_IFDIR : S_IFREG;
     struct libos_inode* inode = get_new_inode(dent->mount, type, e->mode & 07777);
-    if (!inode)
+    if (!inode) {
+        free(ino);
         return -ENOMEM;
-    inode->data = e;
+    }
+    inode->data = ino;
     inode->size = e->size;
     inode->ctime = e->mtime;
     inode->mtime = e->mtime;
@@ -255,7 +439,7 @@ static int vfs_setup_dentry(struct libos_dentry* dent, struct vfs_entry* e) {
  * the answer is a clean -ENODEV rather than a shared filesystem. Belt and
  * braces, because the failure it guards against is silent.
  */
-static int vfs_attach(void) {
+int vfs_attach(void) {
     if (g_vfs)
         return 0;
 
@@ -270,9 +454,31 @@ static int vfs_attach(void) {
         return pal_to_unix_errno(ret);
     /* The smallest region that can hold a superblock, one bitmap page, the
        minimum table, and a data page to put something in. */
-    if (!base || size < (size_t)(1 + 1 + VFS_TABLE_PAGES_MIN + 1) * VFS_PAGE) {
+    if (!base ||
+        size < (size_t)(1 + 1 + VFS_TABLE_PAGES_MIN + VFS_LOCK_PAGES + 1) * VFS_PAGE) {
         log_error("vaultfs: the lineage region is too small (%lu bytes)", size);
         return -ENODEV;
+    }
+    /* And never LARGER than this manifest asked for.
+     *
+     * The monitor only ever clamps `want` down - it caps and it rounds, it
+     * does not grow a request - so an answer bigger than the ask is not a
+     * generous monitor, it is an answer about somebody else's region. That
+     * happened: `lineage_extent` matched on a window that is always 0 for a
+     * lineage, so it returned the first lineage region of this purpose in the
+     * VM whoever asked, and a vault with a small reservation was told a large
+     * neighbour's size. It then laid this filesystem out over that number and
+     * died on its first write past its own last page - a silent failure three
+     * steps from its cause.
+     *
+     * Fixed in the monitor; refused here as well, because a filesystem laid
+     * out over memory that is not there is worth two checks, and this one
+     * costs a comparison. The data area is one page short of the ask (page 0
+     * is the monitor's header), so `>` is the right test, not `>=`. */
+    if (size > (size_t)want * VFS_PAGE) {
+        log_error("vaultfs: the monitor answered %lu bytes for a %ld page ask - "
+                  "that region is not this lineage's", size, (long)want);
+        return -EINVAL;
     }
 
     struct vfs_super* sb = base;
@@ -295,17 +501,34 @@ static int vfs_attach(void) {
          * one is touched, so a 512 MiB filesystem costs its own metadata and
          * nothing else until a file is written. */
         memset(sb, 0, VFS_PAGE);
+        /* That memset just zeroed the word we are holding, which is to say it
+         * released a lock we still need. Put ourselves back in it before
+         * writing anything else: another member reaching vfs_lock() in this
+         * window would otherwise find the lock free and format the region a
+         * second time, underneath us. (In v1 this was invisible, because the
+         * lock was a flag that the memset cleared and the unlock cleared
+         * again. With an owner in the word it is a real handover.) */
+        __atomic_store_n(&sb->lock, vfs_self(), __ATOMIC_RELAXED);
         sb->version      = VFS_VERSION;
         sb->entries      = L.entries;
         sb->bitmap_pages = L.bitmap_pages;
         sb->table_pages  = L.table_pages;
+        sb->lock_first   = L.lock_first;
+        sb->lock_pages   = L.lock_pages;
         sb->data_first   = L.data_first;
         sb->data_pages   = L.data_pages;
         sb->generation   = 1;
+        /* 1, not 0, so a handle carrying gen 0 is recognisably one that was
+         * never given an identity rather than one naming the first file. */
+        sb->next_gen     = 1;
         memset((char*)base + VFS_BITMAP_PAGE * VFS_PAGE, 0,
                (size_t)L.bitmap_pages * VFS_PAGE);
         memset((char*)base + (size_t)(VFS_BITMAP_PAGE + L.bitmap_pages) * VFS_PAGE, 0,
                (size_t)L.table_pages * VFS_PAGE);
+        /* The lock area is deliberately NOT zeroed. It arrives zeroed from the
+         * monitor, and touching it here would spend its pages on every
+         * lineage - including the overwhelming majority that never call
+         * fcntl. See VFS_LOCK_PAGES. */
         /* The root directory is an entry like any other, so a readdir of the
          * mount point and a lookup of "/" need no special case. */
         struct vfs_entry* root =
@@ -313,6 +536,7 @@ static int vfs_attach(void) {
                                 + (size_t)(VFS_BITMAP_PAGE + L.bitmap_pages) * VFS_PAGE);
         root->type = VFS_DIR;
         root->mode = PERM_rwxrwxrwx;
+        root->gen  = sb->next_gen++;
         root->path[0] = '\0';
         /* Last, with a release, so no member can mistake a half-formatted
          * superblock for a formatted one. */
@@ -329,6 +553,8 @@ static int vfs_attach(void) {
     g_vfs_bitmap     = (uint8_t*)base + VFS_BITMAP_PAGE * VFS_PAGE;
     g_vfs_table      = (struct vfs_entry*)((char*)base
                          + (size_t)(VFS_BITMAP_PAGE + sb->bitmap_pages) * VFS_PAGE);
+    g_vfs_locks      = (struct vfs_flock*)((char*)base
+                         + (size_t)sb->lock_first * VFS_PAGE);
     g_vfs_data       = (char*)base + (size_t)sb->data_first * VFS_PAGE;
     g_vfs_data_pages = sb->data_pages;
     g_vfs_entries    = sb->entries;
@@ -370,8 +596,9 @@ static int vaultfs_lookup(struct libos_dentry* dent) {
      * never needs the region: only the first access to something INSIDE the
      * mount does, which is in the instance, which is the whole point.
      *
-     * Its `inode->data` is NULL, and every user of that pointer already
-     * checks (a read or write of a directory is refused anyway). */
+     * It carries no `vfs_ino`, so `vfs_entry_of` answers NULL for it and
+     * every user below already handles that (a read or write of a directory
+     * is refused anyway). */
     if (!dent->parent)
         return vfs_setup_root(dent);
 
@@ -422,6 +649,16 @@ static int vfs_make(struct libos_dentry* dent, uint32_t type, mode_t perm,
     e->npages     = 0;
     e->size       = 0;
     e->mtime      = vfs_now();
+    /* A new identity for this slot, under the lock, before the type is
+     * published - so no member can ever see a live entry with the previous
+     * file's generation still in it. Anything still holding the old (idx, gen)
+     * now fails to match, which is the point: it is holding a file that no
+     * longer exists. */
+    e->gen        = g_vfs->next_gen++;
+    /* Nothing this slot owed its previous file can still be owed. Belt and
+     * braces against the records above: unlink is where they should go, this
+     * is what makes it impossible for them to stay. */
+    vfs_flock_drop_slot_locked((uint32_t)(e - g_vfs_table));
     memcpy(e->path, path, strlen(path) + 1);
     /* type LAST: a scan by another member must not see a slot with a path but
      * no type, or one with a type and a stale path. */
@@ -506,12 +743,24 @@ static int vaultfs_unlink(struct libos_dentry* dent) {
             }
         }
     }
-    if (e->npages)
-        vfs_free_run(e->first_page, e->npages);
-    /* type first, so no scan sees a freed extent still owned. */
+    /* Type FIRST, then the extent - which is what the comment here always
+     * claimed and what the code did backwards.
+     *
+     * Mutations are serialised by the lock, but LOOKUPS and reads are not:
+     * vfs_find and vaultfs_read walk the table without it, by design. Freeing
+     * the run first opened a window in which an unlocked reader saw a live
+     * VFS_FILE entry whose pages the allocator had already handed to somebody
+     * else - so a read returned another file's bytes. Publishing VFS_FREE
+     * first closes it: a reader either sees the file intact, or sees it gone. */
+    uint32_t first = e->first_page, npages = e->npages;
     __atomic_store_n(&e->type, VFS_FREE, __ATOMIC_RELEASE);
     e->npages = 0;
     e->size = 0;
+    if (npages)
+        vfs_free_run(first, npages);
+    /* And its byte-range locks, which are keyed by (idx, gen) and would
+     * otherwise be unreachable by anybody and freed by nothing. */
+    vfs_flock_drop_slot_locked((uint32_t)(e - g_vfs_table));
     g_vfs->generation++;
     vfs_unlock();
     return 0;
@@ -540,12 +789,18 @@ static int vaultfs_rename(struct libos_dentry* old, struct libos_dentry* new) {
     }
     struct vfs_entry* victim = vfs_find(to);
     if (victim && victim != e) {
-        if (victim->npages)
-            vfs_free_run(victim->first_page, victim->npages);
+        /* Type first, then the extent - see vaultfs_unlink for why the other
+         * order let an unlocked reader read another file's pages. */
+        uint32_t vfirst = victim->first_page, vnpages = victim->npages;
         __atomic_store_n(&victim->type, VFS_FREE, __ATOMIC_RELEASE);
         victim->npages = 0;
         victim->size = 0;
+        if (vnpages)
+            vfs_free_run(vfirst, vnpages);
+        vfs_flock_drop_slot_locked((uint32_t)(victim - g_vfs_table));
     }
+    /* `e` keeps its slot and its generation, so it keeps its locks: a lock
+     * follows the FILE, and a rename does not make a new one. */
     memset(e->path, 0, VFS_PATH_MAX);
     memcpy(e->path, to, strlen(to) + 1);
     e->mtime = vfs_now();
@@ -558,18 +813,20 @@ static int vaultfs_chmod(struct libos_dentry* dent, mode_t perm) {
     assert(locked(&g_dcache_lock));
     if (!dent->inode)
         return -ENODEV;
-    /* The mount root has no entry behind it; its mode is the mount's. */
-    if (!dent->inode->data)
+    /* The mount root has no entry behind it; its mode is the mount's. A slot
+     * recycled under this dentry is the same answer for a different reason:
+     * the file this chmod names is gone, so changing nothing is correct. */
+    struct vfs_entry* e = vfs_entry_of(dent->inode);
+    if (!e)
         return 0;
-    struct vfs_entry* e = dent->inode->data;
     e->mode = perm;
     return 0;
 }
 
 static int vaultfs_fchmod(struct libos_handle* hdl, mode_t perm) {
-    if (!hdl->inode || !hdl->inode->data)
+    struct vfs_entry* e = vfs_entry_of(hdl->inode);
+    if (!e)
         return -ENODEV;
-    struct vfs_entry* e = hdl->inode->data;
     e->mode = perm;
     return 0;
 }
@@ -650,7 +907,7 @@ static int vfs_grow(struct vfs_entry* e, uint64_t want) {
 
 static ssize_t vaultfs_read(struct libos_handle* hdl, void* buf, size_t count, file_off_t* pos) {
     assert(hdl->type == TYPE_VAULTFS);
-    struct vfs_entry* e = hdl->inode->data;
+    struct vfs_entry* e = vfs_entry_of(hdl->inode);
     if (!e)
         return -ENODEV;
 
@@ -682,7 +939,7 @@ static ssize_t vaultfs_read(struct libos_handle* hdl, void* buf, size_t count, f
 static ssize_t vaultfs_write(struct libos_handle* hdl, const void* buf, size_t count,
                              file_off_t* pos) {
     assert(hdl->type == TYPE_VAULTFS);
-    struct vfs_entry* e = hdl->inode->data;
+    struct vfs_entry* e = vfs_entry_of(hdl->inode);
     if (!e)
         return -ENODEV;
     if (!count)
@@ -734,7 +991,7 @@ static ssize_t vaultfs_write(struct libos_handle* hdl, const void* buf, size_t c
 
 static int vaultfs_truncate(struct libos_handle* hdl, file_off_t size) {
     assert(hdl->type == TYPE_VAULTFS);
-    struct vfs_entry* e = hdl->inode->data;
+    struct vfs_entry* e = vfs_entry_of(hdl->inode);
     if (!e)
         return -ENODEV;
 
@@ -781,6 +1038,7 @@ struct libos_fs_ops vault_fs_ops = {
 
 struct libos_d_ops vault_d_ops = {
     .open    = &vaultfs_open,
+    .idrop   = &vaultfs_idrop,
     .lookup  = &vaultfs_lookup,
     .creat   = &vaultfs_creat,
     .mkdir   = &vaultfs_mkdir,

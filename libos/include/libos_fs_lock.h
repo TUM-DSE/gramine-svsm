@@ -146,3 +146,34 @@ int file_lock_set_from_ipc(const char* path, struct libos_file_lock* file_lock, 
  */
 int file_lock_get_from_ipc(const char* path, struct libos_file_lock* file_lock,
                            struct libos_file_lock* out_file_lock);
+
+/*
+ * ------------------------------------------- vaultfs byte-range locks
+ *
+ * A file in a LINEAGE filesystem (fs/vault) does not use the machinery above:
+ * its locks live in the lineage's own shared pages, so they work across fork
+ * and exec with no leader, no IPC worker and no round trip. See
+ * fs/vault/lock.c, which also explains what it does not do.
+ *
+ * Each returns true if the handle's file is in a lineage filesystem AND the
+ * operation was carried out there, with the result in `*out` - including a
+ * failure, which the caller must NOT retry through the path above. It returns
+ * false only when the handle is not a vaultfs file (or is an flock, which is
+ * per-process there), and then the caller falls through unchanged.
+ */
+struct libos_handle;
+bool vaultfs_lock_set(struct libos_handle* hdl, struct libos_file_lock* file_lock, bool wait,
+                      int* out);
+bool vaultfs_lock_get(struct libos_handle* hdl, struct libos_file_lock* file_lock,
+                      struct libos_file_lock* out_file_lock, int* out);
+
+/* Drop everything this member holds. Called at exit, unconditionally. */
+void vaultfs_lock_clear_self(void);
+
+/* Attach to this lineage's filesystem, formatting it if nobody has yet.
+ *
+ * Declared here only because FORK has to call it: the monitor maps the region
+ * into a child during the fork call, so a parent that is not a member by then
+ * gives its child nothing and the two silently end up with a filesystem each.
+ * Idempotent; -ENODEV when the manifest declared no lineage region. */
+int vfs_attach(void);

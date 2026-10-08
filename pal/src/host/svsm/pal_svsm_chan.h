@@ -35,6 +35,13 @@
 #define PAL_CHAN_DIR_SERIAL   0x018
 #define PAL_CHAN_DIR_LIVE     0x040
 
+/* WHO is in a lineage: sixteen serials in the region header, zero for an
+ * empty slot (monitor ipc/mod.rs write_header, KIND_LINEAGE only). The PAL
+ * reads it so that the LibOS never has to know the monitor's header format -
+ * the same division as everywhere else here. */
+#define PAL_CHAN_HDR_MEMBERS  0x500
+#define PAL_CHAN_MAX_MEMBERS  16
+
 /* Per-side control words. A producer owns TAIL on its own page, a consumer
  * HEAD; the LOCKs are how several holders of one side (a vault and the
  * workers it forked) take turns. */

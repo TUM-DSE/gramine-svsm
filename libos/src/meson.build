@@ -49,6 +49,7 @@ libos_sources = files(
     'fs/sys/node_info.c',
     'fs/tmpfs/fs.c',
     'fs/vault/fs.c',
+    'fs/vault/lock.c',
     'gramine_hash.c',
     'ipc/libos_ipc.c',
     'ipc/libos_ipc_child.c',
