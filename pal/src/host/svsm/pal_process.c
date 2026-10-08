@@ -14,10 +14,54 @@
 #include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
+#include "pal_svsm.h"
 
 int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
                       size_t reserved_mem_ranges_len, PAL_HANDLE* out_handle) {
+    /* Still not implemented, and deliberately: this is gramine's "start a
+     * fresh process and ship it a checkpoint", which exists because a normal
+     * PAL cannot copy an address space. This monitor can, so fork goes
+     * through _PalProcessFork below and nothing needs a checkpoint stream. */
     return -PAL_ERROR_NOTIMPLEMENTED;
+}
+
+int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
+    uint64_t self = 0;
+    uint64_t rc = pal_svsm_fork(flags & PAL_PROCESS_FORK_RESIDENT
+                                ? PAL_SVSM_FORK_RESIDENT : 0, &self);
+    /* UINT64_MAX is the one answer that is neither a parent nor a child.
+     * It has to be checked here: a failed fork returns ONCE, and a caller
+     * that only looks for zero would carry on as the parent of a child that
+     * does not exist. */
+    if (rc == ~0ULL)
+        return -PAL_ERROR_DENIED;
+    *out_child = rc;
+    if (rc == 0) {
+        *out_self = self;               /* we are the child; this is us */
+        /* Every pipe this process now holds a copy of has one more holder,
+         * and the pair is SHARED, so it has to be told - otherwise the
+         * parent's first close looks like the last one and a reader sees
+         * end-of-file with its peer still there. Here rather than in the
+         * LibOS because the PAL is what knows which handles exist, and
+         * nothing else in this process is running yet. */
+        pal_svsm_pipes_after_fork();
+    }
+    return 0;
+}
+
+int _PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value) {
+    uint64_t value = 0;
+    int64_t reason = pal_svsm_wait(child, &value);
+    /* Negative is a refusal - not this vault's child, or its slot has been
+     * reissued - and must never be reported as a reason, because every real
+     * reason is >= 0 and "still running" is 0. Reading a refusal as "not
+     * yet" turns a wrong id into a wait that never ends. */
+    if (reason < 0)
+        return -PAL_ERROR_INVAL;
+    *out_reason = reason;
+    if (out_value)
+        *out_value = value;
+    return 0;
 }
 
 noreturn void _PalProcessExit(int exitcode) {

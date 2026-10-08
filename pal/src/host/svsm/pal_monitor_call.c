@@ -70,15 +70,48 @@ void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size) {
  * given a second. A forked child holds its parent's (the monitor maps it in at
  * fork) and an execve keeps it (the mapping is not a VMA the LibOS can free),
  * so both find the same filesystem by asking the same question. */
-void pal_svsm_lineage_fs(uint64_t pages, void** out_base, size_t* out_size) {
+void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size_t* out_size) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFD4;
     data.rbx = pages;
-    data.rcx = 0;
+    data.rcx = purpose;     /* IN: which region; OUT: its size */
     data.rdx = 0;
     monitor_call(&data);
     *out_size = data.rcx;
     *out_base = (void*)data.rdx;
+}
+
+/* Fork (0x4FFFFFE4): rbx = flags -> rcx = the child's id in the parent, 0 in
+ * the child, UINT64_MAX on failure; rdx = the parent's serial.
+ *
+ * Both sides return from the SAME call, which is the whole of why this is
+ * fork and not spawn: the child is the parent's address space at the
+ * instant of the call, so there is nothing to serialise and nothing to ship
+ * - which is exactly what gramine's own fork (checkpoint over a stream)
+ * exists to work around on a PAL that cannot copy an address space. */
+uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE4;
+    data.rbx = flags;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    if (out_self)
+        *out_self = data.rbx;   /* the child's own id; junk in the parent */
+    return data.rcx;
+}
+
+/* Wait (0x4FFFFFD5): rbx = the child's id -> rcx = reason, rdx = value. */
+int64_t pal_svsm_wait(uint64_t child_id, uint64_t* out_value) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFD5;
+    data.rbx = child_id;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    if (out_value)
+        *out_value = data.rdx;
+    return (int64_t)data.rcx;
 }
 
 /* DeviceWindow (0x4FFFFFEE): rbx = pages wanted (0 = only ask) -> rcx = size

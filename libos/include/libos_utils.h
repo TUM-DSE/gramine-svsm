@@ -49,7 +49,14 @@ void append_r_debug(const char* uri, void* addr);
 void clean_link_map_list(void);
 
 /* create unique files/pipes */
-int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, bool use_vmid_for_name);
+/* `options` are for the LISTENER this creates. PAL_OPTION_INHERITABLE marks
+ * a pipe whose peer may be ANOTHER PROCESS, which on the SVSM PAL is what
+ * puts its name in the rendezvous table a lineage shares - without it a
+ * connect from another process cannot find it. Only the IPC worker's own
+ * listener needs it; pipe(2) and the pollable events are made and consumed
+ * inside one process. */
+int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, bool use_vmid_for_name,
+                pal_stream_options_t options);
 
 /* Asynchronous event support */
 int init_async_worker(void);

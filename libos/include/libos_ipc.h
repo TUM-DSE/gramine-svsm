@@ -62,6 +62,20 @@ int init_ipc_ids(void);
 int init_ipc_worker(void);
 
 /*!
+ * \brief Rebuild this process's IPC worker after a copy-on-write fork.
+ *
+ * The child inherits a copy of its parent's worker thread and listening
+ * handle, and neither is its own: the handle carries the parent's vmid, so a
+ * peer answering this child cannot reach it. Drops both and creates new ones.
+ */
+int reinit_ipc_worker_after_fork(IDTYPE new_vmid);
+
+/*!
+ * \brief Forget the outgoing IPC connections inherited from a parent.
+ */
+void ipc_forget_inherited_connections(void);
+
+/*!
  * \brief Terminate the IPC worker thread.
  */
 void terminate_ipc_worker(void);

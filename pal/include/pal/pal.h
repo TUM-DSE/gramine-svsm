@@ -395,6 +395,83 @@ int PalRuntimeImageMap(void* addr, size_t size, pal_prot_flags_t prot, uint64_t 
 int PalLineageFsAttach(uint64_t pages, void** base, size_t* size);
 
 /*!
+ * \brief This process's own serial - the one identity in reach that is never
+ *        reused.
+ *
+ * A pid is a slot and a successor is given the same number; a serial is
+ * stamped once per process. Anything shared between the members of a lineage
+ * that has to record WHO holds something must record this.
+ *
+ * Must be read each time it is needed and never kept in a variable that
+ * outlives a fork: a copy-on-write child inherits its parent's memory, so a
+ * cached serial is the parent's and a child signing with it is invisible.
+ *
+ * \returns 0 on success, -PAL_ERROR_DENIED if this process is in no lineage.
+ */
+int PalLineageSelf(uint64_t* out);
+
+/*!
+ * \brief Is `serial` still a member of this process's lineage?
+ *
+ * Absence from the monitor's roster, which is the only sound death criterion
+ * here - a live member can be off its processor indefinitely, so no timeout
+ * means anything. A member leaves the roster before anything it held is
+ * freed.
+ *
+ * \returns 0 on success (`*out` set), -PAL_ERROR_DENIED if in no lineage.
+ */
+int PalLineageMemberAlive(uint64_t serial, bool* out);
+
+/*!
+ * \brief Copy this process, copy-on-write, and run the copy.
+ *
+ * \param      flags      0, or PAL_PROCESS_FORK_RESIDENT.
+ * \param[out] out_child  The child's id in the parent, and 0 in the child.
+ * \param[out] out_self   The CHILD's own id, in the child only. It cannot
+ *                        learn this any other way: \p out_child must be 0
+ *                        to say which side it is on, so without this the
+ *                        two sides would disagree about what the child is
+ *                        called - the parent knowing the id it waits on,
+ *                        the child knowing nothing.
+ *
+ * \returns 0 on success, negative on failure.
+ *
+ * RETURNS TWICE, which no other PAL call does, and that is the point: on a
+ * host whose monitor can copy an address space there is nothing to
+ * serialise and nothing to ship, so fork is one call rather than
+ * #PalProcessCreate plus a checkpoint down a stream. The caller tells the
+ * two returns apart by \p out_child, exactly as fork(2) does by its return
+ * value - and a FAILED fork returns once and looks like the parent, so the
+ * error must be checked.
+ *
+ * With PAL_PROCESS_FORK_RESIDENT the child is handed to the host's
+ * scheduler and runs on its own. Without it the child exists but is parked,
+ * which is what a host-driven worker pool wants and NOT what fork(2) means:
+ * a child nobody dispatches never reaches its execve and its parent waits
+ * for ever.
+ */
+#define PAL_PROCESS_FORK_RESIDENT 1UL
+int PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self);
+
+/*!
+ * \brief How did my child end?
+ *
+ * \param      child       the child's id, as #PalProcessFork reported it.
+ * \param[out] out_reason  0 while it is still running, >0 for a reason it
+ *                         ended, and the call fails rather than reporting a
+ *                         negative one.
+ * \param[out] out_value   the exit code, errno, or fault vector that goes
+ *                         with the reason.
+ *
+ * \returns 0 on success, negative if the id is not this process's child.
+ *
+ * NON-BLOCKING. A caller that must wait does so itself, because the host
+ * already has one answer to "who runs next" and a second waiting mechanism
+ * here would give it two.
+ */
+int PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value);
+
+/*!
  * \brief Set upcalls for memory bookkeeping
  *
  * \param alloc  Function to call to get a memory range.
@@ -478,7 +555,32 @@ typedef uint32_t pal_stream_options_t; /* bitfield */
 #define PAL_OPTION_EFD_SEMAPHORE   0x1 /*!< specific to `eventfd` syscall */
 #define PAL_OPTION_NONBLOCK        0x2
 #define PAL_OPTION_PASSTHROUGH     0x4 /*!< Disregard `sgx.{allowed,trusted}_files` */
-#define PAL_OPTION_MASK            0x7
+/*!
+ * \brief This pipe may be INHERITED BY A FORKED CHILD, so both processes have
+ *        to see the same buffer.
+ *
+ * Only the SVSM PAL acts on it, and only for a pipe: a pair so marked is
+ * placed in the lineage arena the monitor shares with this vault's
+ * descendants ([svsm.pipes] in the measured manifest), rather than on this
+ * process's private heap.
+ *
+ * It has to be asked for rather than assumed, because the arena is a scarce
+ * VM-WIDE resource - 32 pairs - and the things that hold a pipe in this LibOS
+ * are mostly not application pipes at all. Every thread owns a pollable
+ * event, which is a pipe pair; so does the async worker and so does the IPC
+ * worker. None of them is an fd, so none is closed by `detach_all_fds` when a
+ * process exits, and their only destructor is PalObjectDestroy - which was
+ * `return; // ignore` in this tree when this flag was added, so putting them
+ * in the arena leaked pairs until the 32 ran out and pipe() returned ENOMEM:
+ * measured at four slots per invocation, dead by the seventh. The stub is
+ * fixed and they are released now; the flag stays because the arena is a
+ * VM-WIDE 32 pairs and a per-thread wakeup object never crosses a fork, so
+ * spending one on it is wrong even when it is given back.
+ *
+ * `libos_syscall_pipe2` sets it; nothing else does.
+ */
+#define PAL_OPTION_INHERITABLE     0x8
+#define PAL_OPTION_MASK            0xf
 
 /*!
  * \brief Open/create a stream resource specified by `uri`.

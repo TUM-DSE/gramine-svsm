@@ -6,6 +6,7 @@
 
 #include "libos_checkpoint.h"
 #include "libos_fs.h"
+#include "libos_fs_lock.h"
 #include "libos_internal.h"
 #include "libos_ipc.h"
 #include "libos_lock.h"
@@ -122,6 +123,122 @@ static int migrate_fork(struct libos_cp_store* store, struct libos_process* proc
     int ret = START_MIGRATE(store, fork, process_description, thread_description, process_ipc_ids);
     unlock(&g_dcache_lock);
     return ret;
+}
+
+/*
+ * fork(2) where the host can copy an address space.
+ *
+ * Gramine's own fork is a checkpoint: start a fresh process, serialise the
+ * whole LibOS state, ship it down a stream, restore it on the other side.
+ * That exists because a normal PAL cannot copy an address space. This one
+ * can - the monitor marks the pages copy-on-write and builds a second
+ * process whose page tables and registers are copies - so there is nothing
+ * to serialise, because the child already IS the memory.
+ *
+ * What that leaves is small and is all of it: the two processes are
+ * identical, so the only things wrong in the child are the ones that NAME
+ * it. Its pid, its parent, and the children list it inherited - which are
+ * its parent's children and not its own.
+ *
+ * The child is created RESIDENT, i.e. handed to the host's scheduler. A
+ * parked child would never reach its execve and its parent would wait for
+ * ever; that a fork must actually run is the difference between this and
+ * the worker-pool fork the C vaults use.
+ *
+ * Caveat, and it is the usual one: a fork from a process with other threads
+ * running copies whatever locks those threads were holding, locked. POSIX
+ * says the same thing about fork in a threaded program, and the usual user
+ * - a subprocess launch, which execs at once - never touches them.
+ */
+static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
+    uint64_t child_id = 0;
+    uint64_t self_id = 0;
+
+    /*
+     * Root the lineage filesystem BEFORE the fork, if this manifest asked for
+     * one. Not in the parent's branch afterwards: the monitor maps the region
+     * into the child DURING the fork call (fork_share), so a parent that is
+     * not yet a member at that instant has nothing to share.
+     *
+     * What this fixes is older than the locks and worse than them. vaultfs
+     * attaches lazily, on first ACCESS, because an attach at mount time would
+     * happen in the ZYGOTE and give every instance of a function the same
+     * filesystem. But lazily also meant that a program which forked before it
+     * ever touched its lineage filesystem gave the child nothing - and then
+     * BOTH sides attached, each got a region of its own, and a parent and
+     * child of one process tree had two private filesystems that silently
+     * agreed about nothing. Every existing test touched the filesystem first,
+     * which is why nothing caught it.
+     *
+     * Idempotent and cheap: a no-op once attached, and -ENODEV - ignored here
+     * - for the manifests that declared no lineage region, which pay nothing.
+     */
+    (void)vfs_attach();
+
+    int pret = PalProcessFork(PAL_PROCESS_FORK_RESIDENT, &child_id, &self_id);
+    if (pret < 0)
+        return pal_to_unix_errno(pret);
+
+    if (child_id == 0) {
+        /* ---- the child ---- */
+        rwlock_write_lock(&g_process_id_lock);
+        g_process.ppid = g_process.pid;
+        g_process.pid  = (IDTYPE)self_id;
+        rwlock_write_unlock(&g_process_id_lock);
+
+        /* Its IPC identity and its own worker, TOGETHER and only if this
+         * process uses IPC at all - see reinit_ipc_worker_after_fork, which
+         * does nothing when there is no worker to rebuild.
+         *
+         * Together, because the ids are not independently safe. `leader_vmid`
+         * of ZERO MEANS "I AM THE LEADER", which every user of IPC tests to
+         * decide whether to answer locally or ask: giving a child a non-zero
+         * one without a worker to ask through makes it reach for an IPC
+         * round trip that cannot complete. Giving it a zero, with a worker,
+         * makes it answer out of its COPY of the leader's tables - which is
+         * how a child took a POSIX lock its parent was holding and was told
+         * nothing. One switch, both halves. */
+        int ipc_ret = reinit_ipc_worker_after_fork((IDTYPE)self_id);
+        if (ipc_ret < 0) {
+            log_error("fork: child %u has no IPC worker: %s", g_process.pid,
+                      unix_strerror(ipc_ret));
+        }
+
+        /* The parent's children are not ours, and its zombies are not ours
+         * to reap. Inheriting either would let the child wait for - and
+         * collect - a process it never created. */
+        lock(&g_process.children_lock);
+        INIT_LISTP(&g_process.children);
+        INIT_LISTP(&g_process.zombies);
+        unlock(&g_process.children_lock);
+
+        get_cur_thread()->tid = (IDTYPE)self_id;
+        return 0;
+    }
+
+    /* ---- the parent ---- */
+    struct libos_child_process* child = create_child_process();
+    if (!child) {
+        /* The child exists and we cannot track it. Nothing can be undone
+         * here - it is already running - so say so rather than pretend the
+         * fork failed. */
+        log_error("fork: child %lu is running but could not be recorded", (unsigned long)child_id);
+        return -ENOMEM;
+    }
+    child->pid  = (IDTYPE)child_id;
+    /* `vmid` is what the monitor knows it by, which for this host is the
+     * same number - and it is what PalProcessWait is asked about. */
+    child->vmid = (IDTYPE)child_id;
+    child->child_termination_signal = flags & CSIGNAL;
+    child->uid = get_cur_thread()->uid;
+
+    lock(&g_process.children_lock);
+    LISTP_ADD_TAIL(child, &g_process.children, list);
+    unlock(&g_process.children_lock);
+
+    if (set_parent_tid)
+        *set_parent_tid = (IDTYPE)child_id;
+    return (long)child_id;
 }
 
 static long do_clone_new_vm(IDTYPE child_vmid, unsigned long flags, struct libos_thread* thread,
@@ -349,6 +466,24 @@ long libos_syscall_clone(unsigned long flags, unsigned long user_stack_addr, int
 
     if (!(flags & CLONE_SETTLS)) {
         tls = get_tls();
+    }
+
+    /* The copy-on-write fork comes FIRST, and before any of the bookkeeping
+     * below, because it needs none of it: no vmid from the IPC leader and no
+     * tid from the global allocator, since the monitor names the child and
+     * the child's whole LibOS state is a copy of this one's. Asking IPC for
+     * an id would be asking another process for permission to do something
+     * this one can already do.
+     *
+     * NOTIMPLEMENTED means a host that cannot copy an address space, and
+     * then gramine's own checkpoint fork below is the right answer - so this
+     * is a fast path, not a replacement. */
+    if (clone_new_process) {
+        long cow = do_clone_cow_fork(flags, set_parent_tid);
+        if (cow != -ENOSYS) {
+            put_thread(thread);
+            return cow;
+        }
     }
 
     IDTYPE new_vmid = 0;

@@ -13,8 +13,10 @@
 int create_pollable_event(struct libos_pollable_event* event) {
     char uri[PIPE_URI_SIZE];
     PAL_HANDLE srv_handle;
+    /* No options: a pollable event is a thread-wakeup object, made and used
+     * inside one process, and must not spend a shared rendezvous slot. */
     int ret = create_pipe(/*name=*/NULL, uri, sizeof(uri), &srv_handle,
-                          /*use_vmid_for_name=*/false);
+                          /*use_vmid_for_name=*/false, /*options=*/0);
     if (ret < 0) {
         log_error("create_pipe failed: %s", unix_strerror(ret));
         return ret;

@@ -113,14 +113,27 @@ struct pal_handle_inner {
             PAL_IDX fd;
         } console;
 
-        /* Both ends of a pipe live in this address space - a vault is one
+        /* Both ends of a pipe start in this address space - a vault is one
          * process - so a pipe is a pair of rings rather than anything the
-         * host knows about. See pal_pipes.c. */
+         * host knows about. They do not STAY in one address space: a fork
+         * gives the child a copy of every handle, and the pair they point at
+         * lives in memory the monitor shares with descendants rather than
+         * copies. See pal_pipes.c. */
         struct {
             struct pal_svsm_pipe_pair* pair;
             char*    name;       /* PIPESRV only: what a connect must match */
             unsigned side;       /* which end of the pair this handle is */
             bool     nonblocking;
+            /* Has this handle already given up its hold on the pair? close()
+             * reaches both `delete` and `destroy`, and a side counted down
+             * twice closes a pipe end somebody else is still holding. */
+            bool     released;
+            /* PIPESRV only: this listener's slot in the arena's SHARED
+             * rendezvous table, or -1 if it is a process-local listener.
+             * A cross-process connect finds a listener by looking there,
+             * because the local pending table is this process's memory and
+             * a peer in another process cannot see it. */
+            int      rdv;
         } pipe;
 
         /* A socket is a CHANNEL: the monitor maps a run of pages into this

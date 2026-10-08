@@ -560,6 +560,104 @@ noreturn void pal_svsm_main(void)
             }
         }
 
+        /* [svsm.dns]: the resolver this vault uses.
+         *
+         *   [svsm.dns]
+         *   nameserver = "131.159.254.1"
+         *
+         * A vault resolved no names at all before this, which is why every
+         * address in this tree is a literal. Two things were missing: the
+         * TRANSPORT, because a channel to the network service could only
+         * become a TCP connection and a resolver speaks UDP (fixed in
+         * MVNET_PROTO_UDP), and the CONFIGURATION, which is this.
+         *
+         * Through gramine's own emulated /etc/resolv.conf rather than a
+         * file in the runtime image, and not by choice: `etc` is a LibOS
+         * pseudo root (libos/src/fs/libos_fs_image.c g_reserved_roots), so
+         * an image carrying one is refused outright with "top-level 'etc'
+         * is reserved". The emulation reads exactly this struct, so filling
+         * it is all that is needed and nothing in the LibOS changes.
+         *
+         * MEASURED, which is the honest place for it: a vault that resolves
+         * names trusts whoever answers, so which resolver that is belongs
+         * in the manifest a verifier reads - not in an environment variable
+         * and not in something the host can choose per run. It grants
+         * nothing on its own: the query still leaves through the service
+         * [svsm.net] names, and a vault without that resolves nothing.
+         */
+        toml_table_t* dnst = toml_table_in(manifest_svsm_early, "dns");
+        if (dnst) {
+            char* ns = NULL;
+            if (toml_string_in(dnst, "nameserver", &ns) != 0 || !ns)
+                pal_svsm_fail("svsm.dns needs a nameserver", 0);
+            /* Dotted quad, parsed here rather than trusting a number: the
+             * manifest is text and this is the one field in it that has to
+             * be an address. */
+            unsigned o[4] = {0, 0, 0, 0};
+            int oi = 0;
+            bool digit = false;
+            for (const char* c = ns; ; c++) {
+                if (*c >= '0' && *c <= '9') {
+                    o[oi] = o[oi] * 10 + (unsigned)(*c - '0');
+                    if (o[oi] > 255)
+                        pal_svsm_fail("svsm.dns.nameserver: octet over 255", oi);
+                    digit = true;
+                } else if (*c == '.' || *c == '\0') {
+                    if (!digit)
+                        pal_svsm_fail("svsm.dns.nameserver is not a dotted quad", oi);
+                    digit = false;
+                    if (*c == '\0')
+                        break;
+                    if (++oi > 3)
+                        pal_svsm_fail("svsm.dns.nameserver has too many octets", oi);
+                } else {
+                    pal_svsm_fail("svsm.dns.nameserver is not a dotted quad", (int)*c);
+                }
+            }
+            if (oi != 3)
+                pal_svsm_fail("svsm.dns.nameserver needs four octets", oi);
+            free(ns);
+
+            /* Host order with the first octet in the high byte: that is how
+             * provide_etc_resolv_conf takes it apart again
+             * (libos/src/fs/etc/fs.c). */
+            g_pal_public_state.dns_host.nsaddr_list[0].is_ipv6 = false;
+            g_pal_public_state.dns_host.nsaddr_list[0].ipv4 =
+                (o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3];
+            g_pal_public_state.dns_host.nsaddr_list_count = 1;
+            /* Without this the LibOS does not mount /etc/resolv.conf at all
+             * (mount_etcfs returns 0 early), and getaddrinfo fails as if
+             * the name did not exist. */
+            g_pal_public_state.extra_runtime_domain_names_conf = true;
+        }
+
+        /* [svsm.pipes]: pipes that survive a fork.
+         *
+         *   [svsm.pipes]
+         *   shared = true
+         *
+         * A pipe in a vault is a pair of rings in ordinary memory, which is
+         * right for exactly as long as a vault is one process. A fork makes
+         * it two: copy-on-write gives parent and child a ring each, so
+         * nothing written in one is visible in the other and no close in one
+         * is visible either - which is how `subprocess` hangs for ever on an
+         * error pipe that cannot report that exec succeeded.
+         *
+         * With this, pairs live in a region the monitor shares with this
+         * vault's descendants instead of copying. MEASURED, because it is
+         * two things a verifier should be able to see: memory reachable by
+         * every descendant this vault forks, and one of the monitor's
+         * VM-wide regions spent. A vault that never forks should not declare
+         * it and pays nothing if it does not.
+         */
+        toml_table_t* pipes = toml_table_in(manifest_svsm_early, "pipes");
+        if (pipes) {
+            bool shared = false;
+            if (toml_bool_in(pipes, "shared", /*default=*/false, &shared) < 0)
+                pal_svsm_fail("svsm.pipes.shared must be a boolean", 0);
+            g_pal_svsm_pipes_shared = shared;
+        }
+
         toml_table_t* ep = toml_table_in(manifest_svsm_early, "endpoint");
         if (ep) {
             char* id = NULL;

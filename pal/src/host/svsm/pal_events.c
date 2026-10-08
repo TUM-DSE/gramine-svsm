@@ -118,7 +118,23 @@ int _PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
 }
 
 static void event_destroy(PAL_HANDLE handle) {
-    /* noop */
+    /* `_PalEventCreate` calloc'd it, so this is the free that matches.
+     *
+     * It was a noop, which was invisible while PalObjectDestroy was
+     * `return; // ignore`, and is a leak per event once that is live - and
+     * the LibOS makes a great many: one `scheduler_event` PER THREAD, two per
+     * rwlock, two per clone handshake, one per sync-client handle. An event
+     * holds nothing but its own memory, so freeing it is all there is to do. */
+    assert(handle->hdr.type == PAL_TYPE_EVENT);
+    /* The handle POINTER is this event's wait token - `_PalEventSet` wakes by
+     * `pal_svsm_thread_wake_all(handle)` and a blocked context stores it in
+     * `thread.waiting_on`. So anyone still parked on it has to be released
+     * before the address stops meaning this event, or they wait on a token
+     * nothing will ever raise again and the allocator is free to hand the same
+     * address to the next event. Destroying an event with waiters is a LibOS
+     * bug either way; this makes it a woken thread rather than a silent hang. */
+    pal_svsm_thread_wake_all(handle);
+    free(handle);
 }
 
 struct handle_ops g_event_ops = {

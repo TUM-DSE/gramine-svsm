@@ -397,3 +397,17 @@ struct handle_ops g_proc_ops = {
     .attrquerybyhdl = &proc_attrquerybyhdl,
     .attrsetbyhdl   = &proc_attrsetbyhdl,
 };
+
+int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
+    __UNUSED(flags);
+    __UNUSED(out_child);
+    __UNUSED(out_self);
+    return -PAL_ERROR_NOTIMPLEMENTED;   /* no monitor to copy an address space */
+}
+
+int _PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value) {
+    __UNUSED(child);
+    __UNUSED(out_reason);
+    __UNUSED(out_value);
+    return -PAL_ERROR_NOTIMPLEMENTED;
+}

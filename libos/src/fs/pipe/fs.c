@@ -269,11 +269,43 @@ static int fifo_stat(struct libos_dentry* dent, struct stat* stat) {
     return 0;
 }
 
+/*
+ * Tell the host the end is gone, which is the whole of what a reader is
+ * waiting for.
+ *
+ * `put_handle` also calls PalObjectDestroy on the last reference, which does
+ * release the pair now - but for a long time it did not: pal/src/pal_object.c
+ * began `return; // ignore`, from "TMP: skip some initialization (fix
+ * later)". So a close() released nothing and the holder count on the pair
+ * never fell. This stays because close(2) is the right moment for it and the
+ * two paths are idempotent (`pipe_let_go` sets `released`).
+ *
+ * That does not matter while a vault is one process - the writer and the
+ * reader are the same program and it stops reading when it is done - and it
+ * matters completely once fork works: the reader learns the writer is gone
+ * ONLY from the holder count reaching zero, so without this a child could
+ * write, close and exit and its parent would still block for end-of-file.
+ * That is exactly how `subprocess` hangs, since CPython decides that exec
+ * succeeded by its error pipe reaching EOF.
+ *
+ * PAL_DELETE_ALL because this is close(2) and not shutdown(2); the no-op
+ * PalObjectDestroy is left where it is, so that un-stubbing it later frees
+ * the handle memory too - `pipe_delete` marks the end released, so the two
+ * cannot release twice. Same reasoning as the socket close in
+ * libos/src/fs/socket/fs.c.
+ */
+static int pipe_close(struct libos_handle* handle) {
+    if (handle->pal_handle)
+        PalStreamDelete(handle->pal_handle, PAL_DELETE_ALL);
+    return 0;
+}
+
 static struct libos_fs_ops pipe_fs_ops = {
     .read     = &pipe_read,
     .write    = &pipe_write,
     .hstat    = &pipe_hstat,
     .setflags = &pipe_setflags,
+    .close    = &pipe_close,
 };
 
 static struct libos_fs_ops fifo_fs_ops = {
@@ -281,6 +313,7 @@ static struct libos_fs_ops fifo_fs_ops = {
     .write    = &pipe_write,
     .hstat    = &pipe_hstat,
     .setflags = &pipe_setflags,
+    .close    = &pipe_close,
 };
 
 static struct libos_d_ops fifo_d_ops = {

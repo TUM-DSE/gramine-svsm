@@ -98,6 +98,65 @@ static void remove_qnode_from_wait_queue(struct libos_thread_queue* qnode) {
     }
 }
 
+/*
+ * Ask the host how this process's children ended.
+ *
+ * A child made by the copy-on-write fork has no IPC worker to report its own
+ * death - it was never a separate gramine process in the sense the IPC
+ * layer means, it is a copy of this one - so the usual path, where a dying
+ * child tells its parent over a stream, never fires. The host knows,
+ * because it is what ended the child, and PalProcessWait is how it says so.
+ *
+ * Polled rather than pushed, and that is the host's rule rather than a
+ * shortcut: its wait is deliberately non-blocking, because a blocking one
+ * would be a second answer to "who runs next" alongside the scheduler it
+ * already has.
+ *
+ * Feeds `mark_child_exited_by_pid`, the same function the IPC path calls,
+ * so everything downstream - zombies, the wait queue, SIGCHLD - is the
+ * ordinary machinery and not a second copy of it.
+ */
+static void reap_host_children(void) {
+    IDTYPE pids[32];
+    IDTYPE vmids[32];
+    IDTYPE uids[32];
+    size_t n = 0;
+
+    lock(&g_process.children_lock);
+    struct libos_child_process* child;
+    LISTP_FOR_EACH_ENTRY(child, &g_process.children, list) {
+        if (n >= ARRAY_SIZE(pids))
+            break;
+        pids[n]  = child->pid;
+        vmids[n] = child->vmid;
+        uids[n]  = child->uid;
+        n++;
+    }
+    unlock(&g_process.children_lock);
+
+    /* The PAL call is made with the lock DROPPED: it is a monitor call, and
+     * holding a lock across one blocks every other thread in this vault for
+     * the length of a VMGEXIT. */
+    for (size_t i = 0; i < n; i++) {
+        int64_t reason = 0;
+        uint64_t value = 0;
+        if (PalProcessWait(vmids[i], &reason, &value) < 0)
+            continue;                       /* not ours, or already reaped */
+        if (reason == 0)
+            continue;                       /* still running */
+
+        /* reason 1 is an ordinary exit and `value` is its code. Anything
+         * else ended the child without its consent - a PAL error, a fault,
+         * the watchdog - and the nearest POSIX truth is a signal, not an
+         * exit code, because an exit code would claim the program chose it.
+         * SIGKILL: the process was ended from outside and could not refuse,
+         * which is exactly what the host did. */
+        int exit_code = (reason == 1) ? (int)value : 0;
+        int term_signal = (reason == 1) ? 0 : SIGKILL;
+        (void)mark_child_exited_by_pid(pids[i], uids[i], exit_code, term_signal);
+    }
+}
+
 static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
     if (options & __WALL) {
         options &= ~__WCLONE;
@@ -127,6 +186,10 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
     long ret = 0;
 
     do {
+        /* Before looking, ask the host: a child it ended has no other way
+         * of telling us. */
+        reap_host_children();
+
         lock(&g_process.children_lock);
 
         struct libos_child_process* child;
@@ -196,7 +259,17 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
             ret = -ERESTARTSYS;
             break;
         }
-        ret = thread_wait(/*timeout_us=*/NULL, /*ignore_pending_signals=*/false);
+        /* BOUNDED, because nothing will wake this for a host-reaped child:
+         * the wake comes from `mark_child_exited`, which for those children
+         * only happens in `reap_host_children` at the top of this loop. An
+         * untimed wait here is a parent that never returns from wait() even
+         * though its child is long gone. 10 ms is below the cost of the
+         * fork it is waiting on and far above the cost of one monitor call.
+         */
+        uint64_t wait_us = 10000;
+        ret = thread_wait(&wait_us, /*ignore_pending_signals=*/false);
+        if (ret == -ETIMEDOUT)
+            ret = 0;                        /* go round and poll again */
         if (ret < 0 && ret != -EINTR) {
             log_warning("thread_wait failed in waitid");
             remove_qnode_from_wait_queue(&qnode);

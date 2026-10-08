@@ -311,6 +311,16 @@ static noreturn void ipc_worker_main(void) {
                  * interrupted), lets handle it for uniformity with the rest of the code. */
                 ret = PalStreamWaitForClient(g_self_ipc_handle, &new_handle, /*options=*/0);
             } while (ret == -PAL_ERROR_INTERRUPTED);
+            if (ret == -PAL_ERROR_TRYAGAIN) {
+                /* The poll said a client was there and by the time we asked it
+                 * had been taken, or the readiness was a few microseconds
+                 * stale. That is not a broken listener: on a PAL where the
+                 * peer is in another process the two observations cannot be
+                 * one atomic step. Treating it as fatal killed the process -
+                 * a forked child exited with status 1 the first time its own
+                 * worker was polled. */
+                continue;
+            }
             if (ret < 0) {
                 log_error(LOG_PREFIX "PalStreamWaitForClient failed: %s", pal_strerror(ret));
                 ret = pal_to_unix_errno(ret);
@@ -376,8 +386,11 @@ static int ipc_worker_wrapper(void* arg) {
 
 static int init_self_ipc_handle(void) {
     char uri[PIPE_URI_SIZE];
+    /* The one listener in this LibOS that another PROCESS connects to, so it
+     * publishes its name where a peer can find it. Named by vmid for the same
+     * reason: that is the name `ipc_connect` builds from a destination id. */
     return create_pipe(/*name=*/NULL, uri, sizeof(uri), &g_self_ipc_handle,
-                       /*use_vmid_for_name=*/true);
+                       /*use_vmid_for_name=*/true, PAL_OPTION_INHERITABLE);
 }
 
 static int create_ipc_worker(void) {
@@ -405,6 +418,55 @@ static int create_ipc_worker(void) {
 }
 
 int init_ipc_worker(void) {
+    return create_ipc_worker();
+}
+
+/*
+ * The same, for a child of the COPY-ON-WRITE fork.
+ *
+ * A fresh gramine process runs `libos_init` and builds its own worker. A child
+ * of this fork does not: it is its parent's address space, so it inherits a
+ * worker thread and a listening handle that are both COPIES.
+ *
+ * Neither is usable. The listener carries the PARENT's name - the vmid it was
+ * created with - so when a peer answers this child at its own vmid there is
+ * nobody listening on that name, and the child waits for a reply that cannot
+ * be delivered. The worker is worse than unusable: its PAL context came across
+ * the fork parked in poll, so it looks alive, and `terminate_ipc_worker` would
+ * wait for an exit that nothing will produce.
+ *
+ * So both are dropped - not terminated, DROPPED, because they are not ours to
+ * end - and built again. The globals are reset by hand for the same reason:
+ * `create_ipc_worker` asserts its way into a clean state.
+ */
+int reinit_ipc_worker_after_fork(IDTYPE new_vmid) {
+    /* Nothing to do if this process has no worker, which is the case whenever
+     * `init_ipc_worker` is not run (see libos_init.c). Checked here rather
+     * than at the call site so that turning the worker on or off is ONE
+     * decision in one place - including the ids below, which are only
+     * meaningful to a process that uses IPC. Without this a fork built a
+     * worker and a listener in every child of a process that never had
+     * either, which cost 30 seconds a fork and broke the pipe rows. */
+    if (!g_worker_thread)
+        return 0;
+
+    /* The ids gramine's own checkpoint fork sets for a child
+     * (libos_checkpoint.c:555-557). The leader is computed from the OLD
+     * self_vmid, so the order matters. */
+    g_process_ipc_ids.leader_vmid = g_process_ipc_ids.leader_vmid
+                                    ?: g_process_ipc_ids.self_vmid;
+    g_process_ipc_ids.parent_vmid = g_process_ipc_ids.self_vmid;
+    g_process_ipc_ids.self_vmid   = new_vmid;
+
+    /* The parent's, every one of them. Cleared rather than released: the
+     * thread is a copy and the handle names a pipe the parent still listens
+     * on. */
+    g_worker_thread = NULL;
+    g_self_ipc_handle = NULL;
+    g_clear_on_worker_exit = 1;
+    INIT_LISTP(&g_ipc_connections);
+    g_ipc_connections_cnt = 0;
+    ipc_forget_inherited_connections();
     return create_ipc_worker();
 }
 

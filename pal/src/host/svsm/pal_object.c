@@ -37,6 +37,19 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
                 got |= PAL_WAIT_READ;
             if ((want & PAL_WAIT_WRITE) && pal_svsm_sock_writable(handle))
                 got |= PAL_WAIT_WRITE;
+            /* And SAY it is a hang-up, which readable alone does not.
+             *
+             * PAL_WAIT_HANG_UP is not reported on request - poll(2) and
+             * epoll(2) both deliver POLLHUP/EPOLLHUP whether or not the
+             * caller asked - so this is set outside the `want` tests above.
+             * Two consumers were already written for it and had never been
+             * given one: libos/src/sys/libos_epoll.c turns it into EPOLLHUP
+             * (plus EPOLLRDHUP when asked), and socket/fs.c's post_poll uses
+             * it to decide whether a non-blocking connect that is still in
+             * progress FAILED. Without it such a connect saw its socket go
+             * readable and concluded it had succeeded. */
+            if (pal_svsm_sock_peer_gone(handle))
+                got |= PAL_WAIT_HANG_UP;
             break;
 
         case PAL_TYPE_PIPESRV:
@@ -135,10 +148,44 @@ int _PalStreamsWaitEvents(size_t count, PAL_HANDLE* handle_array, pal_wait_flags
          * async worker, another thread) and so never parks at all. */
         pal_svsm_thread_watch(count, handle_array, events);
 
-        enum pal_svsm_wait_result wr = pal_svsm_poll_block(timeout_us ? &deadline_us : NULL);
+        /* A SHARED pipe has no arm and no wake that reaches here. Its
+         * writer may be another process - that is what [svsm.pipes] is for
+         * - and `pal_svsm_poll_wake` only walks THIS process's threads, so
+         * nothing in this vault will ever signal the poller. Arming is not
+         * an option either: only sockets have an address the monitor can
+         * watch, and parking at all needs a service slot an ordinary vault
+         * does not have. So such a poll looks again on a short deadline,
+         * the same way a blocking read on one does (pal_pipes.c).
+         *
+         * Without it `subprocess.communicate()` is a deadlock: CPython
+         * selects on the child's stdout and the child writing it is not a
+         * thread of this process. */
+        uint64_t eff_deadline;
+        const uint64_t* dl = timeout_us ? &deadline_us : NULL;
+        bool shared_pipe = false;
+        for (size_t i = 0; i < count; i++) {
+            if (handle_array[i] && pal_svsm_pipe_is_shared(handle_array[i])) {
+                shared_pipe = true;
+                break;
+            }
+        }
+        if (shared_pipe) {
+            eff_deadline = pal_svsm_now_usec() + PAL_SVSM_SHARED_PIPE_POLL_US;
+            if (!dl || eff_deadline < *dl)
+                dl = &eff_deadline;
+        }
+
+        enum pal_svsm_wait_result wr = pal_svsm_poll_block(dl);
         if (wr == PAL_SVSM_WAIT_TIMEOUT) {
-            ret = -PAL_ERROR_TRYAGAIN;
-            break;
+            /* Only the CALLER's deadline ends this. The one above is an
+             * invitation to re-test, and reporting it as the caller's would
+             * turn a poll with no timeout into one that returns TRYAGAIN
+             * every 200 us. */
+            if (timeout_us && pal_svsm_now_usec() >= deadline_us) {
+                ret = -PAL_ERROR_TRYAGAIN;
+                break;
+            }
+            continue;
         }
         if (wr == PAL_SVSM_WAIT_INTERRUPTED) {
             ret = -PAL_ERROR_INTERRUPTED;

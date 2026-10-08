@@ -34,6 +34,17 @@ int _PalLineageFsAttach(uint64_t pages, void** base, size_t* size) {
     return -PAL_ERROR_NOTIMPLEMENTED;   /* no lineages on this host */
 }
 
+int _PalLineageSelf(uint64_t* out) {
+    __UNUSED(out);
+    return -PAL_ERROR_NOTIMPLEMENTED;   /* no lineages on this host */
+}
+
+int _PalLineageMemberAlive(uint64_t serial, bool* out) {
+    __UNUSED(serial);
+    __UNUSED(out);
+    return -PAL_ERROR_NOTIMPLEMENTED;
+}
+
 int _PalRuntimeImageMap(void* addr, uint64_t size, pal_prot_flags_t prot, uint64_t image_off) {
     __UNUSED(addr);
     __UNUSED(size);

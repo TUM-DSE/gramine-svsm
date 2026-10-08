@@ -28,14 +28,23 @@ static int create_pipes(struct libos_handle* srv, struct libos_handle* cli, int 
     PAL_HANDLE hdl1 = NULL; /* one pipe end (accepted connect from hdl2) */
     PAL_HANDLE hdl2 = NULL; /* other pipe end (connects to hdl0 and talks to hdl1) */
 
-    ret = create_pipe(name, uri, PIPE_URI_SIZE, &hdl0, /*use_vmid_for_name=*/false);
+    /* The LISTENER is local: both ends of a pipe(2) are accepted here, in
+     * this process. What has to survive a fork is the PAIR, which the connect
+     * below asks for with PAL_OPTION_INHERITABLE. */
+    ret = create_pipe(name, uri, PIPE_URI_SIZE, &hdl0, /*use_vmid_for_name=*/false,
+                      /*options=*/0);
     if (ret < 0) {
         log_error("pipe creation failure");
         return ret;
     }
 
+    /* PAL_OPTION_INHERITABLE: this is pipe(2), so a fork may hand it to a
+     * child and both ends have to see one buffer. The LibOS's own pipes - the
+     * pollable events, the async and IPC workers - deliberately do NOT ask,
+     * because they are per-process and the arena is VM-wide. */
     ret = PalStreamOpen(uri, PAL_ACCESS_RDWR, /*share_flags=*/0, PAL_CREATE_IGNORED,
-                        LINUX_OPEN_FLAGS_TO_PAL_OPTIONS(flags), &hdl2);
+                        LINUX_OPEN_FLAGS_TO_PAL_OPTIONS(flags) | PAL_OPTION_INHERITABLE,
+                        &hdl2);
     if (ret < 0) {
         ret = pal_to_unix_errno(ret);
         log_error("pipe connection failure");

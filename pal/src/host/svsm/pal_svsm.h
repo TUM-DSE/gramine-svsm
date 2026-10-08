@@ -180,11 +180,65 @@ extern int      g_pal_svsm_net_protocol;
 extern uint64_t g_pal_svsm_net_endpoint;
 void pal_svsm_poll_wake(void);
 
+/* How long a wait that involves a SHARED pipe may sleep before looking
+ * again, and whether a handle is one. Both the blocking read/write
+ * (pal_pipes.c) and poll (pal_object.c) need the same answer: a shared
+ * pair's writer can be another process, and this process's wake never
+ * reaches it. */
+#define PAL_SVSM_SHARED_PIPE_POLL_US 200
+bool pal_svsm_pipe_is_shared(PAL_HANDLE handle);
+
 /*
  * Pipes (pal_pipes.c). Both ends are in this address space, so what a poll
  * wants to know is answerable here; pal_object.c asks.
  */
 size_t pal_svsm_pipe_readable(PAL_HANDLE handle);
+
+/* Does this image's MEASURED manifest declare pipes that survive a fork?
+ *
+ * [svsm.pipes] shared = true. Declared rather than assumed for two reasons
+ * that are both properties of the vault and not of the implementation: it
+ * puts a region of memory in reach of every descendant this vault ever
+ * forks, and it spends one of the monitor's VM-wide regions. A verifier
+ * reading the manifest digest can see both. */
+extern bool g_pal_svsm_pipes_shared;
+/* A fork has given this process a copy of every pipe handle; the pairs are
+ * shared, so tell them they each gained a holder. Called in the child. */
+void pal_svsm_pipes_after_fork(void);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
 bool   pal_svsm_pipe_peer_gone(PAL_HANDLE handle);
+bool   pal_svsm_sock_peer_gone(PAL_HANDLE handle);
 bool   pal_svsm_pipesrv_pending(PAL_HANDLE handle);
+
+/* The monitor's grant status codes, mirrored from
+ * monitor/kernel/src/process_manager/mod.rs. Both ends are measured
+ * separately, so neither can negotiate this with the other: change one and
+ * change the other.
+ *
+ * Only the ones this PAL acts on are named. The two post-admission refusals
+ * matter because they are the ones an application can do something about;
+ * every other failure it can only report. */
+#define PAL_SVSM_STATUS_BAD_ID        (-2)
+#define PAL_SVSM_STATUS_BAD_STATE     (-3)
+#define PAL_SVSM_STATUS_PEER_QUOTA    (-7)
+#define PAL_SVSM_STATUS_SERVICE_FULL  (-8)
+
+/* --- many connections on one channel (pal_svsm_mux.c) ------------------
+ *
+ * A connection stops being a monitor-accounted object: the monitor grants ONE
+ * channel per vault instance and never learns a connection exists. An id is a
+ * slot in the low 16 bits and a GENERATION in the high 16, so a frame still in
+ * flight for a closed connection cannot be demultiplexed into whoever reused
+ * the slot. See the file's header for what this costs (head-of-line blocking
+ * moves from one socket to the whole vault) and what is not here yet (credit).
+ */
+extern unsigned long g_pal_svsm_mux_win;
+extern unsigned long g_pal_svsm_mux_widx;
+extern int           g_pal_svsm_mux_side;
+extern bool          g_pal_svsm_mux_open;
+
+PAL_HANDLE pal_svsm_mux_conn_of(uint32_t id);
+int        pal_svsm_mux_claim(PAL_HANDLE handle, uint32_t* out_id);
+void       pal_svsm_mux_release(uint32_t id);
+int        pal_svsm_mux_count(void);
+bool       pal_svsm_mux_id_sane(uint32_t id);

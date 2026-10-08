@@ -3,6 +3,8 @@ PalVirtualMemoryFree
 PalVirtualMemoryProtect
 PalRuntimeImageMap
 PalLineageFsAttach
+PalLineageSelf
+PalLineageMemberAlive
 PalSetMemoryBookkeepingUpcalls
 PalThreadCreate
 PalThreadYieldExecution
@@ -35,6 +37,8 @@ PalStreamWaitForClient
 PalStreamAttributesQueryByHandle
 PalStreamAttributesQuery
 PalProcessCreate
+PalProcessFork
+PalProcessWait
 PalProcessExit
 PalSystemTimeQuery
 PalRandomBitsRead

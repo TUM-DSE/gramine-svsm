@@ -75,6 +75,30 @@ static size_t g_thread_cnt = 0;
  * the switch that follows. */
 static void* g_stack_to_reap = NULL;
 
+/*
+ * The exiting thread's `clear_child_tid`, cleared by whoever runs NEXT.
+ *
+ * LibOS's `cleanup_thread` spins on this word and then calls `put_thread`,
+ * which destroys the PAL handle. So the store IS the handover, and it used to
+ * happen at the top of `_PalThreadExit` - before `state = ZOMBIE`, before
+ * `ring_remove(self)`, before reading `self->thread.stack`, and before
+ * `pick_next()` walks the ring. Every one of those touches the handle after
+ * LibOS has been told it may free it.
+ *
+ * That was harmless for as long as PalObjectDestroy was `return; // ignore`,
+ * because then nothing freed anything. It is not harmless now: a preemption
+ * in that window lets the async worker run, free the handle, and leave the
+ * exiting context walking its own freed memory - an intermittent hang in a
+ * second threads run on a warm vault, which is how it showed up.
+ *
+ * `g_dead_rsp` above exists for exactly this reason one step later ("Its
+ * handle may be destroyed by LibOS the moment we are off it, so we do not
+ * write into that"). This is the same rule applied to the handover itself:
+ * the thread has exited when the PAL has stopped touching it, not when it has
+ * decided to.
+ */
+static int* g_tid_to_clear = NULL;
+
 /* Somewhere for the switch stub to write the outgoing stack pointer of a
  * context that is never coming back. Its handle may be destroyed by LibOS the
  * moment we are off it, so we do not write into that. */
@@ -85,6 +109,13 @@ static inline PAL_HANDLE current_thread(void) {
 }
 
 static void reap_stack(void) {
+    /* The handover first, and unconditionally: a thread with no stack of its
+     * own to free still has a LibOS waiter to release. */
+    int* tid = g_tid_to_clear;
+    if (tid) {
+        g_tid_to_clear = NULL;
+        __atomic_store_n(tid, 0, __ATOMIC_RELEASE);
+    }
     void* stack = g_stack_to_reap;
     if (!stack)
         return;
@@ -597,20 +628,25 @@ noreturn void _PalThreadExit(int* clear_child_tid) {
     assert(self && self == current_thread());
 
     /*
-     * Tell LibOS the thread is gone before giving up the CPU. LibOS waits for
-     * exactly this by spinning (bookkeep/libos_thread.c:483,
-     * ipc/libos_ipc_worker.c:419), and those spins only end because CPU_RELAX
-     * yields back into this scheduler - which is also why the store has to
-     * happen before the switch rather than after it.
+     * Telling LibOS the thread is gone is DEFERRED to whoever runs next, with
+     * the stack (see g_tid_to_clear): the store hands LibOS permission to free
+     * this handle, and the code below is still using it.
+     *
+     * LibOS waits for exactly this by spinning (bookkeep/libos_thread.c:483,
+     * ipc/libos_ipc_worker.c:419), and those spins end because CPU_RELAX
+     * yields back into this scheduler - which still works when the store comes
+     * one switch later: this context is runnable until it switches away, so it
+     * always gets to finish, and the context it switches to does the store.
      */
-    if (clear_child_tid)
-        __atomic_store_n(clear_child_tid, 0, __ATOMIC_RELEASE);
-
     self->thread.state = PAL_SVSM_THREAD_ZOMBIE;
 
     if (g_thread_cnt == 1) {
         /* Nothing else was ever started, or everything else has gone. A
-         * process with no threads left is a process that has ended. */
+         * process with no threads left is a process that has ended. Nobody
+         * will run next, so the handover happens here or not at all - and it
+         * is safe here precisely because no other context can act on it. */
+        if (clear_child_tid)
+            __atomic_store_n(clear_child_tid, 0, __ATOMIC_RELEASE);
         _PalProcessExit(0);
     }
 
@@ -628,7 +664,9 @@ noreturn void _PalThreadExit(int* clear_child_tid) {
     assert(succ != self);
     ring_remove(self);
     assert(!g_stack_to_reap);
+    assert(!g_tid_to_clear);
     g_stack_to_reap = self->thread.stack;
+    g_tid_to_clear  = clear_child_tid;
     g_current = succ;
     /* Now that g_current is a node that is still in the ring. */
     refresh_preempt_wanted();

@@ -36,6 +36,20 @@ int PalVirtualMemoryProtect(void* addr, size_t size, pal_prot_flags_t prot) {
     return _PalVirtualMemoryProtect(addr, size, prot);
 }
 
+int PalLineageSelf(uint64_t* out) {
+    if (!out)
+        return -PAL_ERROR_INVAL;
+    *out = 0;
+    return _PalLineageSelf(out);
+}
+
+int PalLineageMemberAlive(uint64_t serial, bool* out) {
+    if (!out)
+        return -PAL_ERROR_INVAL;
+    *out = false;
+    return _PalLineageMemberAlive(serial, out);
+}
+
 int PalLineageFsAttach(uint64_t pages, void** base, size_t* size) {
     if (!base || !size)
         return -PAL_ERROR_INVAL;

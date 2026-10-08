@@ -312,7 +312,13 @@ static int clear_posix_locks(struct libos_handle* handle) {
             .end = FS_LOCK_EOF,
             .pid = g_process.pid,
         };
-        int ret = file_lock_set(handle->dentry, &file_lock, /*block=*/false);
+        /* A vaultfs file's locks are in the lineage's pages, so the unlock
+         * that POSIX requires at every close has to go there. Without this,
+         * closing an fd left the lock in the region for the lifetime of the
+         * process - visible to every other member and released by nothing. */
+        int ret;
+        if (!vaultfs_lock_set(handle, &file_lock, /*wait=*/false, &ret))
+            ret = file_lock_set(handle->dentry, &file_lock, /*block=*/false);
         if (ret < 0) {
             log_warning("error releasing locks: %s", unix_strerror(ret));
             return ret;
@@ -506,7 +512,12 @@ static int clear_flock_locks(struct libos_handle* hdl) {
             .type = F_UNLCK,
             .handle_id = hdl->id,
         };
-        int ret = file_lock_set(hdl->dentry, &file_lock, /*block=*/false);
+        /* FLOCK family: vaultfs declines these (see lock.c), so this is the
+         * unchanged path. Offered anyway so there is exactly one place that
+         * decides, rather than a list of sites that remember. */
+        int ret;
+        if (!vaultfs_lock_set(hdl, &file_lock, /*wait=*/false, &ret))
+            ret = file_lock_set(hdl->dentry, &file_lock, /*block=*/false);
         if (ret < 0) {
             log_warning("error releasing locks: %s", unix_strerror(ret));
             return ret;

@@ -466,6 +466,34 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
 
     RUN_INIT(init_elf_objects);
     RUN_INIT(init_signal_handling);
+    /*
+     * STILL OFF, and now for a measured reason rather than 8dcb294d's "TMP:
+     * skip some initialization (fix later)".
+     *
+     * The transport it needs is built and proven. The worker listens on
+     * `pipe:<vmid>` for a peer in ANOTHER process, and this PAL's named-pipe
+     * rendezvous was a process-local table, so no peer could ever find it;
+     * that table now lives in the lineage's shared region (pal_pipes.c), the
+     * listener publishes itself there, and a forked child takes an IPC
+     * identity and a worker of its own (sys/libos_clone.c,
+     * reinit_ipc_worker_after_fork). With all of that, turning this on gives a
+     * real cross-process round trip: a child took a POSIX lock its parent had
+     * taken AFTER the fork - so the child's copied tables could not have known
+     * - and was refused EAGAIN by the leader, over IPC, both ways.
+     *
+     * What it ALSO gives, measured on the lane, is a fork that costs 30
+     * seconds instead of 0.8 - `vault_fork_sustained`'s ten rounds went from 8
+     * seconds to 5 minutes - and then vault creation failing outright: 100
+     * rows. Every fork now builds a thread, a listener and a connection, and
+     * tears them down again, and that is too much to put on a path a
+     * serverless function takes once per invocation.
+     *
+     * So the groundwork stays and the switch does not flip. What is left is
+     * cost, not correctness: the worker should be started on FIRST USE rather
+     * than at init, and a child should inherit the lineage's leader instead of
+     * standing up its own endpoint. Both are changes to when this happens, not
+     * to whether it can.
+     */
     //RUN_INIT(init_ipc_worker);
 
     if (g_pal_public_state->parent_process) {
@@ -549,7 +577,8 @@ static int get_256b_random_hex_string(char* buf, size_t size) {
     return 0;
 }
 
-int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, bool use_vmid_for_name) {
+int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, bool use_vmid_for_name,
+                pal_stream_options_t options) {
     int ret;
     size_t len;
     char pipename[PIPE_URI_SIZE];
@@ -580,7 +609,7 @@ int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, bool use_vm
             return -ERANGE;
 
         ret = PalStreamOpen(uri, PAL_ACCESS_RDWR, /*share_flags=*/0, PAL_CREATE_IGNORED,
-                            /*options=*/0, &pipe);
+                            options, &pipe);
         if (ret < 0) {
             if (!use_vmid_for_name && ret == -PAL_ERROR_STREAMEXIST) {
                 /* tried to create a pipe with random name but it already exists */

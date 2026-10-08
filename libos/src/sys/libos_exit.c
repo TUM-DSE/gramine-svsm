@@ -133,6 +133,14 @@ noreturn void thread_exit(int error_code, int term_signal) {
 
     /* Clear file (POSIX) locks before we notify parent: after a successful `wait()` by parent, our
      * locks should already be gone. */
+    /* Unconditionally, and before gramine's own: a lineage filesystem's
+     * locks are in shared pages, so a member that exits without dropping them
+     * leaves records every survivor must treat as live until the reclaim scan
+     * happens to look at the roster. This is a scan of 256 records under a
+     * lock nobody contends at exit - there is nothing a flag would save, and a
+     * flag would have to be right across fork and exec. */
+    vaultfs_lock_clear_self();
+
     int ret = file_lock_clear_pid(g_process.pid);
     if (ret < 0)
         log_warning("error clearing file (POSIX) locks: %s", unix_strerror(ret));

@@ -181,6 +181,39 @@ int connect_to_process(IDTYPE dest) {
     return 0;
 }
 
+/*
+ * After a copy-on-write fork: forget the connections this child INHERITED.
+ *
+ * They are the parent's, in two senses. The `libos_ipc_connection` objects are
+ * copies of the parent's heap, and the PAL handles in them name pipe pairs the
+ * parent is still using - so a child that kept them would be a second reader
+ * on its parent's conversations, taking replies meant for it. The child also
+ * must not CLOSE them, for the same reason: on this PAL the pair is shared, so
+ * a close would lower a holder count the parent still relies on.
+ *
+ * So the tree is emptied without touching the handles: the child's copies of
+ * those pairs leak until it exits, which is bounded by the fork and is the
+ * conservative half of the trade. The child then connects on its own when it
+ * next needs a peer.
+ */
+void ipc_forget_inherited_connections(void) {
+    lock(&g_ipc_connections_lock);
+    struct avl_tree_node* node;
+    while ((node = avl_tree_first(&g_ipc_connections))) {
+        avl_tree_delete(&g_ipc_connections, node);
+    }
+    unlock(&g_ipc_connections_lock);
+
+    /* And anybody the PARENT was waiting on. A copied waiter names an event in
+     * this child that nothing will ever set, and a response that is not coming
+     * because the request was not ours. */
+    lock(&g_msg_waiters_tree_lock);
+    while ((node = avl_tree_first(&g_msg_waiters_tree))) {
+        avl_tree_delete(&g_msg_waiters_tree, node);
+    }
+    unlock(&g_msg_waiters_tree_lock);
+}
+
 void remove_outgoing_ipc_connection(IDTYPE dest) {
     struct libos_ipc_connection dummy = { .vmid = dest };
     lock(&g_ipc_connections_lock);

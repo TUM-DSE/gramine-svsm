@@ -29,7 +29,42 @@ void pal_svsm_runtime_info(uint64_t index, void** out_base, size_t* out_size);
  * buffers they point at. `pages` = 0 only asks what this vault already has.
  * The guest-physical address is not returned here; it is the second word of
  * the header the monitor writes at the start of the window. */
-void pal_svsm_lineage_fs(uint64_t pages, void** out_base, size_t* out_size);
+/* LineageFs (0x4FFFFFD4): a region shared with this vault's descendants.
+ *
+ * `purpose` picks WHICH: 0 is the filesystem a manifest mounts, 1 is the
+ * PAL's own arena. Two, because the LibOS sizes a whole filesystem to the
+ * first - anything else allocating there would be allocating inside its
+ * superblock. Idempotent per purpose: asking twice reports the same region.
+ */
+#define PAL_SVSM_LINEAGE_FS    0
+#define PAL_SVSM_LINEAGE_PIPES 1
+void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size_t* out_size);
+
+/* Fork (0x4FFFFFE4): a copy-on-write copy of this vault.
+ *
+ * Returns the child's id in the parent, 0 in the child, and UINT64_MAX if
+ * the fork failed - the one case a caller MUST check, because a failed fork
+ * returns once and is otherwise indistinguishable from being the parent.
+ *
+ * `flags` bit 0 is PAL_SVSM_FORK_RESIDENT: hand the child to the scheduler
+ * so it runs without a host invoke. POSIX fork needs it - a child nobody
+ * dispatches would never reach its execve, and its parent would wait for
+ * ever. */
+#define PAL_SVSM_FORK_RESIDENT 1UL
+/* `out_self` receives the CHILD's own id, and is meaningless in the parent.
+ * The child cannot learn it any other way: rcx must be 0 to say which side
+ * it is, so the id travels in the register the flags came in on. */
+uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self);
+
+/* Wait (0x4FFFFFD5): how did my child end?
+ *
+ * Non-blocking by design: a live child answers EXIT_LIVE (0) and the caller
+ * decides what to do about it. `out_value` carries the exit code, the
+ * errno, the fault vector or a MONITOR_* code, depending on the reason.
+ * A NEGATIVE reason is a refusal - the id is not this vault's child, or its
+ * slot has been reissued - and must not be read as "still running". */
+#define PAL_SVSM_EXIT_LIVE 0
+int64_t pal_svsm_wait(uint64_t child_id, uint64_t* out_value);
 void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
 /* DeviceMmio: a device's registers. `id` is vendor | device << 16, 0 only
  * asks what this vault already has. `bar` says which BAR to map, because a
