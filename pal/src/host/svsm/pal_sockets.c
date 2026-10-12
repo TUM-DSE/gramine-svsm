@@ -1231,11 +1231,57 @@ static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         off += take;
     }
 
+    /* FRAMED on a muxed channel, exactly as a stream send is.
+     *
+     * This was written when a UDP socket owned its channel, and the mux
+     * (which put an [mvmux_hdr] in front of every message on the shared
+     * channel) framed the handshake and the stream path but not this one:
+     * `mux_room` above was taught that the header exists and nothing ever
+     * wrote it. So the relay read the first eight bytes of the DATAGRAM
+     * header as a frame header - an op and a connection id that mean
+     * nothing - and no datagram from a client vault reached lwIP at all.
+     * Measured 2026-10-12 on jamie: with the vault's /etc/resolv.conf right
+     * and off-subnet TCP through the same service working, a UDP sendto,
+     * connected or not, put NOTHING on the tap, and getaddrinfo answered
+     * EAI_AGAIN after 30 s. No lane row covered it: service_net_udp sends
+     * from inside the service, which owns the NIC and has no mux. */
+    struct pal_mvmux_hdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.conn = handle->sock.conn_id;
+    mh.op   = PAL_MVMUX_OP_DATA;
+    const void* fh = handle->sock.muxed ? &mh : NULL;
+    uint32_t fhl = handle->sock.muxed ? PAL_MVMUX_HDR_BYTES : 0;
+
     bool nonblock = force_nonblocking || handle->sock.is_nonblocking;
     int ret = -PAL_ERROR_TRYAGAIN;
     for (;;) {
-        if (pal_chan_send(&out, buf, (uint32_t)(sizeof(hdr) + payload)) == 0) {
+        /* The service's window, as in _PalSocketSend: a frame sent past it
+         * has nowhere to go at the far end and blocks this vault's whole
+         * link. The relay advertises credit for datagram sessions too
+         * (udp_step), so a socket at its limit is waiting for a frame that
+         * comes. */
+        if (sock_shares(handle)
+            && (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
+            if (sock_chan_gone(handle)) {
+                ret = -PAL_ERROR_CONNFAILED;
+                break;
+            }
+            if (nonblock)
+                break;
+            struct pal_chan_ring in;
+            ring_for(handle, &in, NULL);
+            uint32_t seen = *in.peer_tail;
+            uint64_t arm  = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, seen);
+            if (pal_svsm_sleep_arms(&arm, 1, PAL_SOCK_PARK_US) < 0)
+                for (int i = 0; i < PAL_SOCK_SPINS; i++)
+                    __asm__ volatile("pause");
+            mux_poll_route(handle, &in);     /* which is what collects it */
+            continue;
+        }
+        if (pal_chan_send2(&out, fh, fhl, buf, (uint32_t)(sizeof(hdr) + payload)) == 0) {
             pal_svsm_channel_notify(sock_widx(handle));
+            if (sock_shares(handle))
+                handle->sock.tx_sent++;
             /* The PAYLOAD, not the frame: the caller sent a datagram, not
              * a header. */
             *out_size = payload;
@@ -1288,17 +1334,75 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         bool was_full = pal_chan_present(&in)
                         && (uint32_t)(*in.peer_tail - *in.head) >= in.depth;
         uint32_t got = 0;
-        int rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
+        int rc = -1;
+        /* DEMULTIPLEXED on a shared channel, for the reason udp_send frames:
+         * the head may be any of this vault's sockets' traffic, and a frame
+         * for THIS socket may already have been parked in `rx` or its queue
+         * by another socket's read. So the same three steps _PalSocketRecv
+         * takes - serve what is parked, route the head, read only what is
+         * ours - and then the body starts after the frame header rather than
+         * at 0. Reading the shared ring directly, as this did, would also
+         * have taken other sockets' frames as datagrams. */
+        if (handle->sock.muxed) {
+            if (handle->sock.rx_off >= handle->sock.rx_len)
+                mux_rx_refill(handle);
+            if (handle->sock.rx_off < handle->sock.rx_len) {
+                rc = 0;                     /* parked: body at rx + rx_off */
+            } else {
+                enum mux_head mh = mux_head_step(handle, &in, was_full);
+                if (mh == MUX_HEAD_NOMEM)
+                    return -PAL_ERROR_NOMEM;
+                if (mh == MUX_HEAD_MOVED) {
+                    /* Possibly our own FIN: the service reaped this datagram
+                     * session (RELAY_UDP_IDLE_US) or is gone. A datagram
+                     * socket has no end of stream to report, so it fails. */
+                    if (handle->sock.broken || handle->sock.fin_seen)
+                        return -PAL_ERROR_CONNFAILED;
+                    continue;
+                }
+                if (mh != MUX_HEAD_BLOCKED) {
+                    rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
+                    if (rc == 0) {
+                        if (was_full)
+                            pal_svsm_channel_notify(sock_widx(handle));
+                        if (got < PAL_MVMUX_HDR_BYTES) {
+                            handle->sock.broken = true;
+                            return -PAL_ERROR_DENIED;
+                        }
+                        struct pal_mvmux_hdr oh;
+                        memcpy(&oh, handle->sock.rx, PAL_MVMUX_HDR_BYTES);
+                        if (oh.op == PAL_MVMUX_OP_FIN || oh.op == PAL_MVMUX_OP_RST) {
+                            handle->sock.rx_len = handle->sock.rx_off = 0;
+                            if (oh.op == PAL_MVMUX_OP_FIN)
+                                handle->sock.fin_seen = true;
+                            else
+                                handle->sock.broken = true;
+                            return -PAL_ERROR_CONNFAILED;
+                        }
+                        handle->sock.rx_len = got;
+                        handle->sock.rx_off = PAL_MVMUX_HDR_BYTES;
+                    }
+                }
+            }
+        } else {
+            rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
+            if (rc == 0) {
+                if (was_full)
+                    pal_svsm_channel_notify(sock_widx(handle));
+                handle->sock.rx_len = got;
+                handle->sock.rx_off = 0;
+            }
+        }
         if (rc == 0) {
-            if (was_full)
-                pal_svsm_channel_notify(sock_widx(handle));
+            const char* body = handle->sock.rx + handle->sock.rx_off;
+            uint64_t blen = handle->sock.rx_len - handle->sock.rx_off;
             struct pal_mvnet_dgram hdr;
-            if (got < sizeof(hdr)) {
+            if (blen < sizeof(hdr)) {
                 handle->sock.broken = true;
                 return -PAL_ERROR_DENIED;
             }
-            memcpy(&hdr, handle->sock.rx, sizeof(hdr));
-            if (hdr.len > got - sizeof(hdr)) {
+            memcpy(&hdr, body, sizeof(hdr));
+            if (hdr.len > blen - sizeof(hdr)) {
                 /* The frame claims more than arrived. Not recoverable: the
                  * next message would be read as a header. */
                 handle->sock.broken = true;
@@ -1316,7 +1420,7 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                 uint64_t take = iov[i].iov_len;
                 if (take > have - off)
                     take = have - off;
-                memcpy(iov[i].iov_base, handle->sock.rx + sizeof(hdr) + off, take);
+                memcpy(iov[i].iov_base, body + sizeof(hdr) + off, take);
                 off += take;
             }
             /* What did not fit is GONE, and that is not a bug: a datagram
@@ -1324,6 +1428,12 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
              * is not the next datagram's business. The stream path keeps a
              * residue here; this must not. */
             handle->sock.rx_len = handle->sock.rx_off = 0;
+            if (handle->sock.muxed) {
+                /* One frame finished, which is what earns the service more
+                 * window - the same accounting as _PalSocketRecv. */
+                handle->sock.rx_done++;
+                mux_credit_maybe(handle);
+            }
             *out_total_size = off;
             return 0;
         }
