@@ -332,7 +332,21 @@ static char* mux_scratch(uint32_t slot) {
  * and is skipped rather than moved. False means there was no room, and then the
  * caller must put the buffer back. */
 static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
-    if (h->sock.rx_off >= h->sock.rx_len) {
+    /* `rx` spent AND nothing queued behind it - not just `rx` spent.
+     *
+     * A read drains `rx` and returns, and only the NEXT read refills it from
+     * the queue (mux_rx_refill). Anything that routes the head in between - a
+     * poll, a peer-gone check, a send waiting for credit, an attribute query -
+     * could find `rx` empty with older frames still queued, and this used to
+     * make the NEW frame `rx`: the next read served it ahead of the queue, and
+     * the older frame came out later. A stream delivered one frame early and
+     * one frame late, at full length and with every byte from the right
+     * file - so nothing failed loudly. Measured on jamie 2026-10-12: a 102 MB
+     * download into a vault came back with the right size and the wrong
+     * SHA-256 every time (10 of 10), the bad ranges holding the bytes from
+     * exactly 0x3FF4 = 16,372 further on - one mux frame's payload - and
+     * torch.load in SeBS 411 failed with KeyError 'storages'. */
+    if (h->sock.rx_off >= h->sock.rx_len && !h->sock.q_count) {
         /* `rx` is spent: this buffer becomes it, and the old one goes back to
          * the pool if that is where it came from. */
         if (h->sock.rx_pooled)
