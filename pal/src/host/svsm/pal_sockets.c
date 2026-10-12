@@ -1266,10 +1266,23 @@ static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                 ret = -PAL_ERROR_CONNFAILED;
                 break;
             }
-            if (nonblock)
-                break;
             struct pal_chan_ring in;
             ring_for(handle, &in, NULL);
+            /* COLLECT CREDIT THAT HAS ALREADY ARRIVED before answering
+             * EAGAIN. The floor is ONE frame (PAL_MUX_CREDIT_FLOOR), and the
+             * service's first CREDIT goes out right behind its CONNECT reply -
+             * but a frame in the ring is only seen when somebody routes the
+             * head, and a resolver sends A and then AAAA without reading in
+             * between. So the second send found the window spent with the
+             * credit sitting unread, a non-blocking socket said EAGAIN, and
+             * glibc abandoned the socket and every retry the same way:
+             * getaddrinfo(AF_UNSPEC) failed in 12 ms with both answers on the
+             * tap. Measured on jamie 2026-10-12. */
+            mux_poll_route(handle, &in);
+            if ((int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) > 0)
+                continue;
+            if (nonblock)
+                break;
             uint32_t seen = *in.peer_tail;
             uint64_t arm  = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, seen);
             if (pal_svsm_sleep_arms(&arm, 1, PAL_SOCK_PARK_US) < 0)
@@ -1859,6 +1872,14 @@ int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_ar
         return 1;
     }
     if ((want & PAL_WAIT_WRITE) && !pal_svsm_sock_writable(handle)) {
+        /* A shared datagram socket waiting for WINDOW waits for a CREDIT
+         * frame, which arrives on the inbound ring - arming on the outbound
+         * head would sleep through it. */
+        if (handle->sock.type == PAL_SOCKET_UDP && sock_shares(handle)
+            && (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
+            *out_arm = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, *in.peer_tail);
+            return 1;
+        }
         *out_arm = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_HEAD, *out.peer_head);
         return 1;
     }
@@ -1970,6 +1991,22 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle) {
     }
     struct pal_chan_ring out;
     ring_for(handle, NULL, &out);
+    /* A shared DATAGRAM socket is writable only with credit in hand. A send
+     * past the service's window cannot wait the way a stream send does - a
+     * resolver's sockets are non-blocking - so a POLLOUT that the send then
+     * answers with EAGAIN is a promise broken, and glibc gives the socket up
+     * on it. Routing first collects a CREDIT frame that has arrived. Stream
+     * sockets keep the ring-only answer: their send waits for credit itself,
+     * and their measured paths are not this change's business. */
+    if (handle->sock.type == PAL_SOCKET_UDP && sock_shares(handle)) {
+        if ((int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
+            struct pal_chan_ring in;
+            ring_for(handle, &in, NULL);
+            mux_poll_route(handle, &in);
+            if ((int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0)
+                return false;
+        }
+    }
     return pal_chan_writable(&out);
 }
 
@@ -1979,7 +2016,65 @@ static int sock_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     memset(attr, 0, sizeof(*attr));
     attr->handle_type  = PAL_TYPE_SOCKET;
     attr->nonblocking  = handle->sock.is_nonblocking;
-    if (handle->sock.win) {
+    if (sock_shares(handle)) {
+        /* FIONREAD on a socket that SHARES the vault's channel, which is
+         * every socket to the network service. The branch below keys on
+         * `win`, and a sharing socket's `win` is 0 by design (sock_shares),
+         * so this answered 0 pending bytes for every one of them - and glibc's
+         * resolver sizes the buffer for its SECOND answer from FIONREAD:
+         * told 0 it recvfrom()s into a NULL, zero-length buffer, gets 0 and
+         * abandons the socket. getaddrinfo(AF_UNSPEC), i.e. every urllib
+         * request, failed that way with both answers on the tap (traced on
+         * jamie 2026-10-12: `ioctl(3, FIONREAD) = 0` then `recvfrom(3, 0, 0)`).
+         *
+         * What Linux reports: for a datagram socket the size of the NEXT
+         * datagram, for a stream the bytes buffered. The next frame for this
+         * socket is the parked `rx`, else its queue, else the ring's head once
+         * routing says it is ours. */
+        struct pal_chan_ring in;
+        ring_for(handle, &in, NULL);
+        const char* body = NULL;
+        uint64_t blen = 0;
+        unsigned char peek[PAL_MVMUX_HDR_BYTES + sizeof(struct pal_mvnet_dgram)];
+        if (handle->sock.rx_off < handle->sock.rx_len) {
+            body = handle->sock.rx + handle->sock.rx_off;
+            blen = handle->sock.rx_len - handle->sock.rx_off;
+        } else if (handle->sock.q_count) {
+            int qi = handle->sock.q_head;
+            body = (const char*)handle->sock.q[qi] + handle->sock.q_off[qi];
+            blen = handle->sock.q_len[qi] - handle->sock.q_off[qi];
+        } else if (pal_chan_present(&in) && mux_poll_route(handle, &in)
+                   && handle->sock.rx_off >= handle->sock.rx_len) {
+            /* Ours and still in the ring: peek it, nothing is consumed. */
+            uint32_t mlen = 0;
+            if (pal_chan_peek(&in, peek, sizeof(peek), &mlen) == 0
+                && mlen >= PAL_MVMUX_HDR_BYTES) {
+                body = (const char*)peek + PAL_MVMUX_HDR_BYTES;
+                blen = mlen - PAL_MVMUX_HDR_BYTES;
+            }
+        } else if (handle->sock.rx_off < handle->sock.rx_len) {
+            /* Routing parked it in `rx` just now. */
+            body = handle->sock.rx + handle->sock.rx_off;
+            blen = handle->sock.rx_len - handle->sock.rx_off;
+        }
+        if (body) {
+            if (handle->sock.type == PAL_SOCKET_UDP) {
+                struct pal_mvnet_dgram dh;
+                if (blen >= sizeof(dh)) {
+                    memcpy(&dh, body, sizeof(dh));
+                    attr->pending_size = dh.len;
+                }
+            } else {
+                attr->pending_size = blen;
+            }
+        }
+        if (pal_chan_present(&in))
+            attr->socket.recv_buf_size = (size_t)in.slot * in.depth;
+        struct pal_chan_ring out;
+        ring_for(handle, NULL, &out);
+        if (pal_chan_present(&out))
+            attr->socket.send_buf_size = (size_t)out.slot * out.depth;
+    } else if (handle->sock.win) {
         struct pal_chan_ring in;
         ring_for(handle, &in, NULL);
         if (pal_chan_present(&in)) {
