@@ -156,7 +156,12 @@ pal_svsm_exception_resume:
 .Lresume_by_call:
     movl  $0x4FFFFFE8, %eax          /* ExceptionReturn */
     cpuid                            /* does not return */
-    ud2
+    /* It returned: either the monitor refused (it retires the process
+     * when it cannot read the context, so not that) or the CPUID never
+     * reached it and ran natively. Fail closed the way every other
+     * monitor call does - not ud2, whose #UD would come back here
+     * through the exception path as another unintercepted CPUID. */
+    jmp   monitor_call_forged
     .cfi_endproc
     .size pal_svsm_exception_resume, .-pal_svsm_exception_resume
 
