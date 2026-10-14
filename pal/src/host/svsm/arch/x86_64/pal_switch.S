@@ -155,12 +155,21 @@ pal_svsm_exception_resume:
     ud2
 .Lresume_by_call:
     movl  $0x4FFFFFE8, %eax          /* ExceptionReturn */
+    /* The same instruction as every other monitor call
+     * (pal_monitor_call.c vc_injection): VMMCALL, or the legacy CPUID in a
+     * -Dsvsm_call_insn=cpuid build for a monitor before stage 3. */
+#ifndef PAL_SVSM_CALL_CPUID
+    vmmcall                          /* does not return */
+#else
     cpuid                            /* does not return */
+#endif
     /* It returned: either the monitor refused (it retires the process
-     * when it cannot read the context, so not that) or the CPUID never
-     * reached it and ran natively. Fail closed the way every other
-     * monitor call does - not ud2, whose #UD would come back here
-     * through the exception path as another unintercepted CPUID. */
+     * when it cannot read the context, so not that) or the call never
+     * reached it - a legacy CPUID that ran natively, or a VMMCALL answered
+     * by something other than the monitor. Fail closed the way every
+     * other monitor call does - not ud2, whose #UD would come back here
+     * through the exception path. monitor_call_forged loads CallForged
+     * and executes VMMCALL, which the monitor retires. */
     jmp   monitor_call_forged
     .cfi_endproc
     .size pal_svsm_exception_resume, .-pal_svsm_exception_resume

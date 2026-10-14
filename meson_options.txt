@@ -7,6 +7,9 @@ option('skeleton', type: 'combo', choices: ['disabled', 'enabled'],
     description: 'Build skeleton PAL')
 option('svsm', type: 'combo', choices: ['disabled', 'enabled'],
     description: 'Built svsm PAL')
+option('svsm_call_insn', type: 'combo', choices: ['vmmcall', 'cpuid'],
+    value: 'vmmcall',
+    description: 'Instruction the svsm PAL issues monitor calls with (cpuid only for a monitor before VMMCALL calls)')
 
 option('libc', type: 'combo', choices: ['none', 'glibc', 'musl'],
     value: 'glibc', description: 'Choose (patched) libc that is to be built into runtime directory')
