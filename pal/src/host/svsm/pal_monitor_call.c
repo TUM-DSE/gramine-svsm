@@ -2,14 +2,60 @@
 #include <string.h>
 #define vc_injection "cpuid"
 
-void monitor_call(struct monitor_call_data* data){
+/* A monitor call is a CPUID with a code from the monitor's call space
+ * (0x4E000000-0x4FFFFFFF) in rax. The monitor answers it with rax
+ * UNCHANGED - it writes rbx/rcx/rdx (and r8 for a few calls), never rax.
+ * A CPUID that never reached the monitor - a host that stopped
+ * intercepting it - runs natively instead, and for a leaf in that range
+ * the hardware answers with something else in eax (zeros on AMD), so
+ * "rax came back as sent" is the proof the call was served. Without the
+ * check a forged answer reads as success: every status is negative, so
+ * rcx = 0 is "done". (DESIGN-vc-reflect.md D8, stage 2.)
+ *
+ * The failure path must not be a CPUID: pal_svsm_fail is one and would
+ * return natively too. It executes VMMCALL instead:
+ *  - intercepted (KVM's default), the monitor retires the vault as an
+ *    unsupported instruction (MONITOR_INSN): fail-closed and visible;
+ *  - not intercepted either, VMMCALL is #UD. The CPL0 stub's Exception
+ *    call is itself a CPUID, so it too runs natively, the stub returns
+ *    and iretq lands on the vmmcall again - an endless loop that never
+ *    reaches the pause below. That is still not a forged success (no code
+ *    after the call runs), but it is a hung vault, not a retired one,
+ *    and only the invoke watchdog ends it (services have none).
+ * The pause loop holds the vault if a VMMCALL is ever answered and
+ * returns. pal_switch.S jumps here too.
+ *
+ * This covers the Gramine PAL only. The other runtimes that issue monitor
+ * calls with their own inline CPUID (netsvc vault.h/mvchan.h, spdksvc
+ * mv_hw.h, nvsvc deviceio.c, tools/fn/lib, the inference trustlet) still
+ * accept a forged answer until they get the same check, so D8 is not
+ * closed by this file alone. */
+noreturn void monitor_call_forged(void) {
+    __asm__ volatile("vmmcall" ::: "memory");
+    for (;;)
+        __asm__ volatile("pause" ::: "memory");
+}
 
+static inline void monitor_call_check(uint64_t code, uint64_t rax) {
+    if (__builtin_expect(rax != code, 0))
+        monitor_call_forged();
+}
+
+void monitor_call(struct monitor_call_data* data){
+    uint64_t code = data->rax;
+
+    /* r8 and r9: the monitor writes r8 for some calls (DeviceMmio,
+     * service_calls.rs) whichever helper issued them. memory: it reads
+     * and writes this vault's buffers behind the compiler's back. */
     __asm__ volatile(
         vc_injection
         : "+a" (data->rax), "+b" (data->rbx),
           "+c" (data->rcx), "+d" (data->rdx)
+        :
+        : "r8", "r9", "memory"
         );
 
+    monitor_call_check(code, data->rax);
 }
 
 void extended_monitor_call(struct monitor_call_data* data) {
@@ -17,6 +63,8 @@ void extended_monitor_call(struct monitor_call_data* data) {
     // This only affects the gramine side
     // since the Monitor receives the whole
     // VMSA regardless
+    uint64_t code = data->rax;
+
     __asm__ volatile(
         "mov %4, %%r8\r\n"
         "mov %5, %%r9\r\n"
@@ -24,9 +72,10 @@ void extended_monitor_call(struct monitor_call_data* data) {
         : "+a" (data->rax), "+b" (data->rbx),
           "+c" (data->rcx), "+d" (data->rdx)
         : "r" (data->r8), "r" (data->r9)
-        : "r8", "r9"
+        : "r8", "r9", "memory"
         );
 
+    monitor_call_check(code, data->rax);
 }
 
 size_t max_string_length = 100;
