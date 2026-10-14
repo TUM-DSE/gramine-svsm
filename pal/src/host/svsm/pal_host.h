@@ -170,6 +170,9 @@ struct pal_handle_inner {
              * outlives any one connection on it, so `pal_chan_peer_gone` -
              * which is how an unshared socket learns this - stays false. */
             bool     fin_seen;
+            /* shutdown(SHUT_WR) has sent its FIN|HALF: the service
+             * has been told this side sends nothing more, once. */
+            bool     wr_shut;
             /* Does every message on this channel carry a mux frame header?
              *
              * True only for a socket this vault CONNECTED through a network

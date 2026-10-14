@@ -80,6 +80,7 @@ int      g_pal_svsm_net_protocol;
 #define PAL_MVMUX_OP_FIN      2
 #define PAL_MVMUX_OP_RST      3
 #define PAL_MVMUX_OP_CREDIT   4
+#define PAL_MVMUX_FIN_HALF    0x01  /* FIN's flags: shutdown(SHUT_WR), still reading */
 #define PAL_MVMUX_HDR_BYTES   8
 
 /* Does a second socket SHARE the vault's channel, or get one of its own?
@@ -2132,9 +2133,55 @@ static void sock_destroy(PAL_HANDLE handle) {
     free(handle);
 }
 
+/* shutdown(SHUT_WR) on a sharing socket: FIN|HALF, and keep the id.
+ *
+ * Unlike close's FIN this one is NOT best-effort. It is the only end-of-input
+ * the far end will ever see while the connection stays up, so a FIN lost to a
+ * full ring is a server waiting forever for the rest of a request and a client
+ * waiting forever for the answer. It waits for ring room the way a send does;
+ * a FIN costs no credit (mvmux.h), so the ring is the only thing to wait for. */
+static int sock_half_close(PAL_HANDLE handle) {
+    if (handle->sock.wr_shut || !handle->sock.conn_id || !g_pal_svsm_mux_open)
+        return 0;
+    struct pal_chan_ring out;
+    ring_for(handle, NULL, &out);
+    struct pal_mvmux_hdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.conn  = handle->sock.conn_id;
+    mh.op    = PAL_MVMUX_OP_FIN;
+    mh.flags = PAL_MVMUX_FIN_HALF;
+    for (;;) {
+        if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, NULL, 0) == 0) {
+            pal_svsm_channel_notify(g_pal_svsm_mux_widx);
+            handle->sock.wr_shut = true;
+            return 0;
+        }
+        if (sock_chan_gone(handle))
+            return -PAL_ERROR_CONNFAILED;
+        for (int i = 0; i < PAL_SOCK_SPINS && !pal_chan_writable(&out); i++)
+            __asm__ volatile("pause");
+        if (pal_chan_writable(&out))
+            continue;
+        uint32_t seen = *out.peer_head;
+        uint64_t arm  = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_HEAD, seen);
+        if (pal_svsm_sleep_arms(&arm, 1, PAL_SOCK_PARK_US) < 0)
+            for (int i = 0; i < PAL_SOCK_SPINS; i++)
+                __asm__ volatile("pause");
+    }
+}
+
 static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
-    __UNUSED(mode);
     if (sock_shares(handle)) {
+        /* The mode matters here and was ignored: shutdown(SHUT_WR) sent the
+         * same FIN as close(2) and released the id, so the service dropped
+         * the connection and the answer to an upload that half-closed and
+         * then read never arrived (net_client_upload, 2026-10-14).
+         * SHUT_RD has nothing to tell the service - the LibOS stops reading
+         * on its own - and SHUT_WR is a half-close. Only ALL is a close. */
+        if (mode == PAL_DELETE_READ)
+            return 0;
+        if (mode == PAL_DELETE_WRITE)
+            return sock_half_close(handle);
         /* A SHARING socket owns a CONNECTION, not a channel. Closing it must
          * tell the service - the service holds an lwIP connection for it and
          * nothing else would ever end it - and must release the id, but must
