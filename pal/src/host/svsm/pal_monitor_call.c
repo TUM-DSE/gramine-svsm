@@ -1,37 +1,63 @@
 #include "pal_monitor_call.h"
 #include <string.h>
-#define vc_injection "cpuid"
 
-/* A monitor call is a CPUID with a code from the monitor's call space
- * (0x4E000000-0x4FFFFFFF) in rax. The monitor answers it with rax
- * UNCHANGED - it writes rbx/rcx/rdx (and r8 for a few calls), never rax.
- * A CPUID that never reached the monitor - a host that stopped
- * intercepting it - runs natively instead, and for a leaf in that range
- * the hardware answers with something else in eax (zeros on AMD), so
- * "rax came back as sent" is the proof the call was served. Without the
- * check a forged answer reads as success: every status is negative, so
- * rcx = 0 is "done". (DESIGN-vc-reflect.md D8, stage 2.)
+/* The instruction that carries a monitor call (VC_REFLECT_DESIGN.md stage 3).
  *
- * The failure path must not be a CPUID: pal_svsm_fail is one and would
- * return natively too. It executes VMMCALL instead:
- *  - intercepted (KVM's default), the monitor retires the vault as an
- *    unsupported instruction (MONITOR_INSN): fail-closed and visible;
- *  - not intercepted either, VMMCALL is #UD. The CPL0 stub's Exception
- *    call is itself a CPUID, so it too runs natively, the stub returns
- *    and iretq lands on the vmmcall again - an endless loop that never
- *    reaches the pause below. That is still not a forged success (no code
- *    after the call runs), but it is a hung vault, not a retired one,
- *    and only the invoke watchdog ends it (services have none).
+ * VMMCALL by default: three bytes (0F 01 D9), exit code 0x81. The monitor
+ * recognises it only with rax in the call space (0x4E000000-0x4FFFFFFF) and
+ * answers anything else STATUS_UNSUPPORTED, so a call and a real CPUID can
+ * no longer be confused, and an unintercepted VMMCALL is a #UD rather than
+ * a native answer that looks like one.
+ *
+ * -DPAL_SVSM_CALL_CPUID (meson -Dsvsm_call_insn=cpuid) keeps the legacy
+ * CPUID (0F A2, exit 0x72). It exists only to run this PAL on a monitor
+ * built before stage 3; a monitor built with call_exit=both serves either,
+ * and one built with call_exit=vmmcall retires a CPUID call as
+ * MONITOR_LEGACY_CALL. pal_switch.S picks the same instruction from the
+ * same macro. The PAL's real CPUIDs (pal_main.c, pal_misc.c) stay CPUID. */
+#ifndef PAL_SVSM_CALL_CPUID
+#define vc_injection "vmmcall"
+#else
+#define vc_injection "cpuid"
+#endif
+
+/* CallForged: a code the monitor retires the vault on (MONITOR_FORGED_CALL).
+ * It sits in the exception block of the call space and is free;
+ * 0x4FFFFFDF is not used because it is reserved for TicketIssue. */
+#define MONITOR_CALL_FORGED 0x4EFFFFFDu
+
+/* The monitor answers a call with rax UNCHANGED - it writes rbx/rcx/rdx
+ * (and r8 for a few calls), never rax. A call that never reached the
+ * monitor - a host that stopped intercepting CPUID, in the legacy build -
+ * runs natively, and for a leaf in the call space the hardware answers
+ * with something else in eax (zeros on AMD), so "rax came back as sent"
+ * is the proof the call was served. Without the check a forged answer
+ * reads as success: every status is negative, so rcx = 0 is "done".
+ * (DESIGN-vc-reflect.md D8, stage 2.) The check stays with VMMCALL: it
+ * costs one compare and still catches a call answered by anyone but the
+ * monitor.
+ *
+ * The failure path must not be a CPUID: pal_svsm_fail is a monitor call
+ * and, in the legacy build, would return natively too. It loads
+ * CallForged and executes VMMCALL, whichever instruction the calls use:
+ *  - a stage 3 monitor (call_exit both or vmmcall) recognises the code
+ *    and retires the vault as MONITOR_FORGED_CALL; a monitor before
+ *    stage 3 retires any VMMCALL as an unsupported instruction
+ *    (MONITOR_INSN). Either way fail-closed and visible. A bare VMMCALL
+ *    with whatever was left in rax would instead be answered
+ *    STATUS_UNSUPPORTED by a stage 3 monitor and fall into the pause loop
+ *    below - a hung vault, not a retired one;
+ *  - not intercepted, VMMCALL is #UD, and the vault never runs past it.
+ *    Before KVM stage 4 that can still end in a loop or a shutdown rather
+ *    than a clean retire, but no code after the call runs.
  * The pause loop holds the vault if a VMMCALL is ever answered and
  * returns. pal_switch.S jumps here too.
  *
- * This covers the Gramine PAL only. The other runtimes that issue monitor
- * calls with their own inline CPUID (netsvc vault.h/mvchan.h, spdksvc
- * mv_hw.h, nvsvc deviceio.c, tools/fn/lib, the inference trustlet) still
- * accept a forged answer until they get the same check, so D8 is not
- * closed by this file alone. */
+ * This covers the Gramine PAL only; the other runtimes that issue monitor
+ * calls carry the same helper in MicroVault's tools/netsvc/src/mv_call.h
+ * and its guarded copies. */
 noreturn void monitor_call_forged(void) {
-    __asm__ volatile("vmmcall" ::: "memory");
+    __asm__ volatile("vmmcall" :: "a" (MONITOR_CALL_FORGED) : "memory");
     for (;;)
         __asm__ volatile("pause" ::: "memory");
 }

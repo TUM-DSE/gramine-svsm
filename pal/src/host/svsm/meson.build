@@ -8,6 +8,14 @@ pal_svsm_map = custom_target('pal.map[svsm]',
     output: 'pal.map',
 )
 
+# The instruction monitor calls are issued with (pal_monitor_call.c, and
+# pal_switch.S, which meson compiles with the same c_args). VMMCALL unless a
+# build has to run on a monitor that only knows CPUID calls.
+cflags_svsm_call_insn = []
+if get_option('svsm_call_insn') == 'cpuid'
+    cflags_svsm_call_insn += '-DPAL_SVSM_CALL_CPUID'
+endif
+
 libpal_svsm = shared_library('pal',
     'pal_console.c',
     'pal_devices.c',
@@ -43,6 +51,7 @@ libpal_svsm = shared_library('pal',
         cflags_custom_stack_protector,
         cflags_sanitizers,
         '-DHOST_TYPE=Svsm',
+        cflags_svsm_call_insn,
 
         # in Skeleton, every single parameter is unused
         '-Wno-unused-parameter',
