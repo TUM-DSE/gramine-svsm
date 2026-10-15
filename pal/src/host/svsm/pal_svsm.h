@@ -142,6 +142,14 @@ int pal_svsm_threading_init(PAL_HANDLE* out_first_thread);
 enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
                                                 const uint64_t* deadline_us);
 
+/* Whether a _PalThreadResume has landed on the RUNNING thread since it last
+ * blocked - i.e. the LibOS may have a signal for it - and the matching
+ * clear. Used by the preemption path (pal_exception.c), which is the only
+ * place a thread that never blocks can find out; a blocking call consumes
+ * the flag itself, in pal_svsm_thread_block. */
+bool pal_svsm_current_interrupted(void);
+void pal_svsm_current_clear_interrupted(void);
+
 /* Make every thread parked on `waiting_on` runnable. Safe to call with no
  * waiters. */
 void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on);

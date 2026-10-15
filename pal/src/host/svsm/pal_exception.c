@@ -23,10 +23,17 @@
  * That is the same division of labour as a Linux sigreturn, for the same
  * reason.
  *
- * What is NOT saved is the FPU and SSE state. Everything between the fault
- * and the return is the handler's own code, and `is_fpregs_used` is left
- * clear so nothing is told otherwise. A handler that wants to look at or
- * change the floating-point state of the interrupted code cannot yet.
+ * What is NOT saved for a FAULT is the FPU and SSE state. Everything
+ * between the fault and the return is the handler's own code, and
+ * `is_fpregs_used` is left clear so nothing is told otherwise. A handler
+ * that wants to look at or change the floating-point state of the
+ * interrupted code cannot yet.
+ *
+ * A PREEMPTION that delivers a signal is different, and does hand the LibOS
+ * the state (deliver_on_tick below): its handler typically RETURNS into the
+ * code it interrupted, and the frame the LibOS builds for that return is
+ * the only copy of the interrupted vector registers that survives the
+ * handler.
  */
 
 #include "api.h"
@@ -59,6 +66,82 @@ struct pal_svsm_preempt_ctl g_pal_svsm_preempt = {
 
 /* Whether the fault-return gate exists; see PAL_SVSM_CAP_RET_GATE. */
 uint8_t g_pal_svsm_ret_gate = 0;
+
+/*
+ * The extended-state area the trampoline fills, described the way Linux
+ * describes a signal frame's, so the LibOS will take it as a full XSAVE
+ * image rather than a legacy FXSAVE one.
+ *
+ * The LibOS decides that in is_xstate_extended
+ * (libos/src/arch/x86_64/libos_context.c:112-145): the software bytes at
+ * 464..511 of the legacy region must carry
+ * FP_XSTATE_MAGIC1, an xstate_size no larger than the CPUID 0xD.0 ECX it
+ * read itself, xfeatures inside CPUID 0xD.0 EDX:EAX, and FP_XSTATE_MAGIC2
+ * right after xstate_size bytes. Anything else and libos_xstate_copy
+ * (:170-189) copies 512 bytes and zeroes the software bytes - the upper
+ * halves of the YMM registers are then simply gone when the handler
+ * returns, and the interrupted code computes on whatever is in them.
+ *
+ * Both numbers come from the same CPUID leaves the LibOS reads (through
+ * the same instruction, so through the same monitor answer), once at init.
+ * xstate_size is the leaf's MAXIMUM (ECX), not the size for XCR0 (EBX):
+ * that is what the LibOS sized its frames with, and the bytes between what
+ * XSAVE wrote and ECX are never loaded - XRSTOR initialises any component
+ * whose XSTATE_BV bit is clear, and the trampoline zeroes the header before
+ * the save, so a component outside XCR0 has its bit clear.
+ *
+ * Zero means "do not describe it": no XSAVE, a size that does not fit the
+ * area with MAGIC2 behind it, or only FP/SSE (where the LibOS uses FXSAVE
+ * frames and would reject the magic anyway). Delivery then still happens,
+ * with fpregs NULL, which loses the vector state a returning handler would
+ * need - the behaviour before this existed, and still correct for a handler
+ * that exits.
+ */
+/* Must equal XSAVE_AREA_SIZE in arch/x86_64/pal_switch.S:77. */
+#define PAL_SVSM_XSAVE_AREA_SIZE 4096
+
+static uint32_t g_tick_xstate_size;
+static uint64_t g_tick_xstate_features;
+
+static void tick_xstate_init(void) {
+    unsigned int w[4];
+    cpuid(1, 0, w);
+    /* XSAVE (bit 26) and OSXSAVE (bit 27) of ECX, as libos_xstate_init. */
+    if (!(w[CPUID_WORD_ECX] & (1u << 26)) || !(w[CPUID_WORD_ECX] & (1u << 27)))
+        return;
+    cpuid(0xd, 0, w);
+    uint64_t features = w[CPUID_WORD_EAX] | ((uint64_t)w[CPUID_WORD_EDX] << 32);
+    uint32_t size = w[CPUID_WORD_ECX];
+    if (!(features & ~PAL_XFEATURE_MASK_FPSSE))
+        return;
+    if (size < sizeof(PAL_XREGS_STATE)
+            || size + PAL_FP_XSTATE_MAGIC2_SIZE > PAL_SVSM_XSAVE_AREA_SIZE) {
+        log_warning("xsave size %u does not fit the %u-byte delivery area; a signal "
+                    "delivered on a preemption will not carry the vector state",
+                    size, PAL_SVSM_XSAVE_AREA_SIZE);
+        return;
+    }
+    g_tick_xstate_size     = size;
+    g_tick_xstate_features = features;
+}
+
+/* Make the trampoline's save look like a Linux xsave frame, and point the
+ * context at it. The software bytes are not part of the XSAVE image (XSAVE
+ * neither reads nor writes 464..511) and MAGIC2 sits past every component
+ * this CPU has, so neither write changes what XRSTOR puts back. */
+static void describe_xstate(PAL_CONTEXT* context, void* xsave_area) {
+    if (!g_tick_xstate_size)
+        return;
+    PAL_XREGS_STATE* x = xsave_area;
+    x->fpstate.sw_reserved.magic1        = PAL_FP_XSTATE_MAGIC1;
+    x->fpstate.sw_reserved.extended_size = g_tick_xstate_size + PAL_FP_XSTATE_MAGIC2_SIZE;
+    x->fpstate.sw_reserved.xfeatures     = g_tick_xstate_features;
+    x->fpstate.sw_reserved.xstate_size   = g_tick_xstate_size;
+    memset(&x->fpstate.sw_reserved.padding, 0, sizeof(x->fpstate.sw_reserved.padding));
+    *(uint32_t*)((char*)xsave_area + g_tick_xstate_size) = PAL_FP_XSTATE_MAGIC2;
+    context->fpregs         = x;
+    context->is_fpregs_used = 1;
+}
 
 void pal_svsm_preempt_update(bool others_runnable) {
     __atomic_store_n(&g_pal_svsm_preempt.wanted, others_runnable ? 1 : 0,
@@ -115,6 +198,48 @@ noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CON
          * cooperation - the thing the cooperative scheduler could not do.
          */
         _PalThreadYieldExecution();
+
+        /*
+         * And then deliver what the yield made pending (next.md 170.4).
+         *
+         * While this thread was parked, the LibOS's async worker ran - it is
+         * a thread blocked on a deadline, which is exactly what keeps the
+         * tick armed (refresh_preempt_wanted, pal_threading.c) - saw an
+         * alarm() or setitimer() expire and queued SIGALRM, which reaches
+         * this thread as _PalThreadResume: the sticky `interrupted` flag.
+         * Before this, nothing looked at it except a blocking call, so a
+         * thread that waits for SIGALRM by COMPUTING - dhry2reg, hanoi,
+         * arith, `while (!done) ;` - spun until the invoke watchdog.
+         *
+         * The LibOS's interrupted upcall is the same one Gramine's Linux PAL
+         * calls on a host signal (libos_signal.c:519-529): it delivers only
+         * if the interrupted rip is application code, never inside the LibOS
+         * or the PAL, and otherwise returns having done nothing - then the
+         * syscall return or the next tick owes the delivery, so the flag is
+         * cleared only when the context was actually redirected. A signal
+         * whose default action kills does not return here at all.
+         *
+         * The vector state goes with it (describe_xstate): the handler may
+         * return, and then rt_sigreturn restores the interrupted code's
+         * registers from the frame built from this area.
+         */
+        if (pal_svsm_current_interrupted()) {
+            pal_event_handler_t upcall = _PalGetExceptionHandler(PAL_EVENT_INTERRUPTED);
+            if (upcall) {
+                uint64_t rip_before = context->rip;
+                describe_xstate(context, xsave_area);
+                upcall(rip_is_in_pal(context->rip), /*addr=*/0, context);
+                if (context->rip != rip_before)
+                    pal_svsm_current_clear_interrupted();
+                /* Not delivered: leave the context as the monitor built it,
+                 * so the fault path's "is_fpregs_used is clear" still holds
+                 * for anything that reads it later. */
+                else {
+                    context->fpregs         = NULL;
+                    context->is_fpregs_used = 0;
+                }
+            }
+        }
         pal_svsm_exception_resume(context, xsave_area);
     }
 
@@ -152,4 +277,6 @@ void pal_svsm_exception_init(void) {
      * was not given - `int $0x81` in a hosted vault is a #GP on the first
      * fault return - so the flag is set from the answer and nowhere else. */
     g_pal_svsm_ret_gate = (caps & PAL_SVSM_CAP_RET_GATE) ? 1 : 0;
+
+    tick_xstate_init();
 }

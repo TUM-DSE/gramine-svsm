@@ -703,6 +703,27 @@ int _PalThreadResume(PAL_HANDLE thread_handle) {
     return 0;
 }
 
+/*
+ * The sticky flag above, read and cleared for the thread that is running.
+ *
+ * A thread that blocks finds a pending signal through its wait returning
+ * PAL_SVSM_WAIT_INTERRUPTED, and the LibOS delivers it on the way out of the
+ * syscall. A thread that never blocks - dhry2reg's loop, UnixBench's hanoi
+ * and arith, anything that waits for SIGALRM by computing - never gets
+ * there, so the preemption path asks instead (next.md 170.4). Clearing is a
+ * separate call because the flag must survive a tick on which the signal
+ * could NOT be delivered (the thread was inside the LibOS): the blocking
+ * path or the next tick still owes it.
+ */
+bool pal_svsm_current_interrupted(void) {
+    return g_current && g_current->thread.interrupted;
+}
+
+void pal_svsm_current_clear_interrupted(void) {
+    if (g_current)
+        g_current->thread.interrupted = false;
+}
+
 enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
                                                 const uint64_t* deadline_us) {
     PAL_HANDLE self = g_current;
