@@ -272,6 +272,10 @@ static void idle_until(uint64_t deadline_us) {
         while (pal_svsm_now_usec() < until)
             __asm__ volatile("pause");
         pal_svsm_nop();
+        /* One round per slice spun here. A slice is at most
+         * SVSM_IDLE_SLICE_US, so the count bounds how long a client sat
+         * waiting for its peer with nowhere to give the processor back to. */
+        PAL_SVSM_NET_CTR_INC(idle_rounds);
         return;
     }
 }
@@ -301,6 +305,7 @@ static PAL_HANDLE pick_next(void) {
              * something is actually blocked in poll(). */
             if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
                     && pal_svsm_poller_ready(t)) {
+                PAL_SVSM_NET_CTR_INC(pollers_ready);
                 t->thread.waiting_on = NULL;
                 t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
                 pal_svsm_preempt_update(true);

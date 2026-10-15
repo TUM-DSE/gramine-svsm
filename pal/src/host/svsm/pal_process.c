@@ -45,6 +45,7 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
          * LibOS because the PAL is what knows which handles exist, and
          * nothing else in this process is running yet. */
         pal_svsm_pipes_after_fork();
+        pal_svsm_net_ctr_reset();
     }
     return 0;
 }
@@ -68,6 +69,7 @@ noreturn void _PalProcessExit(int exitcode) {
     /* Forward the real exit code: for binary-entrypoint trustlets it
        is the result the guest receives (monitor pal_svsm_exit ->
        rdx -> guest generic.values[1]). Was hardcoded -1. */
+    pal_svsm_net_ctr_report();
     pal_svsm_exit(exitcode);
     die_or_inf_loop();
 }

@@ -63,6 +63,36 @@ char     g_pal_svsm_net_name[32];
 uint64_t g_pal_svsm_net_endpoint;
 int      g_pal_svsm_net_protocol;
 
+struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
+
+/* One line, at exit, through the debug channel. log_always and not
+ * log_error: SeBS manifests set log_level = "error", and these are not
+ * errors, but they have to come out there too - LOG_LEVEL_NONE is the one
+ * level no manifest setting filters. A vault that never touched a socket
+ * or idled prints nothing, so ordinary vaults' output is unchanged. A vault
+ * the host deletes rather than one that exits never reaches here, and
+ * prints nothing either. */
+void pal_svsm_net_ctr_report(void) {
+    struct pal_svsm_net_ctr c;
+    c.sends         = __atomic_load_n(&g_pal_svsm_net_ctr.sends, __ATOMIC_RELAXED);
+    c.eagain_credit = __atomic_load_n(&g_pal_svsm_net_ctr.eagain_credit, __ATOMIC_RELAXED);
+    c.eagain_ring   = __atomic_load_n(&g_pal_svsm_net_ctr.eagain_ring, __ATOMIC_RELAXED);
+    c.idle_rounds   = __atomic_load_n(&g_pal_svsm_net_ctr.idle_rounds, __ATOMIC_RELAXED);
+    c.pollers_ready = __atomic_load_n(&g_pal_svsm_net_ctr.pollers_ready, __ATOMIC_RELAXED);
+    if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready))
+        return;
+    log_always("pal_net: sends %lu eagain_credit %lu eagain_ring %lu idle_rounds %lu "
+               "pollers_ready %lu", c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
+               c.pollers_ready);
+}
+
+/* A forked child has the parent's counts in its copy of this page; start
+ * it from zero so that each process's line is its own and the lines of a
+ * parent and its children add up. */
+void pal_svsm_net_ctr_reset(void) {
+    memset(&g_pal_svsm_net_ctr, 0, sizeof g_pal_svsm_net_ctr);
+}
+
 /* The frame header every message on a MUXED channel carries.
  *
  * Mirrored from tools/netsvc/src/mvmux.h - change one and change the other.
@@ -1591,8 +1621,10 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 ret = -PAL_ERROR_CONNFAILED;
                 break;
             }
-            if (nonblock)
+            if (nonblock) {
+                PAL_SVSM_NET_CTR_INC(eagain_credit);
                 break;
+            }
             /* Room is a CREDIT frame arriving, which arrives as a message like
              * any other - so wait on the peer's tail, and let the read path
              * route it. */
@@ -1616,6 +1648,7 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             pal_svsm_channel_notify(sock_widx(handle));
             if (sock_shares(handle))
                 handle->sock.tx_sent++;
+            PAL_SVSM_NET_CTR_INC(sends);
             *out_size = total;
             ret = 0;
             break;
@@ -1624,8 +1657,10 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             ret = -PAL_ERROR_CONNFAILED;
             break;
         }
-        if (nonblock)
+        if (nonblock) {
+            PAL_SVSM_NET_CTR_INC(eagain_ring);
             break;
+        }
 
         for (int i = 0; i < PAL_SOCK_SPINS && !pal_chan_writable(&out); i++)
             __asm__ volatile("pause");

@@ -188,6 +188,25 @@ extern int      g_pal_svsm_net_protocol;
 extern uint64_t g_pal_svsm_net_endpoint;
 void pal_svsm_poll_wake(void);
 
+/* What a socket client spent its sends on (NET-0c): whether a send went in,
+ * or came back EAGAIN at the service's credit window or at a full ring, and
+ * how often the scheduler idled or found a poller ready. Counts only - no
+ * timing - so they cost one locked add where they sit. Relaxed atomics
+ * because nothing orders on them and they are read once, at exit.
+ * Reported by pal_svsm_net_ctr_report() from _PalProcessExit. */
+struct pal_svsm_net_ctr {
+    uint64_t sends;
+    uint64_t eagain_credit;
+    uint64_t eagain_ring;
+    uint64_t idle_rounds;
+    uint64_t pollers_ready;
+};
+extern struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
+#define PAL_SVSM_NET_CTR_INC(field) \
+    ((void)__atomic_fetch_add(&g_pal_svsm_net_ctr.field, 1, __ATOMIC_RELAXED))
+void pal_svsm_net_ctr_report(void);
+void pal_svsm_net_ctr_reset(void);
+
 /* How long a wait that involves a SHARED pipe may sleep before looking
  * again, and whether a handle is one. Both the blocking read/write
  * (pal_pipes.c) and poll (pal_object.c) need the same answer: a shared
