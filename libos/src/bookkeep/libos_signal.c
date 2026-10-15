@@ -348,6 +348,26 @@ static void memfault_upcall(bool is_in_pal, uintptr_t addr, PAL_CONTEXT* context
         internal_fault("Internal memory fault", addr, context);
     }
 
+    /*
+     * A breakpoint (`int3`) in application code. The SVSM monitor has no
+     * PAL event for #BP and does not add one - an older PAL would index its
+     * handler table past the end with it - so it arrives as a memory fault
+     * with no address and the vector in trapno. Raise what Linux raises for
+     * int3: SIGTRAP, si_code SI_KERNEL, no address. #BP is a trap, so the
+     * context's rip is already past the 0xCC and a handler that returns
+     * resumes after it. No other PAL reports trapno 3 as a memory fault.
+     */
+    if (context->trapno == 3) {
+        log_debug("breakpoint at 0x%08lx", pal_context_get_ip(context));
+        siginfo_t info = {
+            .si_signo = SIGTRAP,
+            .si_code  = SI_KERNEL,
+        };
+        force_signal(&info);
+        handle_signal(context);
+        return;
+    }
+
     log_debug("memory fault at 0x%08lx (IP = 0x%08lx)", addr, pal_context_get_ip(context));
 
     siginfo_t info = {
