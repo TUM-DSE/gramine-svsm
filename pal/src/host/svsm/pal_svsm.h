@@ -200,6 +200,10 @@ struct pal_svsm_net_ctr {
     uint64_t eagain_ring;
     uint64_t idle_rounds;
     uint64_t pollers_ready;
+    uint64_t credit_lost;          /* a CREDIT frame found the ring full */
+    uint64_t credits_owed_retried; /* ... and a later attempt got it through */
+    uint64_t fin_lost;             /* a close's FIN found the ring full */
+    uint64_t fin_resent;           /* ... and was sent later */
 };
 extern struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
 #define PAL_SVSM_NET_CTR_INC(field) \

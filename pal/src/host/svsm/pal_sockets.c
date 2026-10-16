@@ -64,6 +64,7 @@ uint64_t g_pal_svsm_net_endpoint;
 int      g_pal_svsm_net_protocol;
 
 struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
+static int g_fin_owed_n;   /* see mux_fin_flush */
 
 /* One line, at exit, through the debug channel. log_always and not
  * log_error: SeBS manifests set log_level = "error", and these are not
@@ -79,11 +80,18 @@ void pal_svsm_net_ctr_report(void) {
     c.eagain_ring   = __atomic_load_n(&g_pal_svsm_net_ctr.eagain_ring, __ATOMIC_RELAXED);
     c.idle_rounds   = __atomic_load_n(&g_pal_svsm_net_ctr.idle_rounds, __ATOMIC_RELAXED);
     c.pollers_ready = __atomic_load_n(&g_pal_svsm_net_ctr.pollers_ready, __ATOMIC_RELAXED);
-    if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready))
+    c.credit_lost   = __atomic_load_n(&g_pal_svsm_net_ctr.credit_lost, __ATOMIC_RELAXED);
+    c.credits_owed_retried = __atomic_load_n(&g_pal_svsm_net_ctr.credits_owed_retried,
+                                             __ATOMIC_RELAXED);
+    c.fin_lost      = __atomic_load_n(&g_pal_svsm_net_ctr.fin_lost, __ATOMIC_RELAXED);
+    c.fin_resent    = __atomic_load_n(&g_pal_svsm_net_ctr.fin_resent, __ATOMIC_RELAXED);
+    if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready
+          | c.credit_lost | c.fin_lost))
         return;
     log_always("pal_net: sends %lu eagain_credit %lu eagain_ring %lu idle_rounds %lu "
-               "pollers_ready %lu", c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
-               c.pollers_ready);
+               "pollers_ready %lu credit_lost %lu credits_owed_retried %lu fin_lost %lu "
+               "fin_resent %lu", c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
+               c.pollers_ready, c.credit_lost, c.credits_owed_retried, c.fin_lost, c.fin_resent);
 }
 
 /* A forked child has the parent's counts in its copy of this page; start
@@ -91,6 +99,8 @@ void pal_svsm_net_ctr_report(void) {
  * parent and its children add up. */
 void pal_svsm_net_ctr_reset(void) {
     memset(&g_pal_svsm_net_ctr, 0, sizeof g_pal_svsm_net_ctr);
+    /* And the parent's owed FINs: its connections, its to send. */
+    g_fin_owed_n = 0;
 }
 
 /* The frame header every message on a MUXED channel carries.
@@ -460,15 +470,36 @@ static uint32_t mux_grant(PAL_HANDLE h) {
  * At once when the socket has nothing left coming, because then a message is
  * the only thing that will restart it; otherwise only when the window has
  * opened by two, so a steady stream costs one credit frame per two data frames
- * rather than one per one. A drop is harmless - the limit is cumulative. */
-static void mux_credit_maybe(PAL_HANDLE h) {
+ * rather than one per one.
+ *
+ * A credit that finds the ring full is NOT harmless, though the limit is
+ * cumulative. It is harmless only if another attempt follows, and when the
+ * socket is `blocked` the service is out of window and will send nothing more
+ * for it - so nothing on this socket will ever call here again, and its reader
+ * waits for a frame the service is waiting to be allowed to send. That was the
+ * concurrent-upload stall: three keep-alive connections from one vault, the
+ * other two filling the ring with 5 MiB bodies, and a connection's FIRST reply
+ * (two frames: headers, body, against a floor window of one) stopped after its
+ * headers until the client's timeout, in 12 of 15 calls on ryan. So a blocked
+ * socket's credit stays OWED (`mux_credit_owed`), and whoever is about to wait
+ * for that socket's input sends it first, or waits for ring room to send it
+ * (`mux_credit_settle`). */
+static bool mux_credit_due(PAL_HANDLE h, uint32_t* out_want) {
     if (!sock_shares(h) || !h->sock.conn_id)
-        return;
+        return false;
     uint32_t want = h->sock.rx_done + mux_grant(h);
     if (want == h->sock.rx_advert)
-        return;
+        return false;
     bool blocked = (int32_t)(h->sock.rx_advert - h->sock.rx_done) <= 3;
     if (!blocked && (int32_t)(want - h->sock.rx_advert) < 4)
+        return false;
+    *out_want = want;
+    return true;
+}
+
+static void mux_credit_maybe(PAL_HANDLE h) {
+    uint32_t want;
+    if (!mux_credit_due(h, &want))
         return;
     struct pal_chan_ring out;
     ring_for(h, NULL, &out);
@@ -489,8 +520,81 @@ static void mux_credit_maybe(PAL_HANDLE h) {
      * stalls is the service, and a stalled service is a running one - it has
      * data to send and is being dispatched. The client waits on data, which is
      * still notified. */
-    if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, &want, 4) == 0)
+    if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, &want, 4) == 0) {
         h->sock.rx_advert = want;
+        if (h->sock.credit_owed) {
+            h->sock.credit_owed = false;
+            PAL_SVSM_NET_CTR_INC(credits_owed_retried);
+        }
+    } else if (!h->sock.credit_owed) {
+        h->sock.credit_owed = true;
+        PAL_SVSM_NET_CTR_INC(credit_lost);
+    }
+}
+
+/* Owed: a credit this socket must get to the service before its reader can
+ * expect anything (see mux_credit_maybe). */
+static bool mux_credit_owed(PAL_HANDLE h) {
+    uint32_t want;
+    return h->sock.credit_owed && mux_credit_due(h, &want);
+}
+
+/* For a reader about to wait: send an owed credit, and if the ring is still
+ * full, return true with `*out_arm` set to the outbound ring's head - room is
+ * what the reader must wait for, because input cannot come before the credit
+ * has gone. */
+static bool mux_credit_settle(PAL_HANDLE h, uint64_t* out_arm) {
+    if (!mux_credit_owed(h))
+        return false;
+    mux_credit_maybe(h);
+    if (!mux_credit_owed(h))
+        return false;
+    struct pal_chan_ring out;
+    ring_for(h, NULL, &out);
+    *out_arm = pal_chan_arm(sock_widx(h), PAL_CHAN_ARM_HEAD, *out.peer_head);
+    return true;
+}
+
+/* A close's FIN that found the shared ring full, kept to be sent later.
+ *
+ * The close itself must not wait for room (one busy peer would hold every
+ * close), but a FIN that is simply dropped leaves the service holding the
+ * connection - its lwIP side open, the far end never told, one of the
+ * service's sessions used - until this vault exits. The same failure as a
+ * dropped CREDIT, one frame over. So it is queued here and sent by the next
+ * thing that uses the channel: a send, a read, a poll, another close.
+ * Safe late: the service matches the WHOLE id, generation included
+ * (relay.c conn_of), so a FIN for a connection it has already ended, or a
+ * new connection in the same slot, touches nothing. One past the queue's
+ * 32 is not resent - the vault's exit still ends it. fin_lost counts every
+ * FIN that found the ring full, fin_resent the ones sent later. */
+#define PAL_MUX_FIN_OWED 32
+static uint32_t g_fin_owed[PAL_MUX_FIN_OWED];
+
+static bool mux_fin_send(uint32_t id) {
+    struct pal_chan_ring out;
+    pal_chan_ring_init(&out, g_pal_svsm_mux_win, g_pal_svsm_mux_side, /*producing=*/1);
+    struct pal_mvmux_hdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.conn = id;
+    mh.op   = PAL_MVMUX_OP_FIN;
+    if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, NULL, 0) != 0)
+        return false;
+    pal_svsm_channel_notify(g_pal_svsm_mux_widx);
+    return true;
+}
+
+static void mux_fin_flush(void) {
+    int sent = 0;
+    while (sent < g_fin_owed_n && g_pal_svsm_mux_open && mux_fin_send(g_fin_owed[sent]))
+        sent++;
+    if (!sent)
+        return;
+    for (int i = sent; i < g_fin_owed_n; i++)
+        g_fin_owed[i - sent] = g_fin_owed[i];
+    g_fin_owed_n -= sent;
+    for (int i = 0; i < sent; i++)
+        PAL_SVSM_NET_CTR_INC(fin_resent);
 }
 
 /*
@@ -1532,6 +1636,8 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
         return -PAL_ERROR_NOTCONNECTION;
     if (handle->sock.broken)
         return -PAL_ERROR_DENIED;
+    if (g_fin_owed_n && sock_shares(handle))
+        mux_fin_flush();
 
     struct pal_chan_ring out;
     ring_for(handle, NULL, &out);
@@ -1649,6 +1755,11 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             if (sock_shares(handle))
                 handle->sock.tx_sent++;
             PAL_SVSM_NET_CTR_INC(sends);
+            /* The ring took a frame, so it may take this socket's owed
+             * credit too - the reader would otherwise send it only when
+             * it next waits. */
+            if (handle->sock.credit_owed)
+                mux_credit_maybe(handle);
             *out_size = total;
             ret = 0;
             break;
@@ -1708,6 +1819,8 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
     ring_for(handle, &in, NULL);
     if (!pal_chan_present(&in))
         return -PAL_ERROR_NOTSUPPORT;
+    if (g_fin_owed_n && sock_shares(handle))
+        mux_fin_flush();
 
     bool nonblock = force_nonblocking || handle->sock.is_nonblocking;
     uint64_t room = iov_total(iov, iov_len);
@@ -1891,8 +2004,11 @@ mux_blocked:
         uint32_t seen = *in.peer_tail;
         if (seen != *in.head)
             continue;                        /* it moved while we looked */
-        uint64_t arm = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, seen);
-        if (pal_svsm_sleep_arms(&arm, 1, PAL_SOCK_PARK_US) < 0)
+        uint64_t arms[2];
+        arms[0] = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, seen);
+        /* An owed credit first: until it is out nothing will arrive. */
+        uint64_t n_arms = 1 + mux_credit_settle(handle, &arms[1]);
+        if (pal_svsm_sleep_arms(arms, n_arms, PAL_SOCK_PARK_US) < 0)
             for (int i = 0; i < PAL_SOCK_SPINS; i++)
                 __asm__ volatile("pause");
     }
@@ -1918,6 +2034,10 @@ int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_ar
     struct pal_chan_ring in, out;
     ring_for(handle, &in, &out);
     if ((want & PAL_WAIT_READ) && !pal_svsm_sock_readable(handle)) {
+        /* An owed credit that still cannot be sent: wait for ROOM, then the
+         * poll looks again and this sends it (mux_credit_settle). */
+        if (mux_credit_settle(handle, out_arm))
+            return 1;
         *out_arm = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, *in.peer_tail);
         return 1;
     }
@@ -2015,6 +2135,13 @@ bool pal_svsm_sock_readable(PAL_HANDLE handle) {
     if (sock_shares(handle)) {
         if (mux_poll_route(handle, &in))
             return true;
+        /* Not readable, and perhaps only because a credit is owed: every
+         * re-test of a waiting poller is a chance to send it - and any FIN
+         * a close could not send. */
+        if (mux_credit_owed(handle))
+            mux_credit_maybe(handle);
+        if (g_fin_owed_n)
+            mux_fin_flush();
         /* The head is not this socket's, so there is nothing here it could
          * read - `pal_chan_readable` would say yes about somebody else's
          * message and the read that followed would answer EAGAIN. */
@@ -2225,15 +2352,16 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
          * The FIN is best-effort. If the ring is full the service finds out
          * when the vault exits and its channel goes; dropping the socket here
          * and blocking to announce it would let one busy peer hold a close. */
+        /* A credit still owed dies with the connection: the FIN below is
+         * all the service needs to hear, and nobody will read again. */
+        handle->sock.credit_owed = false;
         if (handle->sock.conn_id && g_pal_svsm_mux_open) {
-            struct pal_chan_ring out;
-            ring_for(handle, NULL, &out);
-            struct pal_mvmux_hdr mh;
-            memset(&mh, 0, sizeof mh);
-            mh.conn = handle->sock.conn_id;
-            mh.op   = PAL_MVMUX_OP_FIN;
-            if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, NULL, 0) == 0)
-                pal_svsm_channel_notify(g_pal_svsm_mux_widx);
+            mux_fin_flush();             /* older FINs first */
+            if (!mux_fin_send(handle->sock.conn_id)) {
+                PAL_SVSM_NET_CTR_INC(fin_lost);
+                if (g_fin_owed_n < PAL_MUX_FIN_OWED)
+                    g_fin_owed[g_fin_owed_n++] = handle->sock.conn_id;
+            }
         }
         pal_svsm_mux_release(handle->sock.conn_id);
         handle->sock.conn_id = 0;

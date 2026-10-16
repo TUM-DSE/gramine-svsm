@@ -224,6 +224,7 @@ struct pal_handle_inner {
             /* And the window it RESPECTS, for frames going up. */
             uint32_t tx_sent;       /* DATA frames sent, cumulative */
             uint32_t tx_limit;      /* the limit the service advertised */
+            bool     credit_owed;   /* a CREDIT frame found the ring full */
             bool     bound;
             bool     listening;
             unsigned int backlog;
