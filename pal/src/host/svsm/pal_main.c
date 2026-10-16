@@ -388,21 +388,22 @@ noreturn void pal_svsm_main(void)
      * 0xE7, and the monitor answers CPUID leaf 0xD and leaf 7 for the XCR0
      * its VMSA has. So this is asked here, before the LibOS and glibc read
      * either; the one reader before it, the preemption save area, reads
-     * again. Refused, not ignored, on a hosted vault or a host without
+     * again. Asked ALWAYS, 0 when the manifest does not ask for 1: the
+     * monitor takes the zygote's first answer as the decision and refuses
+     * any later call, so nothing that runs after this point can change
+     * the ISA. Refused, not ignored, on a hosted vault or a host without
      * AVX-512: the vault fails rather than run as an image it is not.
      */
-    if (manifest_svsm_early) {
-        toml_table_t* avx512 = toml_table_in(manifest_svsm_early, "avx512");
-        if (avx512) {
-            bool enabled = false;
-            if (toml_bool_in(avx512, "enabled", false, &enabled) < 0)
-                pal_svsm_fail("svsm.avx512.enabled is not a boolean", 0);
-            if (enabled) {
-                if (pal_svsm_avx512_declare(1) < 0)
-                    pal_svsm_fail("svsm.avx512: the monitor refused the declaration", 0);
-                pal_svsm_xstate_refresh();
-            }
-        }
+    {
+        bool avx512_on = false;
+        toml_table_t* avx512 = manifest_svsm_early
+                               ? toml_table_in(manifest_svsm_early, "avx512") : NULL;
+        if (avx512 && toml_bool_in(avx512, "enabled", false, &avx512_on) < 0)
+            pal_svsm_fail("svsm.avx512.enabled is not a boolean", 0);
+        if (pal_svsm_avx512_declare(avx512_on ? 1 : 0) < 0 && avx512_on)
+            pal_svsm_fail("svsm.avx512: the monitor refused the declaration", 0);
+        if (avx512_on)
+            pal_svsm_xstate_refresh();
     }
 
     /* What the APPS on this base image may claim in their own frames -
