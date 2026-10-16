@@ -305,6 +305,22 @@ int pal_svsm_jit_declare(uint64_t want) {
     return data.rcx == 0 ? 0 : -1;
 }
 
+/* Avx512Declare (0x4FFFFFDA): rbx = 1 to run this lineage at XCR0 0xE7
+ * -> rcx = 0 accepted, the monitor having changed this zygote's VMSA before
+ * it returned. Zygote only, from the measured manifest; refused (not
+ * ignored) when the vault is hosted or the host's CPUID table did not pass
+ * the AVX-512 check, because an image that asked for AVX-512 and ran
+ * without it is not the image its digest describes. */
+int pal_svsm_avx512_declare(uint64_t want) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFDA;
+    data.rbx = want;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return data.rcx == 0 ? 0 : -1;
+}
+
 /* ChannelPolicy (0x4FFFFFE0): rbx = the record, rcx = its length.
  * -> rcx = 0, or a negative status. Once per lineage, from the zygote. */
 int64_t pal_svsm_channel_policy(const void* record, uint64_t len) {

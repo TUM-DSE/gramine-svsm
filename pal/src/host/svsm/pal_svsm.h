@@ -52,6 +52,9 @@ uint64_t pal_svsm_now_usec(void);
  * comment at the top of that file.
  */
 void pal_svsm_exception_init(void);
+/* Read leaf 0xD again for the preemption save area, after Avx512Declare
+ * changed this vault's XCR0. */
+void pal_svsm_xstate_refresh(void);
 void pal_svsm_set_text_range(uintptr_t start, uintptr_t end);
 
 /*

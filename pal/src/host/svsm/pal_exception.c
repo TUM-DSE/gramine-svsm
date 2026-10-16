@@ -125,6 +125,12 @@ static void tick_xstate_init(void) {
     g_tick_xstate_features = features;
 }
 
+void pal_svsm_xstate_refresh(void) {
+    g_tick_xstate_size     = 0;
+    g_tick_xstate_features = 0;
+    tick_xstate_init();
+}
+
 /* Make the trampoline's save look like a Linux xsave frame, and point the
  * context at it. The software bytes are not part of the XSAVE image (XSAVE
  * neither reads nor writes 464..511) and MAGIC2 sits past every component
