@@ -124,6 +124,31 @@ int64_t install_async_event(PAL_HANDLE object, uint64_t time_us,
     return max_prev_expire_time_us - now_us;
 }
 
+/*
+ * In a copy-on-write fork's child: no async worker, and nothing for one to do.
+ *
+ * The state was copied from the parent and said WORKER_ALIVE, but the worker
+ * is one of the parent's threads and does not run here
+ * (pal_svsm_threads_child_after_fork) - so an alarm set in the child was
+ * queued for a thread that would never look, and never fired. What was queued
+ * is the parent's: its alarms and timers, which a child does not inherit (on
+ * Linux either), and the clean-up of threads that exited in the parent. The
+ * next install_async_event starts a worker of the child's own.
+ *
+ * The wake-up event is kept as it is. It is a pipe on this process's heap
+ * (create_pollable_event asks for no sharing), so the child's copy is its own
+ * and nobody else reads it. It is not drained here: that takes the event's
+ * read lock, which the parent's worker may have held at the copy, and a byte
+ * it had not yet consumed only costs the child's new worker one spurious
+ * pass. The queued events are dropped without being freed or run, as the
+ * copied threads are.
+ */
+void async_worker_after_cow_fork(void) {
+    async_worker_state  = WORKER_NOTALIVE;
+    async_worker_thread = NULL;
+    INIT_LISTP(&async_list);
+}
+
 int init_async_worker(void) {
     /* early enough in init, can write global vars without the lock */
     async_worker_state = WORKER_NOTALIVE;

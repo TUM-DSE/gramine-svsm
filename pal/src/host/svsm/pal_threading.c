@@ -623,6 +623,43 @@ int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param) {
     return 0;
 }
 
+/*
+ * In a copy-on-write fork's child, right after the fork: the forker is the
+ * only thread.
+ *
+ * Every other context on the ring is a copy of one of the PARENT's threads -
+ * its stack, its registers, its place in whatever it was doing - and the ring
+ * is this process's own memory, so the copy was runnable here. It ran: a
+ * parent thread blocked in a read went on reading in the child too, a worker
+ * went on working, and the LibOS's exit and exec waited on them as its own
+ * (kill_other_threads). POSIX's fork gives the child the calling thread and
+ * nothing else, and so does this, before the child can pick anything else
+ * to run - it is called on the forker's way out of the fork.
+ *
+ * Unlinked, not freed: the stacks are copies nobody will run on again, and a
+ * leak of them is cheaper than being wrong about who still points into one.
+ * A copy cannot be holding a PAL lock either: PAL text is never preempted,
+ * and the one PAL lock a thread waits under (an event's) is let go before it
+ * blocks. LibOS locks were drained before the fork (pal_svsm_fork_quiesce).
+ */
+void pal_svsm_threads_child_after_fork(void) {
+    PAL_HANDLE self = g_current;
+    if (!self)
+        return;
+    PAL_HANDLE t = self->thread.next;
+    while (t && t != self) {
+        PAL_HANDLE next = t->thread.next;
+        t->thread.next  = NULL;
+        /* Anything that still finds this handle - nothing should - finds a
+         * thread that has ended, which _PalThreadResume leaves alone. */
+        t->thread.state = PAL_SVSM_THREAD_ZOMBIE;
+        t = next;
+    }
+    self->thread.next = self;
+    g_thread_cnt = 1;
+    refresh_preempt_wanted();
+}
+
 void _PalThreadYieldExecution(void) {
     /* Before threading is up - and it is up before anything can block - there
      * is nothing to yield to. CPU_RELAX lands here from very early code. */

@@ -181,6 +181,12 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
 
     if (child_id == 0) {
         /* ---- the child ---- */
+        /* Before anything else looks at threads: the parent's others are
+         * copies that will never run here (the PAL took them off its ring on
+         * the way out of the fork), and its async worker is one of them. */
+        threads_after_cow_fork();
+        async_worker_after_cow_fork();
+
         rwlock_write_lock(&g_process_id_lock);
         g_process.ppid = g_process.pid;
         g_process.pid  = (IDTYPE)self_id;

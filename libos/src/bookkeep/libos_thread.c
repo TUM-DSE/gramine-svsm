@@ -470,6 +470,34 @@ bool check_last_thread(bool mark_self_dead) {
     return ret;
 }
 
+/*
+ * In a copy-on-write fork's child: take every thread but the caller off the
+ * list.
+ *
+ * They are the parent's threads, copied with the rest of its memory, and the
+ * PAL has already taken their contexts off its ring
+ * (pal_svsm_threads_child_after_fork) - so in this process they will never
+ * run again. Left on the list they were waited for as if they would: exit and
+ * exec mark every thread on it to die and wait until it has
+ * (kill_other_threads), signals were routed to them, and their tids - the
+ * PARENT's - were released into this process's id ranges when they went.
+ *
+ * Not put: each reference, each tid and each PAL handle they hold is a copy of
+ * the parent's, and giving one back here gives back something this process
+ * never had. Their memory is a copy too, so leaving it is a leak of a copy.
+ * No lock: the caller is the only thread there is, and a lock copied held is
+ * what pal_svsm_fork_quiesce drained before the fork.
+ */
+void threads_after_cow_fork(void) {
+    struct libos_thread* self = get_cur_thread();
+    struct libos_thread* tmp;
+    struct libos_thread* n;
+    LISTP_FOR_EACH_ENTRY_SAFE(tmp, n, &g_thread_list, list) {
+        if (tmp != self)
+            LISTP_DEL_INIT(tmp, &g_thread_list, list);
+    }
+}
+
 /* This function is called by async worker thread to wait on thread->clear_child_tid_pal to be
  * zeroed (PAL does it when thread finally exits). Since it is a callback to async worker thread,
  * this function must follow the `void (*callback) (IDTYPE caller, void* arg)` signature. */

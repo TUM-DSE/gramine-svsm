@@ -63,6 +63,8 @@ int init_async_worker(void);
 int64_t install_async_event(PAL_HANDLE object, unsigned long time,
                             void (*callback)(IDTYPE caller, void* arg), void* arg);
 struct libos_thread* terminate_async_worker(void);
+/* In a copy-on-write fork's child: no worker, no timers (libos_async.c). */
+void async_worker_after_cow_fork(void);
 
 extern const toml_table_t* g_manifest_root;
 

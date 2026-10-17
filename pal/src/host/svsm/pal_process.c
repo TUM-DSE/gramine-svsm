@@ -57,6 +57,9 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
     *out_child = rc;
     if (rc == 0) {
         *out_self = self;               /* we are the child; this is us */
+        /* First, before anything here can switch: the parent's other
+         * threads are copies on this process's ring and must not run. */
+        pal_svsm_threads_child_after_fork();
         /* This process's holds on the shared pipes were counted by the
          * parent before the copy, so there is nothing to add here - only the
          * pending connections of threads that did not come along to drop. */

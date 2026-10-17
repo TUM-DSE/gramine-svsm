@@ -248,6 +248,8 @@ extern bool g_pal_svsm_pipes_shared;
 void pal_svsm_pipes_fork_hold(int delta);
 /* In the child: forget the copied pending connections, unreleased. */
 void pal_svsm_pipes_child_after_fork(void);
+/* The forker is the child's only thread (pal_threading.c). */
+void pal_svsm_threads_child_after_fork(void);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
 bool   pal_svsm_pipe_peer_gone(PAL_HANDLE handle);
 bool   pal_svsm_sock_peer_gone(PAL_HANDLE handle);
