@@ -140,3 +140,65 @@ static void event_destroy(PAL_HANDLE handle) {
 struct handle_ops g_event_ops = {
     .destroy = event_destroy,
 };
+
+/*
+ * LibOS lock holds, counted for the fork (pal.h PalLockHold).
+ *
+ * A CoW fork copies this address space at one instant, and any lock another
+ * context held then is held for ever in the child - whose first acts are to
+ * take g_process_id_lock, and then, on the way to execve, the handle maps,
+ * the vma tree and the dcache. So _PalProcessFork waits until every other
+ * context's holds have drained (pal_svsm_fork_quiesce).
+ *
+ * Counted HERE, in PAL code, because the monitor never preempts PAL text: a
+ * context cannot be switched out between deciding to take a hold and
+ * counting it, and the fork's last look at the count and its monitor call
+ * have nothing in between that could yield. The LibOS counts a hold before
+ * acquiring and gives it back after releasing, so a hold is counted for at
+ * least as long as the lock is held.
+ *
+ * A context that holds nothing waits out a fork in progress before its first
+ * hold, so the drain cannot be refilled; one that already holds some goes
+ * on, because it can only drain by finishing - which also answers nested
+ * locks: blocked on B while holding A, it is counted, and drains once it has
+ * B and lets go of both. If B is the FORKER's, nothing drains; the fork then
+ * goes ahead after the wait (pal_svsm_fork_quiesce's bound) with the holds it
+ * could not wait out, logs it, and tells the monitor, which counts it
+ * (GetStat FORK_FOREIGN_HOLDS) - never a silent fallback, never a deadlocked
+ * parent.
+ */
+static int64_t g_lock_holds;           /* every context's, together */
+static PAL_HANDLE g_forking;           /* the context in a fork, or NULL */
+
+int64_t _PalLockHold(int64_t* word, int64_t delta) {
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    if (delta > 0 && tcb->lock_holds == 0) {
+        while (__atomic_load_n(&g_forking, __ATOMIC_ACQUIRE)
+               && __atomic_load_n(&g_forking, __ATOMIC_ACQUIRE) != tcb->handle)
+            _PalThreadYieldExecution();
+    }
+    int64_t old = word ? __atomic_fetch_add(word, delta, __ATOMIC_SEQ_CST) : 0;
+    int64_t one = delta > 0 ? 1 : -1;
+    tcb->lock_holds += one;
+    __atomic_add_fetch(&g_lock_holds, one, __ATOMIC_SEQ_CST);
+    return old;
+}
+
+/* Until no other context holds a lock, or `max_us` has passed. Returns the
+ * other contexts' holds left (0 = drained). Leaves the gate raised for
+ * pal_svsm_fork_done. */
+int64_t pal_svsm_fork_quiesce(uint64_t max_us) {
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    __atomic_store_n(&g_forking, tcb->handle, __ATOMIC_SEQ_CST);
+    uint64_t until = pal_svsm_now_usec() + max_us;
+    int64_t foreign;
+    while ((foreign = __atomic_load_n(&g_lock_holds, __ATOMIC_SEQ_CST) - tcb->lock_holds) > 0
+           && pal_svsm_now_usec() < until)
+        _PalThreadYieldExecution();
+    return foreign;
+}
+
+/* Both sides of a fork, after it. */
+void pal_svsm_fork_done(void) {
+    __atomic_store_n(&g_forking, NULL, __ATOMIC_SEQ_CST);
+}

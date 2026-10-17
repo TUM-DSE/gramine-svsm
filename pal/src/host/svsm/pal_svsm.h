@@ -29,12 +29,18 @@ typedef struct pal_svsm_tcb {
         uint64_t   alt_stack_size;
         int        (*callback)(void*);
         void*      param;
+        /* LibOS lock holds this context has counted (_PalLockHold). */
+        int64_t    lock_holds;
     };
 } PAL_SVSM_TCB;
 
 static inline PAL_SVSM_TCB* pal_get_svsm_tcb(void) {
     return (PAL_SVSM_TCB*)pal_get_tcb();
 }
+
+/* The fork's wait for other contexts' LibOS lock holds (pal_events.c). */
+int64_t pal_svsm_fork_quiesce(uint64_t max_us);
+void pal_svsm_fork_done(void);
 
 /*
  * Time (pal_misc.c). A vault has no clock: no RTC, no kvm-clock, no timer

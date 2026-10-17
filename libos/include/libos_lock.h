@@ -14,7 +14,6 @@
 #include "pal.h"
 
 static inline bool lock_created(struct libos_lock* l) {
-    return true;
     return l->lock != NULL;
 }
 
@@ -33,20 +32,39 @@ static inline void destroy_lock(struct libos_lock* l) {
     clear_lock(l);
 }
 
+/*
+ * Real locks again. c8faaf17 ("update locks", 2025-01) made lock() and
+ * unlock() no-ops - correct while the SVSM PAL ran one context and nothing
+ * could interrupt LibOS code, and while _PalEventWait could not block. Both
+ * have changed: the PAL schedules several contexts and the monitor's tick
+ * preempts the LibOS anywhere outside the PAL's own text (signals.rs), on
+ * the assumption that the LibOS "holds real locks", and _PalEventWait parks
+ * a context until _PalEventSet. With no-op locks a tick between two list
+ * operations corrupted `async_list` (libos_async.c): a cleanup event freed
+ * while still linked, re-found by the async worker on every pass - the
+ * vault_threads livelock, about 1 vault in 30 (2026-10-17).
+ */
+/*
+ * Each hold is also counted by the PAL (PalLockHold), before the wait and
+ * after the release, so that a CoW fork can wait until no other thread holds
+ * a lock - a lock held by another thread at the instant memory is copied would
+ * be held for ever in the child.
+ */
 static inline void lock(struct libos_lock* l) {
-    //assert(l->lock);
+    assert(l->lock);
 
-    //while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
+    PalLockHold(NULL, 1);
+    while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
         /* nop */;
 
     l->owner = get_cur_tid();
 }
 
 static inline void unlock(struct libos_lock* l) {
-    //assert(l->lock);
-    return;
+    assert(l->lock);
     l->owner = 0;
     PalEventSet(l->lock);
+    PalLockHold(NULL, -1);
 }
 
 #ifdef DEBUG

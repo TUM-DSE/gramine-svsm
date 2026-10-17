@@ -211,3 +211,8 @@ static void event_destroy(PAL_HANDLE handle) {
 struct handle_ops g_event_ops = {
     .destroy = event_destroy,
 };
+
+/* No fork that copies memory on this host, so nothing to count: only the add. */
+int64_t _PalLockHold(int64_t* word, int64_t delta) {
+    return word ? __atomic_fetch_add(word, delta, __ATOMIC_SEQ_CST) : 0;
+}

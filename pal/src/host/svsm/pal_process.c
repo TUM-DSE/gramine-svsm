@@ -27,8 +27,20 @@ int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
 
 int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
     uint64_t self = 0;
-    uint64_t rc = pal_svsm_fork(flags & PAL_PROCESS_FORK_RESIDENT
-                                ? PAL_SVSM_FORK_RESIDENT : 0, &self);
+    /* No other context may hold a LibOS lock at the instant the address
+     * space is copied (pal_events.c). Nothing between the last look at the
+     * count and the monitor call can yield, so nothing can take one in
+     * between. 100 ms is far beyond any critical section; a fork that waits
+     * that long is waiting on itself (another context blocked on a lock the
+     * forker holds), so it goes ahead and says so. */
+    int64_t foreign = pal_svsm_fork_quiesce(100 * 1000);
+    if (foreign > 0)
+        log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - forking "
+                    "anyway; the child may block on them", foreign);
+    uint64_t fflags = (flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0)
+                      | (foreign > 0 ? PAL_SVSM_FORK_FOREIGN_HOLDS : 0);
+    uint64_t rc = pal_svsm_fork(fflags, &self);
+    pal_svsm_fork_done();
     /* UINT64_MAX is the one answer that is neither a parent nor a child.
      * It has to be checked here: a failed fork returns ONCE, and a caller
      * that only looks for zero would carry on as the parent of a child that

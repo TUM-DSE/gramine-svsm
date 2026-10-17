@@ -17,6 +17,13 @@
 #ifdef IN_LIBOS
 /* Forward declare, so this header stays standalone. */
 static inline unsigned int get_cur_tid(void);
+/* pal.h's: a LibOS spinlock held is a hold the PAL counts, so a CoW fork can
+ * wait until no other thread holds one (libos_lock.h). Not the PAL's own
+ * spinlocks: the PAL is never preempted, and never forks inside one. */
+long PalLockHold(long* word, long delta);
+#define SPINLOCK_HOLD(d) PalLockHold((long*)0, (d))
+#else
+#define SPINLOCK_HOLD(d) ((void)0)
 
 #ifdef DEBUG_SPINLOCKS
 #define DEBUG_SPINLOCKS_LIBOS
@@ -84,6 +91,8 @@ static inline void spinlock_init(spinlock_t* lock) {
 static inline void spinlock_lock(spinlock_t* lock) {
     uint32_t val;
 
+    SPINLOCK_HOLD(1);
+
     /* First check if lock is already free. */
     if (__atomic_exchange_n(&lock->lock, SPINLOCK_LOCKED, __ATOMIC_ACQUIRE) == SPINLOCK_UNLOCKED) {
         goto out;
@@ -114,6 +123,8 @@ out:
 static inline bool spinlock_lock_timeout(spinlock_t* lock, unsigned long iterations) {
     uint32_t val;
 
+    SPINLOCK_HOLD(1);
+
     /* First check if lock is already free. */
     if (__atomic_exchange_n(&lock->lock, SPINLOCK_LOCKED, __ATOMIC_ACQUIRE) == SPINLOCK_UNLOCKED) {
         goto out_success;
@@ -123,6 +134,7 @@ static inline bool spinlock_lock_timeout(spinlock_t* lock, unsigned long iterati
         /* This check imposes no inter-thread ordering, thus does not slow other threads. */
         while (__atomic_load_n(&lock->lock, __ATOMIC_RELAXED) != SPINLOCK_UNLOCKED) {
             if (iterations == 0) {
+                SPINLOCK_HOLD(-1);
                 return false;
             }
             iterations--;
@@ -159,6 +171,7 @@ static inline int spinlock_cmpxchg(spinlock_t* lock, uint32_t* expected, uint32_
 static inline void spinlock_unlock(spinlock_t* lock) {
     debug_spinlock_giveup_ownership(lock);
     __atomic_store_n(&lock->lock, SPINLOCK_UNLOCKED, __ATOMIC_RELEASE);
+    SPINLOCK_HOLD(-1);
 }
 
 #ifdef DEBUG_SPINLOCKS

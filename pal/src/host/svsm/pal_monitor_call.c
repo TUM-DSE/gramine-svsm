@@ -471,6 +471,25 @@ void pal_svsm_debug_putc(char c){
     monitor_call(&data);
 }
 
+/* Up to 32 bytes of a debug line in one call: rcx tagged 0x5052_0000 | n,
+ * the bytes little-endian in rbx, rdx, r8, r9 (print.rs). A 0 byte among
+ * them ends the line. One call per 32 bytes instead of one per character -
+ * each is a VMPL round trip. */
+void pal_svsm_debug_write(const uint8_t* bytes, size_t n) {
+    uint64_t w[4] = { 0, 0, 0, 0 };
+    if (n > 32)
+        n = 32;
+    memcpy(w, bytes, n);
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFFD;
+    data.rbx = w[0];
+    data.rcx = 0x50520000ul | n;
+    data.rdx = w[1];
+    data.r8  = w[2];
+    data.r9  = w[3];
+    monitor_call(&data);
+}
+
 
 int pal_svsm_virt_alloc(void* addr, uint64_t size, pal_prot_flags_t flags){
     struct monitor_call_data data;

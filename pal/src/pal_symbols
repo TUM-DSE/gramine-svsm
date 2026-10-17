@@ -16,6 +16,7 @@ PalEventCreate
 PalEventSet
 PalEventClear
 PalEventWait
+PalLockHold
 PalStreamsWaitEvents
 PalStreamOpen
 PalStreamRead

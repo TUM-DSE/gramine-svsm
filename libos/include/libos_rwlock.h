@@ -56,15 +56,17 @@ void rwlock_destroy(struct libos_rwlock* l);
 void rwlock_read_lock_slow_path(struct libos_rwlock* l);
 void rwlock_read_unlock_slow_path(struct libos_rwlock* l);
 
+/* A reader's hold IS its add to `state`, so the PAL makes the add and counts
+ * the hold in one step (PalLockHold), for the fork (libos_lock.h). */
 static inline void rwlock_read_lock(struct libos_rwlock* l) {
-    int64_t state = __atomic_fetch_add(&l->state, 1, __ATOMIC_ACQUIRE);
+    int64_t state = PalLockHold(&l->state, 1);
     if (state < 0) {
         rwlock_read_lock_slow_path(l);
     }
 }
 
 static inline void rwlock_read_unlock(struct libos_rwlock* l) {
-    int64_t state = __atomic_sub_fetch(&l->state, 1, __ATOMIC_RELEASE);
+    int64_t state = PalLockHold(&l->state, -1) - 1;
     if (state < 0) {
         rwlock_read_unlock_slow_path(l);
     }

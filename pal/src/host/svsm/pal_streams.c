@@ -25,9 +25,21 @@ int _PalInitDebugStream(const char* path) {
 
 int _PalDebugLog(const void* buf, size_t size) {
 
+    /* 32 bytes a call, the terminating 0 in the last one (or a call of its
+     * own when the line fills its last chunk exactly). */
     const uint8_t* log_string = buf;
-    for(size_t i = 0; i < size; i++){
-        pal_svsm_debug_putc(log_string[i]);
+    uint8_t chunk[32];
+    size_t i = 0;
+    while (i < size) {
+        size_t n = size - i < 32 ? size - i : 32;
+        memcpy(chunk, log_string + i, n);
+        i += n;
+        if (i == size && n < 32) {
+            chunk[n] = 0;
+            pal_svsm_debug_write(chunk, n + 1);
+            return 0;
+        }
+        pal_svsm_debug_write(chunk, n);
     }
     pal_svsm_debug_putc(0);
     return 0;

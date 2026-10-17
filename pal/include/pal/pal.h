@@ -1057,6 +1057,27 @@ void PalEventClear(PAL_HANDLE handle);
  */
 int PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us);
 
+/*!
+ * \brief Count a LibOS lock hold, so that a fork can wait until no other thread holds one.
+ *
+ * \param word   If not NULL, \p delta is added to `*word` (an atomic fetch-add, sequentially
+ *               consistent) in the same step - the reader fast path of an rwlock, whose hold IS
+ *               that add. NULL counts a hold only (a mutex taken around it, a spinlock).
+ * \param delta  > 0 takes a hold, < 0 gives it back.
+ *
+ * \returns the previous value of `*word`, or 0 when \p word is NULL.
+ *
+ * Called with \p delta > 0 BEFORE the lock is acquired and with < 0 after it is released, so a
+ * hold is counted for at least as long as the lock is held (an extra moment either side only
+ * delays a fork). On the SVSM PAL the count and the add happen in PAL code, which the monitor
+ * never preempts, and a fork (#PalProcessFork) waits until the holds of every other context have
+ * drained: a CoW fork copies memory, and a lock some other thread held at that instant would be
+ * held for ever in the child. A context that holds nothing waits out a fork in progress before
+ * taking its first hold; one that already holds some does not, so it can finish and drain.
+ * Other PALs count nothing and only do the add.
+ */
+int64_t PalLockHold(int64_t* word, int64_t delta);
+
 typedef uint32_t pal_wait_flags_t; /* bitfield */
 #define PAL_WAIT_READ     1
 #define PAL_WAIT_WRITE    2

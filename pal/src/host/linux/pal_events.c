@@ -106,3 +106,8 @@ int _PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
 }
 
 struct handle_ops g_event_ops = {};
+
+/* No fork that copies memory on this host, so nothing to count: only the add. */
+int64_t _PalLockHold(int64_t* word, int64_t delta) {
+    return word ? __atomic_fetch_add(word, delta, __ATOMIC_SEQ_CST) : 0;
+}

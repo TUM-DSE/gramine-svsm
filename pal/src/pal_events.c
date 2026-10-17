@@ -22,6 +22,10 @@ void PalEventClear(PAL_HANDLE handle) {
     _PalEventClear(handle);
 }
 
+int64_t PalLockHold(int64_t* word, int64_t delta) {
+    return _PalLockHold(word, delta);
+}
+
 int PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
     assert(handle && handle->hdr.type == PAL_TYPE_EVENT);
     return _PalEventWait(handle, timeout_us);

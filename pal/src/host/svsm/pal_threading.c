@@ -532,6 +532,8 @@ int pal_svsm_threading_init(PAL_HANDLE* out_first_thread) {
     tcb->handle         = handle;
     tcb->alt_stack_top  = (char*)alt + SVSM_ALT_STACK_SIZE;
     tcb->alt_stack_size = SVSM_ALT_STACK_SIZE;
+    /* lock_holds is NOT reset here: this is the TCB pal_main installed,
+       zeroed, and any hold already counted on it is still owed. */
 
     g_current    = handle;
     g_thread_cnt = 1;
@@ -590,6 +592,7 @@ int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param) {
     tcb->alt_stack_size = SVSM_ALT_STACK_SIZE;
     tcb->callback       = callback;
     tcb->param          = param;
+    tcb->lock_holds     = 0;
 
     /*
      * The frame pal_svsm_ctx_switch will unwind into. It pops six registers

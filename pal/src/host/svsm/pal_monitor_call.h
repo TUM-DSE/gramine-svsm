@@ -21,6 +21,7 @@ noreturn void monitor_call_forged(void);
 void pal_svsm_fail(const char* err, int errno);
 void pal_svsm_exit(int exitcode);
 void pal_svsm_debug_putc(char c);
+void pal_svsm_debug_write(const uint8_t* bytes, size_t n);
 
 int pal_svsm_free(void* addr, uint64_t size);
 int pal_svsm_virt_alloc(void* addr, uint64_t size, pal_prot_flags_t prot);
@@ -55,6 +56,9 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
  * dispatches would never reach its execve, and its parent would wait for
  * ever. */
 #define PAL_SVSM_FORK_RESIDENT 1UL
+/* bit 1: the fork went ahead with lock holds of other threads it could not
+ * wait out (pal_events.c) - the monitor counts it, GetStat FORK_FOREIGN_HOLDS. */
+#define PAL_SVSM_FORK_FOREIGN_HOLDS 2UL
 /* `out_self` receives the CHILD's own id, and is meaningless in the parent.
  * The child cannot learn it any other way: rcx must be 0 to say which side
  * it is, so the id travels in the register the flags came in on. */
