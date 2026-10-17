@@ -239,6 +239,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
     child->vmid = (IDTYPE)child_id;
     child->child_termination_signal = flags & CSIGNAL;
     child->uid = get_cur_thread()->uid;
+    child->by_host = true;              /* reap_host_children, not IPC */
 
     lock(&g_process.children_lock);
     LISTP_ADD_TAIL(child, &g_process.children, list);

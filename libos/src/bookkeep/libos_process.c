@@ -118,9 +118,14 @@ void add_child_process(struct libos_child_process* child) {
     unlock(&g_process.children_lock);
 }
 
+/* Used only by the IPC layer's "child disconnected" path, which on other
+ * hosts is how a parent learns that a child died without saying so. A child
+ * the host reports on is never matched: with the IPC worker on, its
+ * connection dropped as it exited, before the parent's next look at the host,
+ * and it was reaped as killed by SIGPWR whatever its exit code was. */
 static bool cmp_child_by_vmid(const struct libos_child_process* child, unsigned long arg) {
     IDTYPE vmid = (IDTYPE)arg;
-    return child->vmid == vmid;
+    return child->vmid == vmid && !child->by_host;
 }
 
 static bool cmp_child_by_pid(const struct libos_child_process* child, unsigned long arg) {

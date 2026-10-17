@@ -25,6 +25,10 @@ struct libos_child_process {
     /* Signal sent to the parent process (us) on this child termination. */
     int child_termination_signal;
 
+    /* A copy-on-write fork's child: how it ended comes from the host
+     * (reap_host_children), never from the IPC layer (libos_process.c). */
+    bool by_host;
+
     /* These 3 fields are set when the child terminates. */
     int exit_code;
     int term_signal;
