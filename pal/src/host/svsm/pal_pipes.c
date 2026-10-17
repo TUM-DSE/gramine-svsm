@@ -487,19 +487,25 @@ void pal_svsm_pipes_fork_hold(int delta) {
         __atomic_add_fetch(&h->pipe.pair->holders[h->pipe.side], delta, __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->pipe.pair->refs, delta, __ATOMIC_ACQ_REL);
     }
-    /* And the holds that are not a handle yet: a connection nobody has
-     * accepted keeps its side 1 in `g_pending`, which the child copies too -
-     * and either process may accept it, or close the listener and drop it.
-     * Uncounted, that is two releases of one hold, and since `refs` decides
-     * the free it frees a pair the other side still holds. Only an arena pair
-     * can be pending here across a fork (an INHERITABLE local connect, when
-     * the shared table had no slot). */
+}
+
+/* In the child, right after the fork: forget the connections pending in the
+ * copied `g_pending`, WITHOUT releasing them.
+ *
+ * Every pipe(2) passes through it - create_pipes connects (an arena pair,
+ * parked here) and then accepts it - and only that connecting thread ever
+ * consumes the entry, by accepting it or closing its listener. A fork from
+ * another thread can land in between; that thread does not exist in the
+ * child, so the child's copy would never be consumed. Its hold was not
+ * counted for the child (`pal_svsm_pipes_fork_hold` counts handles), so it is
+ * dropped as it is: releasing it would give back the parent's, and counting
+ * it would leave a hold nobody gives back. */
+void pal_svsm_pipes_child_after_fork(void) {
+    /* The names are not freed either: nothing at fork return should depend
+     * on an allocator, and it is at most PIPE_PENDING_MAX short strings. */
     for (size_t i = 0; i < PIPE_PENDING_MAX; i++) {
-        struct pal_svsm_pipe_pair* p = g_pending[i].pair;
-        if (!g_pending[i].name || !p || !from_arena(p))
-            continue;
-        __atomic_add_fetch(&p->holders[1], delta, __ATOMIC_ACQ_REL);
-        __atomic_add_fetch(&p->refs, delta, __ATOMIC_ACQ_REL);
+        g_pending[i].name = NULL;
+        g_pending[i].pair = NULL;
     }
 }
 

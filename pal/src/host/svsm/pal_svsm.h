@@ -246,6 +246,8 @@ extern bool g_pal_svsm_pipes_shared;
  * are shared, so each gains a holder (+1). Called in the PARENT right before
  * the fork, and with -1 if the fork failed. */
 void pal_svsm_pipes_fork_hold(int delta);
+/* In the child: forget the copied pending connections, unreleased. */
+void pal_svsm_pipes_child_after_fork(void);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
 bool   pal_svsm_pipe_peer_gone(PAL_HANDLE handle);
 bool   pal_svsm_sock_peer_gone(PAL_HANDLE handle);

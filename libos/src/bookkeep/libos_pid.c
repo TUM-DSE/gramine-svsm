@@ -53,10 +53,10 @@ static struct libos_lock g_ranges_lock;
  */
 static IDTYPE g_monitor_named_id = 0;
 
+/* No lock: the child is the forking thread alone here, and a lock copied held
+ * (a fork that went ahead with foreign holds) would stop it at fork return. */
 void id_ranges_after_cow_fork(IDTYPE self_id) {
-    lock(&g_ranges_lock);
     g_monitor_named_id = self_id;
-    unlock(&g_ranges_lock);
 }
 
 int init_id_ranges(IDTYPE preload_tid) {

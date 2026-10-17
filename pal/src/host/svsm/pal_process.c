@@ -58,7 +58,9 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
     if (rc == 0) {
         *out_self = self;               /* we are the child; this is us */
         /* This process's holds on the shared pipes were counted by the
-         * parent before the copy, so there is nothing to add here. */
+         * parent before the copy, so there is nothing to add here - only the
+         * pending connections of threads that did not come along to drop. */
+        pal_svsm_pipes_child_after_fork();
         pal_svsm_net_ctr_reset();
     }
     return 0;
