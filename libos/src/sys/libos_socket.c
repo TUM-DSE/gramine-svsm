@@ -526,7 +526,7 @@ long libos_syscall_connect(int fd, void* addr, int _addrlen) {
 
     /* We need to take `recv_lock` just in case we free `peek` buffer in `disconnect` case.
      * This should not hurt though - nothing should be calling `recv` concurrently anyway. */
-    lock(&sock->recv_lock);
+    lock_uncounted(&sock->recv_lock);
     lock(&sock->lock);
 
     switch (sock->state) {
@@ -615,7 +615,7 @@ out:
         }
     }
     unlock(&sock->lock);
-    unlock(&sock->recv_lock);
+    unlock_uncounted(&sock->recv_lock);
     put_handle(handle);
     return ret;
 }
@@ -913,7 +913,7 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
      * not result in a deadlock - hopefully some data arrives (or the socket is closed from
      * the remote side) and unlocks the first blocked thread.
      */
-    lock(&sock->recv_lock);
+    lock_uncounted(&sock->recv_lock);
 
     if (*flags & MSG_PEEK) {
         if (sock->type != SOCK_STREAM) {
@@ -1000,7 +1000,7 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
     }
 
 out:
-    unlock(&sock->recv_lock);
+    unlock_uncounted(&sock->recv_lock);
     if (ret == -EINTR) {
         /* Timeout could have been changed in the meantime, but it should not matter - this is
          * a peculiar corner case that nothing should really care about. */

@@ -348,4 +348,6 @@ void release_robust_list(struct robust_list_head* head);
 void futexes_after_cow_fork(void);
 /* In a copy-on-write fork's child: no interval timer is armed (libos_alarm.c). */
 void itimer_after_cow_fork(void);
+/* In a copy-on-write fork's child: nobody is reaping (libos_wait.c). */
+void wait_after_cow_fork(void);
 void release_clear_child_tid(int* clear_child_tid);

@@ -640,9 +640,9 @@ int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param) {
  * leak of them is cheaper than being wrong about who still points into one.
  * A copy cannot be holding a PAL lock either: PAL text is never preempted,
  * and the one PAL lock a thread waits under (an event's) is let go before it
- * blocks. Nor a LibOS lock: _PalProcessFork refuses a fork while any other
- * context holds one (pal_svsm_fork_quiesce), since the copy could never let
- * go of it here.
+ * blocks. A LibOS lock it held stays held in the child: the fork waits for
+ * such holds to drain and, if they do not, goes ahead and counts it
+ * (_PalProcessFork, FORK_FOREIGN_HOLDS).
  */
 void pal_svsm_threads_child_after_fork(void) {
     PAL_HANDLE self = g_current;

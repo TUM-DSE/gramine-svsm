@@ -117,17 +117,29 @@ static void remove_qnode_from_wait_queue(struct libos_thread_queue* qnode) {
  * ordinary machinery and not a second copy of it.
  */
 static void reap_host_children_locked(void);
+
+/* Set while a thread reaps (reap_host_children). */
+static int g_reaping;
+
+/* In a copy-on-write fork's child: nobody is reaping. The flag is not a
+ * counted lock hold - a reaper holds it across monitor calls and can be
+ * preempted - so a fork while another thread sat in a blocking waitpid
+ * copied it SET, nothing in the child ever cleared it, and every wait there
+ * looped for ever (an exec keeps it: the exec'd shell's first wait hung). */
+void wait_after_cow_fork(void) {
+    g_reaping = 0;
+}
+
 static void reap_host_children(void) {
     /* One reaper at a time. Two threads waiting at once each took a snapshot
      * of the list and asked the monitor; with pids reused, one thread's
      * answer for a child could be applied after the other had reaped it and
      * a new child had the pid. A thread that finds a reap in progress lets
      * it do the work - its wait loop looks again within 10 ms. */
-    static int reaping;
-    if (__atomic_exchange_n(&reaping, 1, __ATOMIC_ACQ_REL))
+    if (__atomic_exchange_n(&g_reaping, 1, __ATOMIC_ACQ_REL))
         return;
     reap_host_children_locked();
-    __atomic_store_n(&reaping, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_reaping, 0, __ATOMIC_RELEASE);
 }
 
 static void reap_host_children_locked(void) {

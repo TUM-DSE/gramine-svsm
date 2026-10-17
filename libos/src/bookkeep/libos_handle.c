@@ -794,6 +794,30 @@ void keep_only_fd_streams(struct libos_handle_map* map) {
     free(keep);
 }
 
+/*
+ * In a copy-on-write fork's child: every socket's recv_lock made anew.
+ *
+ * recv_lock is held across a recv that waits for data (lock_uncounted), so a
+ * fork does not wait for it - and the thread that held it at the copy does not
+ * exist in the child (threads_after_cow_fork). Kept, a child that read that
+ * socket - a worker forked by a server whose other thread was in recv - would
+ * wait on it for ever. The old locks are left, not destroyed: they are
+ * copies, and one may read as held. No map lock: the caller is the only
+ * thread there is.
+ */
+void sockets_after_cow_fork(void) {
+    struct libos_handle_map* map = get_thread_handle_map(NULL);
+    if (!map || map->fd_top == FD_NULL)
+        return;
+    for (uint32_t i = 0; i <= map->fd_top; i++) {
+        struct libos_fd_handle* fd_hdl = map->map[i];
+        if (!HANDLE_ALLOCATED(fd_hdl) || !fd_hdl->handle || fd_hdl->handle->type != TYPE_SOCK)
+            continue;
+        if (!create_lock(&fd_hdl->handle->info.sock.recv_lock))
+            log_warning("fork: could not remake fd %u's recv lock - a recv on it may block", i);
+    }
+}
+
 void close_handle_range(uint32_t first, uint32_t last, bool cloexec) {
     struct libos_handle_map* handle_map = get_thread_handle_map(NULL);
     rwlock_write_lock(&handle_map->lock);

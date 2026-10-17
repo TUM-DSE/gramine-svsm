@@ -186,8 +186,10 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
          * the way out of the fork), and its async worker is one of them. */
         threads_after_cow_fork();
         futexes_after_cow_fork();
+        sockets_after_cow_fork();
         async_worker_after_cow_fork();
         itimer_after_cow_fork();
+        wait_after_cow_fork();
         ipc_cld_exit_by_host();
 
         rwlock_write_lock(&g_process_id_lock);
@@ -219,6 +221,10 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
         lock(&g_process.children_lock);
         INIT_LISTP(&g_process.children);
         INIT_LISTP(&g_process.zombies);
+        /* And whoever was waiting for them: the parent's threads blocked in
+         * a wait, which do not exist here - waking one later was a wake and
+         * a put of a thread this process does not have. */
+        g_process.wait_queue = NULL;
         unlock(&g_process.children_lock);
 
         id_ranges_after_cow_fork((IDTYPE)self_id);
@@ -242,6 +248,15 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
     child->child_termination_signal = flags & CSIGNAL;
     child->uid = get_cur_thread()->uid;
     child->by_host = true;              /* reap_host_children, not IPC */
+
+    /* A child of ours already under this pid is one the host deleted: the
+     * monitor issued its slot again, which it does only to a free slot. It
+     * has not been reaped yet (that happens on the next look at the host),
+     * and once this one is on the list that look would ask about the NEW
+     * child under the old one's entry - the old waitpid would block until
+     * the new child ended and take its status. So it is reaped now, as
+     * killed, which is what the next look would have said. */
+    (void)mark_child_exited_by_pid((IDTYPE)child_id, child->uid, 0, SIGKILL);
 
     lock(&g_process.children_lock);
     LISTP_ADD_TAIL(child, &g_process.children, list);

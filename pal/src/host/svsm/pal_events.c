@@ -161,11 +161,15 @@ struct handle_ops g_event_ops = {
  * hold, so the drain cannot be refilled; one that already holds some goes
  * on, because it can only drain by finishing - which also answers nested
  * locks: blocked on B while holding A, it is counted, and drains once it has
- * B and lets go of both. If B is the FORKER's, nothing drains; the fork then
- * goes ahead after the wait (pal_svsm_fork_quiesce's bound) with the holds it
- * could not wait out, logs it, and tells the monitor, which counts it
- * (GetStat FORK_FOREIGN_HOLDS) - never a silent fallback, never a deadlocked
- * parent.
+ * B and lets go of both. The forker itself holds no LibOS lock when it forks,
+ * so a hold that does not drain is one held across a BLOCKING operation - a
+ * read waiting for data that is not coming. The one the LibOS has, a
+ * socket's recv_lock, is not counted (libos_lock.h lock_uncounted) and the
+ * child makes it anew. For anything else the fork goes ahead after the wait
+ * (pal_svsm_fork_quiesce's bound) with the holds it could not wait out, logs
+ * it, and tells the monitor, which counts it (GetStat FORK_FOREIGN_HOLDS) -
+ * never a silent fallback, never a deadlocked parent. The child may block on
+ * such a hold, which is POSIX's caveat for a fork from a threaded program.
  */
 static int64_t g_lock_holds;           /* every context's, together */
 static PAL_HANDLE g_forking;           /* the context in a fork, or NULL */

@@ -32,24 +32,22 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
      * count and the monitor call can yield, so nothing can take one in
      * between. 100 ms is far beyond any critical section; a fork that waits
      * that long is waiting on itself (another context blocked on a lock the
-     * forker holds).
+     * forker holds), so it goes ahead and says so.
      *
-     * Such a fork used to go ahead and say so, and the child might block on
-     * the holds. It now WOULD block on them, for good: the contexts that held
-     * them are copies that never run in the child
-     * (pal_svsm_threads_child_after_fork), so nothing there can let go. So it
-     * fails instead - EAGAIN, which fork may answer - and the program can try
-     * again once the forker has let go of what the other thread waits for. */
+     * The child may then block on those holds, and for good: the contexts
+     * that held them do not run in it (pal_svsm_threads_child_after_fork).
+     * That is POSIX's own caveat for a fork from a threaded program, and
+     * refusing instead was worse: a hold that does not drain is a lock held
+     * across a blocking operation, so a retry never helped and every fork
+     * from such a process failed. The one such lock the LibOS has, a
+     * socket's recv_lock, is not counted (lock_uncounted) and is made anew in
+     * the child, so this is for a counted hold that did not drain. */
     int64_t foreign = pal_svsm_fork_quiesce(100 * 1000);
-    if (foreign > 0) {
-        pal_svsm_fork_done();
-        log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - refused "
-                    "(EAGAIN): a child would hold them for ever", foreign);
-        return -PAL_ERROR_TRYAGAIN;
-    }
-    /* PAL_SVSM_FORK_FOREIGN_HOLDS is never sent now: such a fork is refused
-     * above, before it reaches the monitor. */
-    uint64_t fflags = flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0;
+    if (foreign > 0)
+        log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - forking "
+                    "anyway; the child may block on them", foreign);
+    uint64_t fflags = (flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0)
+                      | (foreign > 0 ? PAL_SVSM_FORK_FOREIGN_HOLDS : 0);
     /* The child's holds on every shared pipe, counted - and written down in
      * a ledger row for it - BEFORE the copy: the parent may close its own
      * ends long before the child first runs (see pal_svsm_pipes_fork_prepare).
