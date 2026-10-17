@@ -182,25 +182,38 @@ int connect_to_process(IDTYPE dest) {
 }
 
 /*
- * After a copy-on-write fork: forget the connections this child INHERITED.
+ * After a copy-on-write fork: close the connections this child INHERITED.
  *
- * They are the parent's, in two senses. The `libos_ipc_connection` objects are
- * copies of the parent's heap, and the PAL handles in them name pipe pairs the
- * parent is still using - so a child that kept them would be a second reader
- * on its parent's conversations, taking replies meant for it. The child also
- * must not CLOSE them, for the same reason: on this PAL the pair is shared, so
- * a close would lower a holder count the parent still relies on.
+ * They are the parent's. The `libos_ipc_connection` objects are copies of the
+ * parent's heap, and the PAL handles in them name pipe pairs the parent is
+ * still using - so a child that kept them would be a second reader on its
+ * parent's conversations, taking replies meant for it.
  *
- * So the tree is emptied without touching the handles: the child's copies of
- * those pairs leak until it exits, which is bounded by the fork and is the
- * conservative half of the trade. The child then connects on its own when it
- * next needs a peer.
+ * They used to be forgotten and NOT closed, on two grounds that no longer
+ * hold. A close lowered a holder count the parent relied on: the parent now
+ * counts a hold of the CHILD's for every handle it copies, before the fork
+ * (pal_pipes.c, pal_svsm_pipes_fork_prepare), so closing the child's copy
+ * gives back exactly the child's. And the parent's IPC worker was copied into
+ * the child as a runnable context, watching these very handles from
+ * _PalStreamsWaitEvents - a close under it was a use after free. It is not a
+ * context of the child's any more (pal_svsm_threads_child_after_fork), and by
+ * here nothing else in the child can reach them. Forgotten, the child's
+ * shares of those pairs stayed held until it exited.
+ *
+ * The connection objects themselves are left: anything that still points at
+ * one is a copied waiter, dropped below, or a copied thread that does not run.
+ * The child connects on its own when it next needs a peer.
  */
 void ipc_forget_inherited_connections(void) {
     lock(&g_ipc_connections_lock);
     struct avl_tree_node* node;
     while ((node = avl_tree_first(&g_ipc_connections))) {
         avl_tree_delete(&g_ipc_connections, node);
+        struct libos_ipc_connection* conn = node2conn(node);
+        if (conn->handle) {
+            PalObjectDestroy(conn->handle);
+            conn->handle = NULL;
+        }
     }
     unlock(&g_ipc_connections_lock);
 

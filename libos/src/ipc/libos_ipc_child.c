@@ -62,9 +62,14 @@ int ipc_cld_exit_callback(IDTYPE src, void* data, uint64_t seq) {
     if (mark_child_exited_by_pid(msgin->pid, msgin->uid, msgin->exitcode, msgin->term_signal)) {
         log_debug("Child process (pid: %u) died", msgin->pid);
     } else {
-        log_error("Unknown process sent a child-death notification: pid: %d, vmid: %u",
+        /* Not an error on a host where a parent hears of its child's end
+         * twice. A copy-on-write fork's parent also asks the MONITOR how its
+         * child ended (PalProcessWait), and whichever of the two answers comes
+         * second finds the child already reaped. This returned -EINVAL, which
+         * the IPC worker treats as fatal (PalProcessExit(1)): with the worker
+         * on, a vault died a few subprocess.run()s in, every time. */
+        log_debug("child-death notification for a child no longer tracked: pid: %d, vmid: %u",
                   msgin->pid, src);
-        return -EINVAL;
     }
 
     return 0;
