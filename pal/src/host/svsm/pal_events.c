@@ -198,6 +198,14 @@ int64_t pal_svsm_fork_quiesce(uint64_t max_us) {
     return foreign;
 }
 
+/* In the child, right after the fork: the only holds left are the forker's.
+ * The rest were the parent's other contexts, which are not on this ring
+ * (pal_svsm_threads_child_after_fork) - left in the count, every later fork
+ * from this child would wait them out for its whole bound. */
+void pal_svsm_lock_holds_after_fork(void) {
+    __atomic_store_n(&g_lock_holds, pal_get_svsm_tcb()->lock_holds, __ATOMIC_SEQ_CST);
+}
+
 /* Both sides of a fork, after it. */
 void pal_svsm_fork_done(void) {
     __atomic_store_n(&g_forking, NULL, __ATOMIC_SEQ_CST);

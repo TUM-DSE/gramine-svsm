@@ -32,13 +32,24 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
      * count and the monitor call can yield, so nothing can take one in
      * between. 100 ms is far beyond any critical section; a fork that waits
      * that long is waiting on itself (another context blocked on a lock the
-     * forker holds), so it goes ahead and says so. */
+     * forker holds).
+     *
+     * Such a fork used to go ahead and say so, and the child might block on
+     * the holds. It now WOULD block on them, for good: the contexts that held
+     * them are copies that never run in the child
+     * (pal_svsm_threads_child_after_fork), so nothing there can let go. So it
+     * fails instead - EAGAIN, which fork may answer - and the program can try
+     * again once the forker has let go of what the other thread waits for. */
     int64_t foreign = pal_svsm_fork_quiesce(100 * 1000);
-    if (foreign > 0)
-        log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - forking "
-                    "anyway; the child may block on them", foreign);
-    uint64_t fflags = (flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0)
-                      | (foreign > 0 ? PAL_SVSM_FORK_FOREIGN_HOLDS : 0);
+    if (foreign > 0) {
+        pal_svsm_fork_done();
+        log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - refused "
+                    "(EAGAIN): a child would hold them for ever", foreign);
+        return -PAL_ERROR_TRYAGAIN;
+    }
+    /* PAL_SVSM_FORK_FOREIGN_HOLDS is never sent now: such a fork is refused
+     * above, before it reaches the monitor. */
+    uint64_t fflags = flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0;
     /* The child's holds on every shared pipe, counted - and written down in
      * a ledger row for it - BEFORE the copy: the parent may close its own
      * ends long before the child first runs (see pal_svsm_pipes_fork_prepare).
@@ -63,6 +74,7 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
         /* First, before anything here can switch: the parent's other
          * threads are copies on this process's ring and must not run. */
         pal_svsm_threads_child_after_fork();
+        pal_svsm_lock_holds_after_fork();
         /* This process's holds on the shared pipes were counted by the
          * parent before the copy, so there is nothing to add here - only the
          * pending connections of threads that did not come along to drop. */
@@ -92,6 +104,7 @@ noreturn void _PalProcessExit(int exitcode) {
        is the result the guest receives (monitor pal_svsm_exit ->
        rdx -> guest generic.values[1]). Was hardcoded -1. */
     pal_svsm_net_ctr_report();
+    pal_svsm_pipes_exit();
     pal_svsm_exit(exitcode);
     die_or_inf_loop();
 }

@@ -41,6 +41,8 @@ static inline PAL_SVSM_TCB* pal_get_svsm_tcb(void) {
 /* The fork's wait for other contexts' LibOS lock holds (pal_events.c). */
 int64_t pal_svsm_fork_quiesce(uint64_t max_us);
 void pal_svsm_fork_done(void);
+/* In the child: the lock-hold count is the forker's alone (pal_events.c). */
+void pal_svsm_lock_holds_after_fork(void);
 
 /*
  * Time (pal_misc.c). A vault has no clock: no RTC, no kvm-clock, no timer
@@ -252,6 +254,8 @@ void pal_svsm_pipes_fork_parent(uint64_t child_serial);
 /* In the child: take the row filled for it, and forget the copied pending
  * connections, unreleased. */
 void pal_svsm_pipes_child_after_fork(uint64_t self_serial);
+/* On a clean exit: this process's empty ledger row goes back free. */
+void pal_svsm_pipes_exit(void);
 /* The forker is the child's only thread (pal_threading.c). */
 void pal_svsm_threads_child_after_fork(void);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
