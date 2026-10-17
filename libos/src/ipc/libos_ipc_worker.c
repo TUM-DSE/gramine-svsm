@@ -458,9 +458,20 @@ int reinit_ipc_worker_after_fork(IDTYPE new_vmid) {
     g_process_ipc_ids.parent_vmid = g_process_ipc_ids.self_vmid;
     g_process_ipc_ids.self_vmid   = new_vmid;
 
-    /* The parent's, every one of them. Cleared rather than released: the
-     * thread is a copy and the handle names a pipe the parent still listens
-     * on. */
+    /* The parent's incoming connections: closed, which on this PAL gives back
+     * the hold the fork counted for this copy of each (see
+     * ipc_forget_inherited_connections). The worker that owned the list is a
+     * copy that never runs again in this process, so nothing else walks it. */
+    struct libos_ipc_connection* conn;
+    struct libos_ipc_connection* tmp;
+    LISTP_FOR_EACH_ENTRY_SAFE(conn, tmp, &g_ipc_connections, list) {
+        del_ipc_connection(conn);
+    }
+
+    /* The thread and the listener: cleared rather than released. The thread
+     * is a copy, and the listener is not a pipe pair - it holds nothing - but
+     * its name is the parent's, published in the lineage's table, and closing
+     * it would unpublish the parent. */
     g_worker_thread = NULL;
     g_self_ipc_handle = NULL;
     g_clear_on_worker_exit = 1;

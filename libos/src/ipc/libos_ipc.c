@@ -184,23 +184,34 @@ int connect_to_process(IDTYPE dest) {
 /*
  * After a copy-on-write fork: forget the connections this child INHERITED.
  *
- * They are the parent's, in two senses. The `libos_ipc_connection` objects are
- * copies of the parent's heap, and the PAL handles in them name pipe pairs the
- * parent is still using - so a child that kept them would be a second reader
- * on its parent's conversations, taking replies meant for it. The child also
- * must not CLOSE them, for the same reason: on this PAL the pair is shared, so
- * a close would lower a holder count the parent still relies on.
+ * They are the parent's. The `libos_ipc_connection` objects are copies of the
+ * parent's heap, and the PAL handles in them name pipe pairs the parent is
+ * still using - so a child that kept them would be a second reader on its
+ * parent's conversations, taking replies meant for it.
  *
- * So the tree is emptied without touching the handles: the child's copies of
- * those pairs leak until it exits, which is bounded by the fork and is the
- * conservative half of the trade. The child then connects on its own when it
- * next needs a peer.
+ * Their PAL handles are CLOSED, though. On this PAL the pair is shared and the
+ * fork counted a hold for each of the child's copies (pal_svsm_pipes_fork_hold)
+ * - so a close lowers the count by exactly the hold this copy added and never
+ * one the parent relies on. Leaving them, which is what this did, was not
+ * "until the child exits": nothing releases a hold at exit, so every fork left
+ * one on each of the parent's connections for good - the parent never saw
+ * end-of-file on them, the pairs never went back to the arena, and a
+ * grandchild added another.
+ *
+ * The objects themselves are not freed: a copied waiter or a reference on a
+ * stack the fork did not bring along may still point at one. The child then
+ * connects on its own when it next needs a peer.
  */
 void ipc_forget_inherited_connections(void) {
     lock(&g_ipc_connections_lock);
     struct avl_tree_node* node;
     while ((node = avl_tree_first(&g_ipc_connections))) {
         avl_tree_delete(&g_ipc_connections, node);
+        struct libos_ipc_connection* conn = node2conn(node);
+        if (conn->handle) {
+            PalObjectDestroy(conn->handle);
+            conn->handle = NULL;
+        }
     }
     unlock(&g_ipc_connections_lock);
 

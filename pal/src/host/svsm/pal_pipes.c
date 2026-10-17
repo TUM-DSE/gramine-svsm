@@ -49,6 +49,13 @@ struct pal_svsm_pipe_pair {
      * EOF when holders[!s] reaches zero and the ring it reads is empty,
      * which is what a pipe means. */
     int    holders[2];
+    /* holders[0] + holders[1], kept as ONE word because it is what decides
+     * who frees the pair. Two releases of different sides - a parent closing
+     * `r` while its child exits closing `w`, on two processors - could both
+     * read 0/0 from the two words and both free the slot, the second after a
+     * new pipe had already claimed it. Whoever takes this to 0 frees it, and
+     * that happens once. */
+    int    refs;
     int    in_use;                  /* 0 = this arena slot is free */
 };
 
@@ -75,8 +82,10 @@ struct pal_svsm_pipe_pair {
  * something two of them can race on safely with one atomic.
  *
  * 1024 pairs, which is more than the LibOS lets one process hold ends of
- * (RLIMIT_NOFILE, 900), so a program meets the same limit it would on Linux
- * - EMFILE - rather than this one. It was 32 for the whole lineage, and a
+ * (its default RLIMIT_NOFILE, 900), so a single process meets the limit it
+ * would on Linux - EMFILE - before this one. The arena is the LINEAGE's,
+ * though: several members holding hundreds each can still exhaust it, and
+ * that is logged (pair_new). It was 32 for the whole lineage, and a
  * pipe a program never closed is held for as long as its process lives: a
  * vault that left one end open per invocation (pipe-fork-test.py's parent
  * never closes `r`) had its subprocess.run fail with ENOMEM at invocation
@@ -398,10 +407,13 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
             return NULL;
         p->holders[0] = 1;
         p->holders[1] = 1;
+        p->refs = 2;
         p->in_use = 1;
         return p;
     }
-    for (uint32_t i = 0; i < a->pairs; i++) {
+    /* Both bounds: `pairs` is in the region every member can write, and a
+     * value past the array would be writes past the region. */
+    for (uint32_t i = 0; i < a->pairs && i < PIPE_ARENA_PAIRS; i++) {
         int free_ = 0;
         if (!__atomic_compare_exchange_n(&a->pair[i].in_use, &free_, 1, false,
                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -412,6 +424,7 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
         /* Side 1 does not exist until somebody accepts; until then side 0
          * must not see EOF, only "nothing yet". */
         p->holders[1] = 1;
+        __atomic_store_n(&p->refs, 2, __ATOMIC_RELEASE);
         return p;
     }
     /* Said, once a process: this used to be a bare ENOMEM, which the LibOS
@@ -421,19 +434,21 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
     if (!__atomic_exchange_n(&said, true, __ATOMIC_RELAXED))
         log_error("pipe: all %u shared pipe pairs of this lineage are held - a pipe a "
                   "child can inherit is refused (ENOMEM) until one is closed",
-                  a->pairs);
+                  PIPE_ARENA_PAIRS);
     return NULL;
 }
 
 /* Give up one hold on `side`. The pair returns to the arena only when both
  * ends have none, which with a fork in the picture can be a process other
- * than the one that made it. */
+ * than the one that made it - and it is the release that takes `refs` to 0
+ * that returns it, so exactly one does. The side's own count goes first:
+ * by the time the pair can be reused, nobody still has a decrement of it to
+ * make. */
 static void pair_release(struct pal_svsm_pipe_pair* p, unsigned side) {
     if (!p)
         return;
     __atomic_sub_fetch(&p->holders[side], 1, __ATOMIC_ACQ_REL);
-    if (__atomic_load_n(&p->holders[0], __ATOMIC_ACQUIRE) > 0
-        || __atomic_load_n(&p->holders[1], __ATOMIC_ACQUIRE) > 0)
+    if (__atomic_sub_fetch(&p->refs, 1, __ATOMIC_ACQ_REL) > 0)
         return;
     if (from_arena(p))
         __atomic_store_n(&p->in_use, 0, __ATOMIC_RELEASE);
@@ -470,6 +485,7 @@ void pal_svsm_pipes_fork_hold(int delta) {
         if (!from_arena(h->pipe.pair))
             continue;
         __atomic_add_fetch(&h->pipe.pair->holders[h->pipe.side], delta, __ATOMIC_ACQ_REL);
+        __atomic_add_fetch(&h->pipe.pair->refs, delta, __ATOMIC_ACQ_REL);
     }
 }
 
