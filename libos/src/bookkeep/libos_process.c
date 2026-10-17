@@ -133,6 +133,13 @@ static bool cmp_child_by_pid(const struct libos_child_process* child, unsigned l
     return child->pid == pid;
 }
 
+/* A child-death notice over IPC names a pid, and a pid here is a reused
+ * monitor slot: a late notice must not land on a host-reported child that
+ * happens to have that pid now. */
+static bool cmp_child_by_pid_ipc(const struct libos_child_process* child, unsigned long arg) {
+    return cmp_child_by_pid(child, arg) && !child->by_host;
+}
+
 static bool mark_child_exited(child_cmp_t child_cmp, unsigned long arg, IDTYPE child_uid,
                               int exit_code, int signal) {
     bool ret = false;
@@ -205,6 +212,11 @@ bool mark_child_exited_by_vmid(IDTYPE vmid, IDTYPE child_uid, int exit_code, int
 
 bool mark_child_exited_by_pid(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal) {
     return mark_child_exited(cmp_child_by_pid, (unsigned long)pid, child_uid, exit_code, signal);
+}
+
+bool mark_child_exited_by_pid_ipc(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal) {
+    return mark_child_exited(cmp_child_by_pid_ipc, (unsigned long)pid, child_uid, exit_code,
+                             signal);
 }
 
 bool is_zombie_process(IDTYPE pid) {

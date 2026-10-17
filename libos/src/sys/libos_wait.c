@@ -116,10 +116,25 @@ static void remove_qnode_from_wait_queue(struct libos_thread_queue* qnode) {
  * so everything downstream - zombies, the wait queue, SIGCHLD - is the
  * ordinary machinery and not a second copy of it.
  */
+static void reap_host_children_locked(void);
 static void reap_host_children(void) {
+    /* One reaper at a time. Two threads waiting at once each took a snapshot
+     * of the list and asked the monitor; with pids reused, one thread's
+     * answer for a child could be applied after the other had reaped it and
+     * a new child had the pid. A thread that finds a reap in progress lets
+     * it do the work - its wait loop looks again within 10 ms. */
+    static int reaping;
+    if (__atomic_exchange_n(&reaping, 1, __ATOMIC_ACQ_REL))
+        return;
+    reap_host_children_locked();
+    __atomic_store_n(&reaping, 0, __ATOMIC_RELEASE);
+}
+
+static void reap_host_children_locked(void) {
     IDTYPE pids[32];
     IDTYPE vmids[32];
     IDTYPE uids[32];
+    bool by_host[32];
     size_t n = 0;
 
     lock(&g_process.children_lock);
@@ -130,6 +145,7 @@ static void reap_host_children(void) {
         pids[n]  = child->pid;
         vmids[n] = child->vmid;
         uids[n]  = child->uid;
+        by_host[n] = child->by_host;
         n++;
     }
     unlock(&g_process.children_lock);
@@ -140,8 +156,17 @@ static void reap_host_children(void) {
     for (size_t i = 0; i < n; i++) {
         int64_t reason = 0;
         uint64_t value = 0;
-        if (PalProcessWait(vmids[i], &reason, &value) < 0)
-            continue;                       /* not ours, or already reaped */
+        if (PalProcessWait(vmids[i], &reason, &value) < 0) {
+            /* Refused: the monitor no longer links this child to us. For a
+             * child the copy-on-write fork made, that happens one way - the
+             * HOST deleted it, and its teardown dropped the link along with
+             * any status - so it is reaped as killed, the nearest POSIX truth
+             * (as below). Skipped, it was never reaped: a parent waiting for
+             * it waited for ever, and it stayed on the list. */
+            if (by_host[i])
+                (void)mark_child_exited_by_pid(pids[i], uids[i], 0, SIGKILL);
+            continue;
+        }
         if (reason == 0)
             continue;                       /* still running */
 

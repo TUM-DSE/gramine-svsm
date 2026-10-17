@@ -77,7 +77,8 @@ int ipc_cld_exit_callback(IDTYPE src, void* data, uint64_t seq) {
     log_debug("IPC callback from %u: IPC_MSG_CHILDEXIT(%u, %u, %d, %u)", src, msgin->ppid,
               msgin->pid, msgin->exitcode, msgin->term_signal);
 
-    if (mark_child_exited_by_pid(msgin->pid, msgin->uid, msgin->exitcode, msgin->term_signal)) {
+    if (mark_child_exited_by_pid_ipc(msgin->pid, msgin->uid, msgin->exitcode,
+                                     msgin->term_signal)) {
         log_debug("Child process (pid: %u) died", msgin->pid);
     } else {
         /* Not fatal: this returned -EINVAL, which the IPC worker treats as
