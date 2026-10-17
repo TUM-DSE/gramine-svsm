@@ -487,7 +487,9 @@ void pal_svsm_debug_write(const uint8_t* bytes, size_t n) {
     data.rdx = w[1];
     data.r8  = w[2];
     data.r9  = w[3];
-    monitor_call(&data);
+    /* r8 and r9 carry bytes 16..31: monitor_call() does not load them, and
+     * the monitor would read whatever they held - zeros end the line. */
+    extended_monitor_call(&data);
 }
 
 
