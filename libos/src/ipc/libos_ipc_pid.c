@@ -56,24 +56,49 @@ int init_ipc_ids(void) {
     return 0;
 }
 
-/* If a free range was found, sets `*start` and `*end` and returns `true`, if nothing was found
- * returns `false`. If a range was returned, it is not larger than `MAX_RANGE_SIZE`. */
-static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
+/*
+ * Where this process's ids come from: one BLOCK of the id space, and a cursor
+ * that wraps inside it.
+ *
+ * On this host a process is named by the MONITOR - a copy-on-write fork's
+ * child runs under its monitor id (do_clone_cow_fork), which is a process
+ * table slot, below ID_MONITOR_LIMIT - while its threads are named here. Both
+ * used to come out of one space: the allocator started at 1, a child's pid
+ * could be one of its own threads' tids, and a child, whose allocator is a
+ * COPY of its parent's, handed out exactly the tids its parent handed out
+ * next. A tid is what a futex owner word, a robust list and a tgkill name, so
+ * two threads with one tid are one thread to all of them.
+ *
+ * So the space is cut up:
+ *   [1, ID_MONITOR_LIMIT)          process ids: the monitor's, plus the root
+ *                                  process's own pid 1 (its first id)
+ *   block 0, from ID_MONITOR_LIMIT the root process's threads
+ *   block C (C << ID_BLOCK_SHIFT)  the threads of the forked child C
+ * A live monitor id names one process, so no two live processes share a
+ * block, and every block is clear of every pid.
+ *
+ * The cursor wraps, which upstream refuses (it BUGs at PID_MAX): a block is
+ * 4096 ids, and a vault that churns threads would run through it. Wrapping
+ * reuses only ranges that are no longer in the tree, and a range stays in it
+ * while any id in it is taken (release_id gives a range back only at a count
+ * of zero), so a tid still held is never handed out again. Upstream's reason
+ * for refusing - `libos_handle::id` is the process id shifted, and a reissued
+ * PROCESS id would alias it - does not apply to thread ids, and process ids
+ * are not issued here. A block that is full refuses (-EAGAIN, clone's EAGAIN)
+ * rather than spill into a neighbour's.
+ */
+static IDTYPE g_ids_lo = ID_MONITOR_LIMIT;
+static IDTYPE g_ids_hi = ((IDTYPE)1 << ID_BLOCK_SHIFT) - 1;
+/* A forked child allocates out of its own block, locally, whatever the IPC
+ * leader is: the leader's tree knows nothing of the block. */
+static bool g_ids_own_block = false;
+
+/* The first free run in `[from, to]`, at most MAX_RANGE_SIZE long. */
+static bool find_free_in(IDTYPE from, IDTYPE to, IDTYPE* start, IDTYPE* end) {
     assert(locked(&g_id_owners_tree_lock));
-
-    static_assert(!IS_SIGNED(IDTYPE), "IDTYPE must be unsigned");
-    static_assert(PID_MAX <= IDTYPE_MAX - (MAX_RANGE_SIZE - 1), "int overflow may happen");
-
-    if (g_last_id + 1 > PID_MAX) {
-        /* Overflow of IDs, this may lead to aliasing of process-ID-derived objects (e.g.
-         * `libos_handle::id` used for flock file locks) and is potentially a security
-         * vulnerability, so just terminate the whole process (which is the IPC leader). */
-        log_error("reached PID limit when allocating a new ID, not safe to proceed");
-        BUG();
-    }
-
-    IDTYPE next_id = g_last_id + 1;
-
+    if (from > to)
+        return false;
+    IDTYPE next_id = from;
     struct id_range dummy = {
         .start = next_id,
         .end = next_id,
@@ -81,33 +106,75 @@ static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
     struct avl_tree_node* node = avl_tree_lower_bound(&g_id_owners_tree, &dummy.node);
     while (node) {
         struct id_range* range = container_of(node, struct id_range, node);
+        if (range->start > to)
+            break;
         if (next_id < range->start) {
             /* `next_id` does not overlap any existing range. */
             *start = next_id;
-            *end   = next_id + MAX_RANGE_SIZE - 1;
-            if (*end > PID_MAX) {
-                *end = PID_MAX;
-            }
-            *end = MIN(*end, range->start - 1);
+            *end   = MIN(MIN(next_id + MAX_RANGE_SIZE - 1, to), range->start - 1);
             return true;
         }
         /* `next_id` overlaps `range`. */
-        assert(next_id <= range->end);
-        if (range->end == PID_MAX) {
-            /* No ids available in range `[g_last_id + 1, PID_MAX]`. If wrapping is needed, set
-             * `g_last_id` and call this function again. */
+        if (range->end >= to)
             return false;
-        }
         next_id = range->end + 1;
         node = avl_tree_next(node);
     }
-    /* There are no ids greater or equal to `next_id`. */
+    /* Nothing in use from `next_id` to `to`. */
     *start = next_id;
-    *end   = next_id + MAX_RANGE_SIZE - 1;
-    if (*end > PID_MAX) {
-        *end = PID_MAX;
-    }
+    *end   = MIN(next_id + MAX_RANGE_SIZE - 1, to);
     return true;
+}
+
+/* If a free range was found, sets `*start` and `*end` and returns `true`, if nothing was found
+ * returns `false`. If a range was returned, it is not larger than `MAX_RANGE_SIZE`. */
+static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
+    assert(locked(&g_id_owners_tree_lock));
+
+    static_assert(!IS_SIGNED(IDTYPE), "IDTYPE must be unsigned");
+    static_assert((((IDTYPE)ID_MONITOR_LIMIT - 1) << ID_BLOCK_SHIFT)
+                  + ((IDTYPE)1 << ID_BLOCK_SHIFT) - 1 <= PID_MAX,
+                  "the last monitor id's block must fit below PID_MAX");
+
+    /* The root process's very first id is its own pid, 1 - a range of one, so
+     * that its threads start in block 0 rather than at 2, among the pids. */
+    if (!g_ids_own_block && g_last_id == 0
+            && !avl_tree_first(&g_id_owners_tree)) {
+        *start = 1;
+        *end   = 1;
+        return true;
+    }
+
+    IDTYPE from = g_last_id + 1;
+    if (from < g_ids_lo || from > g_ids_hi)
+        from = g_ids_lo;
+    if (find_free_in(from, g_ids_hi, start, end))
+        return true;
+    /* Wrapped: the start of the block, up to where this search began. */
+    return from > g_ids_lo && find_free_in(g_ids_lo, from - 1, start, end);
+}
+
+/* In a copy-on-write fork's child, from id_ranges_after_cow_fork: the
+ * allocator copied from the parent becomes one of the child's own, in block
+ * `self_id`. The tree is the parent's - its ranges are its threads' - and is
+ * dropped, nodes freed: they are this process's copies. No lock: the caller is
+ * the only thread there is. */
+void ipc_ids_after_cow_fork(IDTYPE self_id) {
+    if (!self_id || self_id >= ID_MONITOR_LIMIT) {
+        /* Not a monitor id this layout has a block for: keep the copy, which
+         * is what every child did before. */
+        log_warning("fork: id %u has no id block - the child shares its parent's ids", self_id);
+        return;
+    }
+    struct avl_tree_node* node;
+    while ((node = avl_tree_first(&g_id_owners_tree))) {
+        avl_tree_delete(&g_id_owners_tree, node);
+        free(container_of(node, struct id_range, node));
+    }
+    g_ids_lo = self_id << ID_BLOCK_SHIFT;
+    g_ids_hi = g_ids_lo + ((IDTYPE)1 << ID_BLOCK_SHIFT) - 1;
+    g_last_id = 0;
+    g_ids_own_block = true;
 }
 
 static int alloc_id_range(IDTYPE owner, IDTYPE* start, IDTYPE* end) {
@@ -120,12 +187,9 @@ static int alloc_id_range(IDTYPE owner, IDTYPE* start, IDTYPE* end) {
     lock(&g_id_owners_tree_lock);
     bool found = _find_free_id_range(start, end);
     if (!found) {
-        /* No id found, we could try wrapping around (`g_last_id = 0`) and calling the func again,
-         * but this may lead to aliasing of process-ID-derived objects (e.g. `libos_handle::id`
-         * used for flock file locks) and is potentially a security vulnerability, so just terminate
-         * the whole process (which is the IPC leader). */
-        log_error("reached PID limit when allocating a new ID, not safe to proceed");
-        BUG();
+        /* Every id in the block is held by a live thread (_find_free_id_range
+         * has already wrapped): refuse, and clone says EAGAIN. */
+        log_warning("no free thread id in [%u, %u]: every one is held", g_ids_lo, g_ids_hi);
     }
 
     int ret = 0;
@@ -135,7 +199,7 @@ static int alloc_id_range(IDTYPE owner, IDTYPE* start, IDTYPE* end) {
         new_range->end = *end;
         new_range->owner = owner;
         avl_tree_insert(&g_id_owners_tree, &new_range->node);
-        assert(*end > g_last_id);
+        /* Not necessarily past it: the cursor wraps (_find_free_id_range). */
         g_last_id = *end;
     } else {
         free(new_range);
@@ -252,7 +316,7 @@ out:
 }
 
 int ipc_alloc_id_range(IDTYPE* out_start, IDTYPE* out_end) {
-    if (!g_process_ipc_ids.leader_vmid) {
+    if (!g_process_ipc_ids.leader_vmid || g_ids_own_block) {
         return alloc_id_range(g_process_ipc_ids.self_vmid, out_start, out_end);
     }
 
@@ -313,7 +377,7 @@ int ipc_alloc_id_range_callback(IDTYPE src, void* data, uint64_t seq) {
 }
 
 int ipc_release_id_range(IDTYPE start, IDTYPE end) {
-    if (!g_process_ipc_ids.leader_vmid) {
+    if (!g_process_ipc_ids.leader_vmid || g_ids_own_block) {
         release_id_range(start, end);
         return 0;
     }

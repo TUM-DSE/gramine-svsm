@@ -183,6 +183,11 @@ int ipc_cld_exit_callback(IDTYPE src, void* data, uint64_t seq);
 void ipc_child_disconnect_callback(IDTYPE vmid);
 
 #define MAX_RANGE_SIZE 0x20
+/* Process ids the monitor issues are below this: its process table has
+ * this many slots (MAX_PROCESSES). Thread ids are issued above it, in blocks
+ * of 1 << ID_BLOCK_SHIFT, one per process (libos_ipc_pid.c). */
+#define ID_MONITOR_LIMIT 1024
+#define ID_BLOCK_SHIFT   12
 
 /*!
  * \brief Request a new ID range from the IPC leader.
@@ -204,6 +209,8 @@ int ipc_alloc_id_range_callback(IDTYPE src, void* data, uint64_t seq);
  * \p start and \p end must denote a full range (for details check #ipc_change_id_owner).
  */
 int ipc_release_id_range(IDTYPE start, IDTYPE end);
+/* In a copy-on-write fork's child: allocate in block `self_id` from now on. */
+void ipc_ids_after_cow_fork(IDTYPE self_id);
 int ipc_release_id_range_callback(IDTYPE src, void* data, uint64_t seq);
 
 /*!

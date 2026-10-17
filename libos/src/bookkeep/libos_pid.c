@@ -53,10 +53,29 @@ static struct libos_lock g_ranges_lock;
  */
 static IDTYPE g_monitor_named_id = 0;
 
-/* No lock: the child is the forking thread alone here, and a lock copied held
- * (a fork that went ahead with foreign holds) would stop it at fork return. */
+/*
+ * And everything else this allocator had is the parent's: its ranges are the
+ * parent's threads' ids, and handing out the next of them gave a child's
+ * threads exactly the tids its parent's next threads got. The child drops them
+ * - freed, they are its own copies, and nothing in it holds those ids now that
+ * the parent's other threads are gone from it (threads_after_cow_fork) - and
+ * allocates from now on out of a block of the id space of its own
+ * (ipc_ids_after_cow_fork).
+ *
+ * No lock: the child is the forking thread alone here, and a lock copied held
+ * (a fork that went ahead with foreign holds) would stop it at fork return.
+ */
 void id_ranges_after_cow_fork(IDTYPE self_id) {
     g_monitor_named_id = self_id;
+    free(g_last_range);
+    g_last_range = NULL;
+    g_last_used_id = 0;
+    struct avl_tree_node* node;
+    while ((node = avl_tree_first(&g_used_ranges_tree))) {
+        avl_tree_delete(&g_used_ranges_tree, node);
+        free(container_of(node, struct id_range, node));
+    }
+    ipc_ids_after_cow_fork(self_id);
 }
 
 int init_id_ranges(IDTYPE preload_tid) {
