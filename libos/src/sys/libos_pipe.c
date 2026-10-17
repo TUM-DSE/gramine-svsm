@@ -41,7 +41,7 @@ static int create_pipes(struct libos_handle* srv, struct libos_handle* cli, int 
     /* PAL_OPTION_INHERITABLE: this is pipe(2), so a fork may hand it to a
      * child and both ends have to see one buffer. The LibOS's own pipes - the
      * pollable events, the async and IPC workers - deliberately do NOT ask,
-     * because they are per-process and the arena is VM-wide. */
+     * because they are per-process and the arena is the whole lineage's. */
     ret = PalStreamOpen(uri, PAL_ACCESS_RDWR, /*share_flags=*/0, PAL_CREATE_IGNORED,
                         LINUX_OPEN_FLAGS_TO_PAL_OPTIONS(flags) | PAL_OPTION_INHERITABLE,
                         &hdl2);

@@ -242,9 +242,10 @@ size_t pal_svsm_pipe_readable(PAL_HANDLE handle);
  * forks, and it spends one of the monitor's VM-wide regions. A verifier
  * reading the manifest digest can see both. */
 extern bool g_pal_svsm_pipes_shared;
-/* A fork has given this process a copy of every pipe handle; the pairs are
- * shared, so tell them they each gained a holder. Called in the child. */
-void pal_svsm_pipes_after_fork(void);
+/* A fork is about to give the child a copy of every pipe handle; the pairs
+ * are shared, so each gains a holder (+1). Called in the PARENT right before
+ * the fork, and with -1 if the fork failed. */
+void pal_svsm_pipes_fork_hold(int delta);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
 bool   pal_svsm_pipe_peer_gone(PAL_HANDLE handle);
 bool   pal_svsm_sock_peer_gone(PAL_HANDLE handle);

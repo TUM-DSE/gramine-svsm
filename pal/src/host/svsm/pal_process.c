@@ -39,24 +39,26 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
                     "anyway; the child may block on them", foreign);
     uint64_t fflags = (flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0)
                       | (foreign > 0 ? PAL_SVSM_FORK_FOREIGN_HOLDS : 0);
+    /* The child's holds on every shared pipe, counted BEFORE the copy: the
+     * parent may close its own ends long before the child first runs (see
+     * pal_svsm_pipes_fork_hold). Nothing from here to the monitor call can
+     * yield. */
+    pal_svsm_pipes_fork_hold(+1);
     uint64_t rc = pal_svsm_fork(fflags, &self);
     pal_svsm_fork_done();
     /* UINT64_MAX is the one answer that is neither a parent nor a child.
      * It has to be checked here: a failed fork returns ONCE, and a caller
      * that only looks for zero would carry on as the parent of a child that
      * does not exist. */
-    if (rc == ~0ULL)
+    if (rc == ~0ULL) {
+        pal_svsm_pipes_fork_hold(-1);   /* there is no child to hold them */
         return -PAL_ERROR_DENIED;
+    }
     *out_child = rc;
     if (rc == 0) {
         *out_self = self;               /* we are the child; this is us */
-        /* Every pipe this process now holds a copy of has one more holder,
-         * and the pair is SHARED, so it has to be told - otherwise the
-         * parent's first close looks like the last one and a reader sees
-         * end-of-file with its peer still there. Here rather than in the
-         * LibOS because the PAL is what knows which handles exist, and
-         * nothing else in this process is running yet. */
-        pal_svsm_pipes_after_fork();
+        /* This process's holds on the shared pipes were counted by the
+         * parent before the copy, so there is nothing to add here. */
         pal_svsm_net_ctr_reset();
     }
     return 0;

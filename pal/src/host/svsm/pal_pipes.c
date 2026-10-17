@@ -73,8 +73,23 @@ struct pal_svsm_pipe_pair {
  * A fixed pool rather than an allocator: the region is shared by processes
  * that cannot agree about a heap, and a bitmap over fixed slots is
  * something two of them can race on safely with one atomic.
+ *
+ * 1024 pairs, which is more than the LibOS lets one process hold ends of
+ * (RLIMIT_NOFILE, 900), so a program meets the same limit it would on Linux
+ * - EMFILE - rather than this one. It was 32 for the whole lineage, and a
+ * pipe a program never closed is held for as long as its process lives: a
+ * vault that left one end open per invocation (pipe-fork-test.py's parent
+ * never closes `r`) had its subprocess.run fail with ENOMEM at invocation
+ * 30 - three pairs short - and its own pipe() at 33, on every LibOS.
+ *
+ * The size costs nothing until it is used. The monitor RESERVES a lineage
+ * region and commits a page, zeroed, the first time a member touches it
+ * (`lineage_commit`), and a pair is taken lowest-first, so what a lineage
+ * pays for is its high-water mark of pairs held at once - about 8 KiB each.
+ * Which is also why nothing here clears the pairs: a memset of all of them
+ * would commit 8 MiB to say what fresh pages already say.
  */
-#define PIPE_ARENA_PAIRS 32
+#define PIPE_ARENA_PAIRS 1024
 #define PIPE_ARENA_MAGIC 0x45504950534D564DULL   /* "MVMSPIPE" */
 
 /*
@@ -120,14 +135,15 @@ struct pipe_rdv {
     char     name[PIPE_RDV_NAME];
 };
 
+/* The rendezvous table FIRST: it is scanned on every cross-process connect
+ * and every poll of a published listener, and in front of the pairs it shares
+ * the first pages with the header instead of sitting past the last pair. */
 struct pipe_arena {
     uint64_t magic;
     uint32_t pairs;
-    uint32_t pad;
-    struct pal_svsm_pipe_pair pair[PIPE_ARENA_PAIRS];
     uint32_t rdvs;
-    uint32_t pad2;
     struct pipe_rdv rdv[PIPE_RDV_SLOTS];
+    struct pal_svsm_pipe_pair pair[PIPE_ARENA_PAIRS];
 };
 
 static struct pipe_arena* g_arena;
@@ -139,7 +155,9 @@ bool g_pal_svsm_pipes_shared;
  * it inherited that they have another holder. The LIST is process-local and
  * copied by the fork, which is what makes it the right list: it is exactly
  * the set of handles the child now has. */
-#define PIPE_LIVE_MAX 256
+/* Ends, so twice the arena's pairs: a process may hold both ends of every
+ * pair it can get. */
+#define PIPE_LIVE_MAX (2 * PIPE_ARENA_PAIRS)
 static PAL_HANDLE g_live[PIPE_LIVE_MAX];
 
 /* Defined below, beside the arena it asks about. */
@@ -148,7 +166,7 @@ static bool from_arena(const struct pal_svsm_pipe_pair* p);
 /*
  * Registering a handle can FAIL, and it must not fail quietly.
  *
- * A handle that is not in this list is one `pal_svsm_pipes_after_fork` will
+ * A handle that is not in this list is one `pal_svsm_pipes_fork_hold` will
  * not count, so the child never takes its holder reference: the parent's
  * close and the child's close then drive the pair's holder count to zero
  * while a live handle still points at it, the arena slot is marked free, the
@@ -162,7 +180,7 @@ static bool from_arena(const struct pal_svsm_pipe_pair* p);
  * is wrong in the old way rather than corrupting.
  */
 static bool live_add(PAL_HANDLE h) {
-    /* Only a pair in the ARENA. `pal_svsm_pipes_after_fork` skips every other
+    /* Only a pair in the ARENA. `pal_svsm_pipes_fork_hold` skips every other
      * kind, so a heap pair in here is an entry that can never be used - and
      * it is not harmless: the LibOS's own pipes are heap pairs and they never
      * leave this list, because their only destructor is `pipe_destroy` behind
@@ -206,7 +224,9 @@ static struct pipe_arena* arena(void) {
     uint64_t empty = 0;
     if (__atomic_compare_exchange_n(&a->magic, &empty, PIPE_ARENA_MAGIC, false,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        memset(a->pair, 0, sizeof(a->pair));
+        /* The pairs are NOT cleared: the region's pages are zero when they
+         * are committed, and clearing would commit all of them (see
+         * PIPE_ARENA_PAIRS). The table is one page and is cleared anyway. */
         memset(a->rdv, 0, sizeof(a->rdv));
         a->pairs = PIPE_ARENA_PAIRS;
         a->rdvs  = PIPE_RDV_SLOTS;
@@ -351,8 +371,9 @@ bool pal_svsm_pipe_is_shared(PAL_HANDLE handle) {
  * so `detach_all_fds` never closes them, and PalObjectDestroy (their only
  * other destructor) was a no-op when the arena was built. Every fork added a
  * holder to each of them for ever. That stub is fixed, so they are released
- * now - and they still do not belong here: the arena is 32 pairs for the
- * whole VM, and a per-thread wakeup object never crosses a fork. */
+ * now - and they still do not belong here: the arena is the lineage's, every
+ * process in it draws on the same pairs, and a per-thread wakeup object never
+ * crosses a fork. */
 static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
     struct pipe_arena* a = shareable ? arena() : NULL;
     if (!a) {
@@ -393,6 +414,14 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
         p->holders[1] = 1;
         return p;
     }
+    /* Said, once a process: this used to be a bare ENOMEM, which the LibOS
+     * reports as "pipe connection failure" and Python as "Cannot allocate
+     * memory" - neither of which says what ran out. */
+    static bool said;
+    if (!__atomic_exchange_n(&said, true, __ATOMIC_RELAXED))
+        log_error("pipe: all %u shared pipe pairs of this lineage are held - a pipe a "
+                  "child can inherit is refused (ENOMEM) until one is closed",
+                  a->pairs);
     return NULL;
 }
 
@@ -412,21 +441,35 @@ static void pair_release(struct pal_svsm_pipe_pair* p, unsigned side) {
         free(p);
 }
 
-/* A fork has just given this process a copy of every handle in `g_live`.
- * The pairs are SHARED, so each of them now has one more holder and must be
- * told, or the parent's first close would look like the last one. Called
- * from _PalProcessFork in the child, where nothing else is running. */
-void pal_svsm_pipes_after_fork(void) {
+/* A fork is about to give the child a copy of every handle in `g_live`. The
+ * pairs are SHARED, so each of them gains a holder - and gains it NOW, in the
+ * parent, before the copy (`delta` +1), or back again if the fork failed
+ * (`delta` -1).
+ *
+ * It used to be the CHILD that counted, once it first ran. The parent does
+ * not wait for that: it returns from the fork and closes its copies at once
+ * - subprocess closes the child's ends of all three pipes before it reads one
+ * - and a close that found the count at 1 took it to 0. A reader then saw
+ * end-of-file before its child had run at all, and the child's output went
+ * into a ring nobody read: `subprocess.run` returned rc 0 with stdout '',
+ * about once in a hundred runs. A parent that closed BOTH ends in that window
+ * freed the pair outright, and the child's late increment landed on a pair
+ * the next pipe() could claim and clear.
+ *
+ * Called from _PalProcessFork after the lock drain and with nothing between
+ * it and the monitor call that could yield - PAL text is never preempted - so
+ * the list counted is exactly the list the child gets. */
+void pal_svsm_pipes_fork_hold(int delta) {
     for (size_t i = 0; i < PIPE_LIVE_MAX; i++) {
         PAL_HANDLE h = g_live[i];
         if (!h || !h->pipe.pair || h->pipe.released)
             continue;
-        /* Only the shared ones. A heap pair in this child is a private copy
+        /* Only the shared ones. A heap pair in the child is a private copy
          * - counting a holder on it would say something true about a pair
          * the parent cannot see. */
         if (!from_arena(h->pipe.pair))
             continue;
-        __atomic_add_fetch(&h->pipe.pair->holders[h->pipe.side], 1, __ATOMIC_ACQ_REL);
+        __atomic_add_fetch(&h->pipe.pair->holders[h->pipe.side], delta, __ATOMIC_ACQ_REL);
     }
 }
 
