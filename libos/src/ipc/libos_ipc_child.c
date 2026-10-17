@@ -24,9 +24,27 @@ void ipc_child_disconnect_callback(IDTYPE vmid) {
     }
 }
 
+/*
+ * A copy-on-write fork's child tells its parent nothing when it ends: the
+ * parent asks the HOST (reap_host_children, PalProcessWait), which ended it
+ * and knows how, whether or not the child got to say anything.
+ *
+ * With the IPC worker on, the child used to say it as well, and two answers
+ * were worse than one. The parent took whichever arrived first, the other
+ * found the child gone, and a pid is a monitor id - a reused slot - so a late
+ * notice from a child that had exec'd a subprocess and exited 0 could land on
+ * the NEXT child with that pid, and a child that exited 7 was reaped as 0.
+ * Set once, in the child, and kept across execve, which is the same process.
+ */
+static bool g_cld_exit_by_host = false;
+
+void ipc_cld_exit_by_host(void) {
+    g_cld_exit_by_host = true;
+}
+
 int ipc_cld_exit_send(unsigned int exitcode, unsigned int term_signal) {
-    if (!g_process.ppid) {
-        /* We have no parent inside Gramine, so no one to notify. */
+    if (!g_process.ppid || g_cld_exit_by_host) {
+        /* We have no parent inside Gramine, or one that asks the host. */
         return 0;
     }
 
@@ -62,12 +80,12 @@ int ipc_cld_exit_callback(IDTYPE src, void* data, uint64_t seq) {
     if (mark_child_exited_by_pid(msgin->pid, msgin->uid, msgin->exitcode, msgin->term_signal)) {
         log_debug("Child process (pid: %u) died", msgin->pid);
     } else {
-        /* Not an error on a host where a parent hears of its child's end
-         * twice. A copy-on-write fork's parent also asks the MONITOR how its
-         * child ended (PalProcessWait), and whichever of the two answers comes
-         * second finds the child already reaped. This returned -EINVAL, which
-         * the IPC worker treats as fatal (PalProcessExit(1)): with the worker
-         * on, a vault died a few subprocess.run()s in, every time. */
+        /* Not fatal: this returned -EINVAL, which the IPC worker treats as
+         * fatal (PalProcessExit(1)), and with the worker on a vault died a few
+         * subprocess.run()s in, every time - a copy-on-write child's notice
+         * arriving after its parent had already reaped it through the host.
+         * Such a child sends none now (ipc_cld_exit_by_host); a notice about a
+         * child this process does not track is still no reason to end it. */
         log_debug("child-death notification for a child no longer tracked: pid: %d, vmid: %u",
                   msgin->pid, src);
     }

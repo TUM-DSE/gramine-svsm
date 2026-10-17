@@ -179,6 +179,9 @@ struct libos_ipc_cld_exit {
 } __attribute__((packed));
 
 int ipc_cld_exit_send(unsigned int exitcode, unsigned int term_signal);
+/* In a copy-on-write fork's child: its parent learns how it ended from the
+ * host, so it sends no child-death notification (libos_ipc_child.c). */
+void ipc_cld_exit_by_host(void);
 int ipc_cld_exit_callback(IDTYPE src, void* data, uint64_t seq);
 void ipc_child_disconnect_callback(IDTYPE vmid);
 
