@@ -212,6 +212,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
         INIT_LISTP(&g_process.zombies);
         unlock(&g_process.children_lock);
 
+        id_ranges_after_cow_fork((IDTYPE)self_id);
         get_cur_thread()->tid = (IDTYPE)self_id;
         return 0;
     }

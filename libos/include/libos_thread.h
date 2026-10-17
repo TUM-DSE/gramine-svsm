@@ -148,6 +148,9 @@ struct libos_thread_queue {
 
 int init_threading(void);
 int init_id_ranges(IDTYPE preload_tid);
+/* In a copy-on-write fork's child: `self_id`, its tid, came from the monitor
+ * and is never released to the id ranges (libos_pid.c). */
+void id_ranges_after_cow_fork(IDTYPE self_id);
 
 static inline bool is_internal(struct libos_thread* thread) {
     return thread->tid == 0;

@@ -42,6 +42,23 @@ static struct avl_tree g_used_ranges_tree = { .cmp = id_range_cmp };
 static IDTYPE g_last_used_id = 0;
 static struct libos_lock g_ranges_lock;
 
+/*
+ * The id a copy-on-write fork's child runs under (do_clone_cow_fork): the
+ * MONITOR names it, and this allocator never handed it out. Releasing it
+ * looked it up in the ranges the child copied from its parent - which, while
+ * monitor ids were small, found the parent's first range and quietly took a
+ * count off the child's copy of it, and once they were past it (id 54, late
+ * in a full lane) found nothing and stopped at the BUG below: "Trying to
+ * release unknown ID!", and every forked child exited 1.
+ */
+static IDTYPE g_monitor_named_id = 0;
+
+void id_ranges_after_cow_fork(IDTYPE self_id) {
+    lock(&g_ranges_lock);
+    g_monitor_named_id = self_id;
+    unlock(&g_ranges_lock);
+}
+
 int init_id_ranges(IDTYPE preload_tid) {
     if (!create_lock(&g_ranges_lock)) {
         return -ENOMEM;
@@ -146,6 +163,11 @@ out:
 
 void release_id(IDTYPE id) {
     lock(&g_ranges_lock);
+    if (id && id == g_monitor_named_id) {
+        /* Not ours to give back: see g_monitor_named_id. */
+        unlock(&g_ranges_lock);
+        return;
+    }
     if (g_last_range && g_last_range->start <= id && id <= g_last_range->end) {
         assert(g_last_range->taken_count > 0);
         g_last_range->taken_count--;
