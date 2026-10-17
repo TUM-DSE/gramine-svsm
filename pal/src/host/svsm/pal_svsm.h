@@ -243,11 +243,15 @@ size_t pal_svsm_pipe_readable(PAL_HANDLE handle);
  * reading the manifest digest can see both. */
 extern bool g_pal_svsm_pipes_shared;
 /* A fork is about to give the child a copy of every pipe handle; the pairs
- * are shared, so each gains a holder (+1). Called in the PARENT right before
- * the fork, and with -1 if the fork failed. */
-void pal_svsm_pipes_fork_hold(int delta);
-/* In the child: forget the copied pending connections, unreleased. */
-void pal_svsm_pipes_child_after_fork(void);
+ * are shared, so each gains a holder, recorded in a ledger row filled for the
+ * child. Called in the PARENT right before the fork; then exactly one of
+ * _fork_failed (no child) or _fork_parent (the child's serial). */
+void pal_svsm_pipes_fork_prepare(void);
+void pal_svsm_pipes_fork_failed(void);
+void pal_svsm_pipes_fork_parent(uint64_t child_serial);
+/* In the child: take the row filled for it, and forget the copied pending
+ * connections, unreleased. */
+void pal_svsm_pipes_child_after_fork(uint64_t self_serial);
 /* The forker is the child's only thread (pal_threading.c). */
 void pal_svsm_threads_child_after_fork(void);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);

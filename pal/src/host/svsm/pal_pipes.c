@@ -26,6 +26,7 @@
 #include "pal_internal.h"
 #include "pal_svsm.h"
 #include "pal_monitor_call.h"
+#include "pal_svsm_chan.h"
 
 #define PIPE_RING_SIZE   4096
 /* create_pollable_event connects and accepts back to back, so one is really
@@ -144,14 +145,61 @@ struct pipe_rdv {
     char     name[PIPE_RDV_NAME];
 };
 
+/*
+ * WHO holds what: a ledger row per member of the lineage.
+ *
+ * `holders` says how many handles hold each end, which is all a reader needs
+ * - until a holder dies without closing anything. A process the monitor
+ * deletes or kills runs no exit path, so its holds were never given back: the
+ * pair never freed, and a reader whose writer it was waited for an
+ * end-of-file that could not come. A count cannot say whose holds to take
+ * back; this can. Every member writes down, in its own row, what it holds -
+ * per pair, per end - and a survivor that finds a row whose serial the
+ * monitor no longer lists (the roster in the region header, which only the
+ * monitor writes and which drops a member in `drop_mapper`) gives those
+ * holds back for it (ledger_sweep).
+ *
+ * The serial and not the id: an id is a process-table slot and is reissued,
+ * a serial never is. A forked child's row is filled by its PARENT before the
+ * fork, from the same list the hold counts come from, and carries the
+ * parent's serial until it is stamped with the child's - which both sides do
+ * at once after the fork, the parent with the serial the monitor hands back.
+ * So a row is never without a living owner it could be swept with.
+ *
+ * `tag` is the row's state and a generation, in one word, so that claiming,
+ * stamping and sweeping are each one compare-and-swap, and a stamp meant for
+ * one use of a row cannot land on the next.
+ */
+#define PIPE_LEDGER_ROWS 32
+
+#define LEDGER_FREE     0u      /* nobody's */
+#define LEDGER_CLAIMING 1u      /* being taken; `serial` not yet written */
+#define LEDGER_FILLING  2u      /* filled for a child; `serial` is the forker's */
+#define LEDGER_STAMPING 3u      /* `serial` changing to the child's */
+#define LEDGER_LIVE     4u      /* `serial` holds what the row says */
+#define LEDGER_SWEEPING 5u      /* its holds being given back */
+#define LEDGER_TAG(gen, state) (((uint64_t)(gen) << 8) | (state))
+#define LEDGER_STATE(tag)      ((uint32_t)((tag) & 0xff))
+#define LEDGER_GEN(tag)        ((tag) >> 8)
+
+struct pipe_ledger {
+    uint64_t tag;
+    uint64_t serial;
+    uint16_t held[PIPE_ARENA_PAIRS][2];
+};
+
 /* The rendezvous table FIRST: it is scanned on every cross-process connect
  * and every poll of a published listener, and in front of the pairs it shares
- * the first pages with the header instead of sitting past the last pair. */
+ * the first pages with the header instead of sitting past the last pair. The
+ * ledger is next: a row is committed when a member first takes one. */
 struct pipe_arena {
     uint64_t magic;
     uint32_t pairs;
     uint32_t rdvs;
     struct pipe_rdv rdv[PIPE_RDV_SLOTS];
+    uint32_t ledgers;
+    uint32_t ledger_pad;
+    struct pipe_ledger ledger[PIPE_LEDGER_ROWS];
     struct pal_svsm_pipe_pair pair[PIPE_ARENA_PAIRS];
 };
 
@@ -237,14 +285,170 @@ static struct pipe_arena* arena(void) {
          * are committed, and clearing would commit all of them (see
          * PIPE_ARENA_PAIRS). The table is one page and is cleared anyway. */
         memset(a->rdv, 0, sizeof(a->rdv));
-        a->pairs = PIPE_ARENA_PAIRS;
-        a->rdvs  = PIPE_RDV_SLOTS;
+        a->pairs   = PIPE_ARENA_PAIRS;
+        a->rdvs    = PIPE_RDV_SLOTS;
+        a->ledgers = PIPE_LEDGER_ROWS;
         __atomic_thread_fence(__ATOMIC_RELEASE);
     } else if (__atomic_load_n(&a->magic, __ATOMIC_ACQUIRE) != PIPE_ARENA_MAGIC) {
         return NULL;
     }
     g_arena = a;
     return a;
+}
+
+/* This process's ledger row; NULL until it first holds a shared pipe, and
+ * for good if every row was taken (its holds are then counted but not
+ * written down: a death of this process leaks them, as every death did). */
+static struct pipe_ledger* g_ledger;
+static bool g_ledger_full_said;
+/* The row a fork in progress filled for its child, and which use of it. */
+static struct pipe_ledger* g_fork_ledger;
+static uint64_t g_fork_gen;
+
+/* Read every time: a copy-on-write child has every byte of its parent's
+ * memory, so a cached serial would be the parent's (_PalLineageSelf). */
+static uint64_t self_serial(void) {
+    return pal_chan_u64(PAL_CHAN_DIR_VADDR, PAL_CHAN_DIR_SERIAL);
+}
+
+/* The region header: one page in front of the arena, written only by the
+ * monitor (page_is_writable_by refuses page 0 of a lineage region). */
+static uintptr_t arena_header(void) {
+    return (uintptr_t)g_arena - PAGE_SIZE;
+}
+
+static bool member_alive(uint64_t serial) {
+    uintptr_t hdr = arena_header();
+    for (unsigned i = 0; i < PAL_CHAN_MAX_MEMBERS; i++)
+        if (pal_chan_u64(hdr, PAL_CHAN_HDR_MEMBERS + i * 8) == serial)
+            return true;
+    return false;
+}
+
+/* Take a free row for `serial`, ending in `state` (LIVE or FILLING). */
+static struct pipe_ledger* ledger_claim(struct pipe_arena* a, uint64_t serial, uint32_t state,
+                                        uint64_t* out_gen) {
+    if (!serial)
+        return NULL;
+    for (uint32_t i = 0; i < a->ledgers && i < PIPE_LEDGER_ROWS; i++) {
+        struct pipe_ledger* r = &a->ledger[i];
+        uint64_t t = __atomic_load_n(&r->tag, __ATOMIC_ACQUIRE);
+        if (LEDGER_STATE(t) != LEDGER_FREE)
+            continue;
+        uint64_t gen = LEDGER_GEN(t) + 1;
+        if (!__atomic_compare_exchange_n(&r->tag, &t, LEDGER_TAG(gen, LEDGER_CLAIMING), false,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            continue;
+        /* A row goes back FREE only with its counts at zero (ledger_sweep,
+         * pal_svsm_pipes_fork_failed), and a fresh page is zero. */
+        __atomic_store_n(&r->serial, serial, __ATOMIC_RELEASE);
+        __atomic_store_n(&r->tag, LEDGER_TAG(gen, state), __ATOMIC_RELEASE);
+        if (out_gen)
+            *out_gen = gen;
+        return r;
+    }
+    if (!__atomic_exchange_n(&g_ledger_full_said, true, __ATOMIC_RELAXED))
+        log_warning("pipe: all %u ledger rows of this lineage are taken - this process's "
+                    "shared pipe holds are not recorded, and a kill of it leaks them",
+                    PIPE_LEDGER_ROWS);
+    return NULL;
+}
+
+/* This process's own row, taken the first time it is needed. */
+static struct pipe_ledger* ledger_self(void) {
+    if (!g_ledger && g_arena)
+        g_ledger = ledger_claim(g_arena, self_serial(), LEDGER_LIVE, NULL);
+    return g_ledger;
+}
+
+/* This process gained (+1) or gave up (-1) one hold on `side` of `p`. Every
+ * change to `holders` that is this process's own goes through here, in the
+ * same direction, so the row and the counts it explains agree. */
+static void ledger_add(struct pal_svsm_pipe_pair* p, unsigned side, int delta) {
+    if (!p || !from_arena(p))
+        return;
+    struct pipe_ledger* r = ledger_self();
+    if (!r)
+        return;
+    uint16_t* c = &r->held[(size_t)(p - &g_arena->pair[0])][side];
+    if (delta > 0) {
+        __atomic_add_fetch(c, 1, __ATOMIC_ACQ_REL);
+        return;
+    }
+    /* Never below zero: a hold this row never recorded - taken while every
+     * row was in use, and closed after one came free - is not one to take
+     * off it. Wrapped, it would read as 65535 holds to the sweep. */
+    uint16_t v = __atomic_load_n(c, __ATOMIC_ACQUIRE);
+    while (v && !__atomic_compare_exchange_n(c, &v, (uint16_t)(v - 1), false,
+                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        ;
+}
+
+/* Give back `n` holds on `side` of `p` that were somebody else's. */
+static void pair_put_n(struct pal_svsm_pipe_pair* p, unsigned side, int n) {
+    __atomic_sub_fetch(&p->holders[side], n, __ATOMIC_ACQ_REL);
+    int left = __atomic_sub_fetch(&p->refs, n, __ATOMIC_ACQ_REL);
+    if (left == 0)
+        __atomic_store_n(&p->in_use, 0, __ATOMIC_RELEASE);
+    else if (left < 0)
+        log_error("pipe: pair %ld released below zero (%d)", (long)(p - &g_arena->pair[0]), left);
+}
+
+/*
+ * Give back, for the members the monitor no longer lists, every hold their
+ * rows say they had. Returns whether anything was given back.
+ *
+ * Every row, every time - and that is cheap: a free row is one load, and a
+ * row in use is sixteen more, against a roster of at most sixteen. It used to
+ * stop early when the roster matched the one this process had last swept
+ * against, and that missed the case it exists for: a parent whose child was
+ * forked AND deleted between two of its looks saw the same roster twice and
+ * never looked at the rows. Each row is judged against a FRESH read of the
+ * roster, made after the row's own: the monitor puts a child on the roster
+ * during the fork, before its parent can stamp the child's serial anywhere,
+ * so a row's serial read first cannot be newer than the roster read after it.
+ *
+ * Two survivors can come here for the same dead member at once (one in a
+ * read, one in pair_new); the CAS to SWEEPING is the claim, and only its
+ * winner gives anything back.
+ */
+static bool ledger_sweep(void) {
+    struct pipe_arena* a = g_arena;
+    if (!a)
+        return false;
+    bool any = false;
+    for (uint32_t i = 0; i < a->ledgers && i < PIPE_LEDGER_ROWS; i++) {
+        struct pipe_ledger* r = &a->ledger[i];
+        uint64_t t = __atomic_load_n(&r->tag, __ATOMIC_ACQUIRE);
+        uint32_t st = LEDGER_STATE(t);
+        if (st != LEDGER_LIVE && st != LEDGER_FILLING)
+            continue;
+        uint64_t serial = __atomic_load_n(&r->serial, __ATOMIC_ACQUIRE);
+        if (!serial || member_alive(serial))
+            continue;
+        if (!__atomic_compare_exchange_n(&r->tag, &t, LEDGER_TAG(LEDGER_GEN(t), LEDGER_SWEEPING),
+                                         false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            continue;
+        unsigned n = 0;
+        for (uint32_t k = 0; k < a->pairs && k < PIPE_ARENA_PAIRS; k++) {
+            for (unsigned side = 0; side < 2; side++) {
+                uint16_t c = __atomic_exchange_n(&r->held[k][side], 0, __ATOMIC_ACQ_REL);
+                if (c) {
+                    pair_put_n(&a->pair[k], side, c);
+                    n += c;
+                }
+            }
+        }
+        __atomic_store_n(&r->serial, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&r->tag, LEDGER_TAG(LEDGER_GEN(t), LEDGER_FREE), __ATOMIC_RELEASE);
+        if (n)
+            log_warning("pipe: gave back %u shared pipe hold(s) of member %lu, which the "
+                        "monitor no longer lists", n, serial);
+        any = true;
+    }
+    if (any)
+        pal_svsm_poll_wake();   /* a reader here may now see its end-of-file */
+    return any;
 }
 
 struct pipe_pending {
@@ -411,21 +615,31 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
         p->in_use = 1;
         return p;
     }
-    /* Both bounds: `pairs` is in the region every member can write, and a
-     * value past the array would be writes past the region. */
-    for (uint32_t i = 0; i < a->pairs && i < PIPE_ARENA_PAIRS; i++) {
-        int free_ = 0;
-        if (!__atomic_compare_exchange_n(&a->pair[i].in_use, &free_, 1, false,
-                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            continue;
-        struct pal_svsm_pipe_pair* p = &a->pair[i];
-        memset(&p->dir, 0, sizeof(p->dir));
-        p->holders[0] = 1;
-        /* Side 1 does not exist until somebody accepts; until then side 0
-         * must not see EOF, only "nothing yet". */
-        p->holders[1] = 1;
-        __atomic_store_n(&p->refs, 2, __ATOMIC_RELEASE);
-        return p;
+    /* Twice at most: the second pass after giving back what dead members
+     * held, which a full arena is the likeliest sign of. */
+    for (int pass = 0; pass < 2; pass++) {
+        /* Both bounds: `pairs` is in the region every member can write, and a
+         * value past the array would be writes past the region. */
+        for (uint32_t i = 0; i < a->pairs && i < PIPE_ARENA_PAIRS; i++) {
+            int free_ = 0;
+            if (!__atomic_compare_exchange_n(&a->pair[i].in_use, &free_, 1, false,
+                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                continue;
+            struct pal_svsm_pipe_pair* p = &a->pair[i];
+            memset(&p->dir, 0, sizeof(p->dir));
+            p->holders[0] = 1;
+            /* Side 1 does not exist until somebody accepts; until then side 0
+             * must not see EOF, only "nothing yet". */
+            p->holders[1] = 1;
+            __atomic_store_n(&p->refs, 2, __ATOMIC_RELEASE);
+            /* Both are this process's until it says otherwise
+             * (pipe_connect hands side 1 to the rendezvous). */
+            ledger_add(p, 0, +1);
+            ledger_add(p, 1, +1);
+            return p;
+        }
+        if (!ledger_sweep())
+            break;
     }
     /* Said, once a process: this used to be a bare ENOMEM, which the LibOS
      * reports as "pipe connection failure" and Python as "Cannot allocate
@@ -444,7 +658,7 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
  * that returns it, so exactly one does. The side's own count goes first:
  * by the time the pair can be reused, nobody still has a decrement of it to
  * make. */
-static void pair_release(struct pal_svsm_pipe_pair* p, unsigned side) {
+static void pair_put(struct pal_svsm_pipe_pair* p, unsigned side) {
     if (!p)
         return;
     __atomic_sub_fetch(&p->holders[side], 1, __ATOMIC_ACQ_REL);
@@ -456,10 +670,18 @@ static void pair_release(struct pal_svsm_pipe_pair* p, unsigned side) {
         free(p);
 }
 
+/* One of THIS process's holds: out of its ledger row first, then out of the
+ * count. pair_put alone is for a hold that was nobody's row's - the one a
+ * cross-process connect leaves with the rendezvous. */
+static void pair_release(struct pal_svsm_pipe_pair* p, unsigned side) {
+    ledger_add(p, side, -1);
+    pair_put(p, side);
+}
+
 /* A fork is about to give the child a copy of every handle in `g_live`. The
  * pairs are SHARED, so each of them gains a holder - and gains it NOW, in the
- * parent, before the copy (`delta` +1), or back again if the fork failed
- * (`delta` -1).
+ * parent, before the copy, and loses it again if the fork failed
+ * (pal_svsm_pipes_fork_failed).
  *
  * It used to be the CHILD that counted, once it first ran. The parent does
  * not wait for that: it returns from the fork and closes its copies at once
@@ -471,10 +693,16 @@ static void pair_release(struct pal_svsm_pipe_pair* p, unsigned side) {
  * freed the pair outright, and the child's late increment landed on a pair
  * the next pipe() could claim and clear.
  *
+ * The same walk fills the child's LEDGER row: what it counts is exactly what
+ * the child will hold, and the row is how those holds come back if the child
+ * is killed. It carries this process's serial until the fork returns and the
+ * child's is stamped on it (pal_svsm_pipes_fork_parent and _child_after_fork,
+ * whichever runs first), so a sweep never finds it without a living owner.
+ *
  * Called from _PalProcessFork after the lock drain and with nothing between
  * it and the monitor call that could yield - PAL text is never preempted - so
  * the list counted is exactly the list the child gets. */
-void pal_svsm_pipes_fork_hold(int delta) {
+static void fork_count(int delta) {
     for (size_t i = 0; i < PIPE_LIVE_MAX; i++) {
         PAL_HANDLE h = g_live[i];
         if (!h || !h->pipe.pair || h->pipe.released)
@@ -486,26 +714,95 @@ void pal_svsm_pipes_fork_hold(int delta) {
             continue;
         __atomic_add_fetch(&h->pipe.pair->holders[h->pipe.side], delta, __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->pipe.pair->refs, delta, __ATOMIC_ACQ_REL);
+        if (delta > 0 && g_fork_ledger) {
+            size_t idx = (size_t)(h->pipe.pair - &g_arena->pair[0]);
+            __atomic_add_fetch(&g_fork_ledger->held[idx][h->pipe.side], 1, __ATOMIC_ACQ_REL);
+        }
     }
 }
 
-/* In the child, right after the fork: forget the connections pending in the
- * copied `g_pending`, WITHOUT releasing them.
+void pal_svsm_pipes_fork_prepare(void) {
+    g_fork_ledger = g_arena ? ledger_claim(g_arena, self_serial(), LEDGER_FILLING, &g_fork_gen)
+                            : NULL;
+    fork_count(+1);
+}
+
+/* There is no child to hold anything: the counts come back off, and the row
+ * goes back free with its counts at zero. */
+void pal_svsm_pipes_fork_failed(void) {
+    fork_count(-1);
+    struct pipe_ledger* r = g_fork_ledger;
+    g_fork_ledger = NULL;
+    if (!r)
+        return;
+    memset(r->held, 0, sizeof(r->held));
+    __atomic_store_n(&r->serial, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->tag, LEDGER_TAG(g_fork_gen, LEDGER_FREE), __ATOMIC_RELEASE);
+}
+
+/* Put the child's serial on the row filled for it. Parent and child both do
+ * it, the first one wins and the other finds it done; a stamp for a use of
+ * the row that is over (the generation moved on) does nothing. Returns
+ * whether the row is now `child_serial`'s. */
+static bool ledger_stamp(struct pipe_ledger* r, uint64_t gen, uint64_t child_serial) {
+    if (!r || !child_serial)
+        return false;
+    for (int spins = 0; spins < 1000000; spins++) {
+        uint64_t t = LEDGER_TAG(gen, LEDGER_FILLING);
+        if (__atomic_compare_exchange_n(&r->tag, &t, LEDGER_TAG(gen, LEDGER_STAMPING), false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&r->serial, child_serial, __ATOMIC_RELEASE);
+            __atomic_store_n(&r->tag, LEDGER_TAG(gen, LEDGER_LIVE), __ATOMIC_RELEASE);
+            return true;
+        }
+        if (t == LEDGER_TAG(gen, LEDGER_LIVE))
+            return __atomic_load_n(&r->serial, __ATOMIC_ACQUIRE) == child_serial;
+        if (t != LEDGER_TAG(gen, LEDGER_STAMPING))
+            return false;               /* swept, or reused: not this fork's any more */
+        CPU_RELAX();                    /* the other side is two stores from done */
+    }
+    return false;
+}
+
+void pal_svsm_pipes_fork_parent(uint64_t child_serial) {
+    (void)ledger_stamp(g_fork_ledger, g_fork_gen, child_serial);
+    g_fork_ledger = NULL;
+}
+
+/* In the child, right after the fork: its row is the one its parent filled,
+ * and the pending connections in the copied `g_pending` are forgotten,
+ * WITHOUT releasing them.
  *
- * Every pipe(2) passes through it - create_pipes connects (an arena pair,
- * parked here) and then accepts it - and only that connecting thread ever
- * consumes the entry, by accepting it or closing its listener. A fork from
- * another thread can land in between; that thread does not exist in the
+ * Every pipe(2) passes through `g_pending` - create_pipes connects (an arena
+ * pair, parked here) and then accepts it - and only that connecting thread
+ * ever consumes the entry, by accepting it or closing its listener. A fork
+ * from another thread can land in between; that thread does not exist in the
  * child, so the child's copy would never be consumed. Its hold was not
- * counted for the child (`pal_svsm_pipes_fork_hold` counts handles), so it is
- * dropped as it is: releasing it would give back the parent's, and counting
- * it would leave a hold nobody gives back. */
-void pal_svsm_pipes_child_after_fork(void) {
+ * counted for the child (fork_count counts handles), so it is dropped as it
+ * is: releasing it would give back the parent's, and counting it would leave
+ * a hold nobody gives back.
+ *
+ * A row that is not the child's to stamp - every row was taken, or its holds
+ * were already given back because its parent died before either could stamp
+ * it - leaves the child with handles whose holds are not its to release: they
+ * are marked released, so its closes give back nothing a second time. */
+void pal_svsm_pipes_child_after_fork(uint64_t self) {
     /* The names are not freed either: nothing at fork return should depend
      * on an allocator, and it is at most PIPE_PENDING_MAX short strings. */
     for (size_t i = 0; i < PIPE_PENDING_MAX; i++) {
         g_pending[i].name = NULL;
         g_pending[i].pair = NULL;
+    }
+    struct pipe_ledger* r = g_fork_ledger;
+    bool mine = ledger_stamp(r, g_fork_gen, self);
+    g_fork_ledger = NULL;
+    /* The parent's row is not this process's to write in, whatever happens. */
+    g_ledger = mine ? r : NULL;
+    if (r && !mine) {
+        for (size_t i = 0; i < PIPE_LIVE_MAX; i++)
+            if (g_live[i] && g_live[i]->pipe.pair && from_arena(g_live[i]->pipe.pair))
+                g_live[i]->pipe.released = true;
+        log_warning("pipe: this child's shared pipe holds were given back before it ran");
     }
 }
 
@@ -549,11 +846,20 @@ bool pal_svsm_pipe_writable(PAL_HANDLE handle) {
     return out_ring(handle)->used < PIPE_RING_SIZE;
 }
 
+/* The far end has no holder left - or, on a shared pipe, has none once the
+ * holds of members that died without closing are given back. Readers and
+ * writers that wait re-ask this every PAL_SVSM_SHARED_PIPE_POLL_US, and the
+ * sweep costs a load per free ledger row when nobody has died. */
 bool pal_svsm_pipe_peer_gone(PAL_HANDLE handle) {
-    if (!handle->pipe.pair)
+    struct pal_svsm_pipe_pair* p = handle->pipe.pair;
+    if (!p)
         return true;
-    return __atomic_load_n(&handle->pipe.pair->holders[1 - handle->pipe.side],
-                           __ATOMIC_ACQUIRE) <= 0;
+    int* far = &p->holders[1 - handle->pipe.side];
+    if (__atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0)
+        return true;
+    if (!from_arena(p) || !ledger_sweep())
+        return false;
+    return __atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0;
 }
 
 bool pal_svsm_pipesrv_pending(PAL_HANDLE handle) {
@@ -619,6 +925,10 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, pal_stream_options
             free(hdl);
             return -PAL_ERROR_NOMEM;
         }
+        /* The pending hold on side 1 is the rendezvous's now: whoever
+         * accepts takes it into their own row, and a death of this process
+         * must not give it back from under them. */
+        ledger_add(pair, 1, -1);
         init_handle_hdr(hdl, PAL_TYPE_PIPE);
         hdl->pipe.pair        = pair;
         hdl->pipe.side        = 0;
@@ -727,10 +1037,12 @@ static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client,
         PAL_HANDLE hdl = calloc(1, HANDLE_SIZE(pipe));
         if (!hdl) {
             /* Give it back rather than drop it: the connector is waiting and
-             * its pair would otherwise be held by nobody. */
-            pair_release(pair, 1);
+             * its pair would otherwise be held by nobody. It was never in this
+             * process's row. */
+            pair_put(pair, 1);
             return -PAL_ERROR_NOMEM;
         }
+        ledger_add(pair, 1, +1);        /* the rendezvous's hold is ours now */
         init_handle_hdr(hdl, PAL_TYPE_PIPE);
         hdl->pipe.pair        = pair;   /* takes the pending hold on side 1 */
         hdl->pipe.side        = 1;

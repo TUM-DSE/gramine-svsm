@@ -164,15 +164,18 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
  * instant of the call, so there is nothing to serialise and nothing to ship
  * - which is exactly what gramine's own fork (checkpoint over a stream)
  * exists to work around on a PAL that cannot copy an address space. */
-uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self) {
+uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFE4;
     data.rbx = flags;
     data.rcx = 0;
     data.rdx = 0;
     monitor_call(&data);
+    bool child = data.rcx == 0;
     if (out_self)
-        *out_self = data.rbx;   /* the child's own id; junk in the parent */
+        *out_self = child ? data.rbx : 0;           /* the child's own id */
+    if (out_serial)
+        *out_serial = child ? data.rdx : data.rbx;  /* the CHILD's serial, either side */
     return data.rcx;
 }
 

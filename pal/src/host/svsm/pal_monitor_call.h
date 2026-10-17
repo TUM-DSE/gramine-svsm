@@ -59,10 +59,15 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
 /* bit 1: the fork went ahead with lock holds of other threads it could not
  * wait out (pal_events.c) - the monitor counts it, GetStat FORK_FOREIGN_HOLDS. */
 #define PAL_SVSM_FORK_FOREIGN_HOLDS 2UL
-/* `out_self` receives the CHILD's own id, and is meaningless in the parent.
- * The child cannot learn it any other way: rcx must be 0 to say which side
- * it is, so the id travels in the register the flags came in on. */
-uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self);
+/* `out_self` receives the CHILD's own id, and is 0 in the parent. The child
+ * cannot learn it any other way: rcx must be 0 to say which side it is, so
+ * the id travels in the register the flags came in on.
+ *
+ * `out_serial` receives the CHILD's serial on both sides - its own in the
+ * child, its child's in the parent (0 if the fork failed). The parent needs
+ * it to say whose record of shared-pipe holds it filled for the child
+ * (pal_pipes.c, the ledger). */
+uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial);
 
 /* Wait (0x4FFFFFD5): how did my child end?
  *
