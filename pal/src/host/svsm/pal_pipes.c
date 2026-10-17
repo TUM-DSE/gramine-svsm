@@ -826,7 +826,13 @@ static bool ledger_stamp(struct pipe_ledger* r, uint64_t gen, uint64_t child_ser
     }
     /* The other side got there first. It stamps the same serial - parent and
      * child both stamp the child's - so a stamp in progress is as good as
-     * done, and a sweep leaves a STAMPING row alone. */
+     * done, and a sweep leaves a STAMPING row alone.
+     *
+     * The one way that is wrong: the stamper is torn down between its CAS and
+     * its LIVE store - two stores of PAL text, which the monitor does not
+     * preempt; a delete waits for the vault to leave it. The row would then
+     * stay STAMPING, never swept, its holds kept until the lineage ends: a
+     * leak, never a double release. */
     if (t == LEDGER_TAG(gen, LEDGER_STAMPING))
         return true;
     if (t == LEDGER_TAG(gen, LEDGER_LIVE))
@@ -861,7 +867,12 @@ void pal_svsm_pipes_fork_parent(uint64_t child_serial) {
  * were already given back because its parent died before either could stamp
  * it - leaves the child with handles whose holds are not its to release: they
  * are marked released, so its closes give back nothing a second time. */
-void pal_svsm_pipes_child_after_fork(uint64_t self) {
+void pal_svsm_pipes_child_after_fork(uint64_t from_fork) {
+    /* The serial from this process's own directory, as every other user of
+     * one reads it; the one the fork call handed back only if that is not
+     * there. A monitor that left the register 0 would otherwise make every
+     * stamp fail - and the loop below cut every inherited pipe. */
+    uint64_t self = self_serial() ?: from_fork;
     /* The names are not freed either: nothing at fork return should depend
      * on an allocator, and it is at most PIPE_PENDING_MAX short strings. */
     for (size_t i = 0; i < PIPE_PENDING_MAX; i++) {
@@ -928,8 +939,11 @@ size_t pal_svsm_pipe_readable(PAL_HANDLE handle) {
 }
 
 bool pal_svsm_pipe_writable(PAL_HANDLE handle) {
+    /* A detached end (pal_svsm_pipes_child_after_fork) is "writable" so that
+     * a writer that polls first gets to its write and its EPIPE, instead of
+     * polling for ever. */
     if (!handle->pipe.pair)
-        return false;
+        return handle->pipe.released;
     return out_ring(handle)->used < PIPE_RING_SIZE;
 }
 
