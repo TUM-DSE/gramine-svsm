@@ -25,6 +25,7 @@ PalStreamMap
 PalStreamSetLength
 PalStreamFlush
 PalStreamDelete
+PalStreamsKeepOnly
 PalSocketCreate
 PalSocketBind
 PalSocketListen

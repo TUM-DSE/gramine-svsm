@@ -171,6 +171,7 @@ int _PalStreamOpen(PAL_HANDLE* handle, const char* uri, enum pal_access access,
                    pal_share_flags_t share, enum pal_create_mode create,
                    pal_stream_options_t options);
 int _PalStreamDelete(PAL_HANDLE handle, enum pal_delete_mode delete_mode);
+int _PalStreamsKeepOnly(PAL_HANDLE* keep, size_t count);
 int64_t _PalStreamRead(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buf);
 int64_t _PalStreamWrite(PAL_HANDLE handle, uint64_t offset, uint64_t count, const void* buf);
 int _PalStreamAttributesQuery(const char* uri, PAL_STREAM_ATTR* attr);

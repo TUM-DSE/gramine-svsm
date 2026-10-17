@@ -45,6 +45,12 @@ int _PalLineageMemberAlive(uint64_t serial, bool* out) {
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
+int _PalStreamsKeepOnly(PAL_HANDLE* keep, size_t count) {
+    __UNUSED(keep);
+    __UNUSED(count);
+    return -PAL_ERROR_NOTIMPLEMENTED;   /* a host pipe is the host kernel's */
+}
+
 int _PalRuntimeImageMap(void* addr, uint64_t size, pal_prot_flags_t prot, uint64_t image_off) {
     __UNUSED(addr);
     __UNUSED(size);

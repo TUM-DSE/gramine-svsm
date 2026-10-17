@@ -793,6 +793,9 @@ void pal_svsm_pipes_child_after_fork(uint64_t self) {
         g_pending[i].name = NULL;
         g_pending[i].pair = NULL;
     }
+    for (size_t i = 0; i < PIPE_LIVE_MAX; i++)
+        if (g_live[i])
+            g_live[i]->pipe.inherited = true;
     struct pipe_ledger* r = g_fork_ledger;
     bool mine = ledger_stamp(r, g_fork_gen, self);
     g_fork_ledger = NULL;
@@ -1245,6 +1248,47 @@ static int pipe_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
     }
     pipe_let_go(handle);
     pal_svsm_poll_wake();
+    return 0;
+}
+
+/*
+ * At execve: give back the share of every shared pipe end this process holds
+ * that the LibOS no longer lists.
+ *
+ * What it catches is a forked child's copy of a handle that no fd of the child
+ * names: an end another thread of the parent was in the middle of creating
+ * (pipe(2) between its connect and the fds being installed), or one that only
+ * that thread still had a reference to. That thread does not run in the child
+ * (pal_svsm_threads_child_after_fork), so nothing would ever close the copy -
+ * and the child's hold counted, so a reader in the parent waited for an
+ * end-of-file for as long as whatever the child exec'd ran. On Linux the
+ * child would have the fd, and O_CLOEXEC would close it here; this is that.
+ *
+ * Only handles this process INHERITED: one it made itself after the fork -
+ * an IPC connection of its own, say - is whatever the LibOS uses it for, fd
+ * or not. Shares only: the handles stay allocated, because whatever still
+ * points at one is in an old image nobody runs, and freeing under it gains
+ * nothing.
+ */
+int _PalStreamsKeepOnly(PAL_HANDLE* keep, size_t count) {
+    unsigned n = 0;
+    for (size_t i = 0; i < PIPE_LIVE_MAX; i++) {
+        PAL_HANDLE h = g_live[i];
+        if (!h || !h->pipe.pair || h->pipe.released || !h->pipe.inherited
+                || !from_arena(h->pipe.pair))
+            continue;
+        bool kept = false;
+        for (size_t k = 0; k < count && !kept; k++)
+            kept = keep[k] == h;
+        if (kept)
+            continue;
+        pipe_let_go(h);
+        n++;
+    }
+    if (n) {
+        log_warning("execve: let go of %u shared pipe end(s) that no fd names", n);
+        pal_svsm_poll_wake();
+    }
     return 0;
 }
 

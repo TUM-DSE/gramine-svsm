@@ -763,6 +763,37 @@ void close_cloexec_handles(struct libos_handle_map* map) {
     rwlock_write_unlock(&map->lock);
 }
 
+/*
+ * At execve, after the close-on-exec fds are gone: every stream this process
+ * shares with others that no remaining fd names is let go (PalStreamsKeepOnly).
+ *
+ * The new image can only reach what an fd names. Anything else a forked child
+ * holds is a copy of something another thread of its parent was in the middle
+ * of - creating a pipe, or reading one - and that thread does not exist in
+ * the child, so nothing would ever close it, and the pipe's other end waited
+ * for an end-of-file for as long as the exec'd program ran.
+ */
+void keep_only_fd_streams(struct libos_handle_map* map) {
+    size_t cap = 0;
+    rwlock_read_lock(&map->lock);
+    if (map->fd_top != FD_NULL)
+        cap = map->fd_top + 1;
+    PAL_HANDLE* keep = cap ? malloc(cap * sizeof(*keep)) : NULL;
+    size_t n = 0;
+    for (uint32_t i = 0; keep && i < cap; i++) {
+        struct libos_fd_handle* fd_hdl = map->map[i];
+        if (HANDLE_ALLOCATED(fd_hdl) && fd_hdl->handle && fd_hdl->handle->pal_handle)
+            keep[n++] = fd_hdl->handle->pal_handle;
+    }
+    rwlock_read_unlock(&map->lock);
+    /* Without the list, nothing is let go: a release of an end the new image
+     * does hold would be worse than a leak. */
+    if (cap && !keep)
+        return;
+    (void)PalStreamsKeepOnly(keep, n);
+    free(keep);
+}
+
 void close_handle_range(uint32_t first, uint32_t last, bool cloexec) {
     struct libos_handle_map* handle_map = get_thread_handle_map(NULL);
     rwlock_write_lock(&handle_map->lock);

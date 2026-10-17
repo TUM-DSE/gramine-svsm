@@ -137,6 +137,10 @@ struct pal_handle_inner {
              * reaches both `delete` and `destroy`, and a side counted down
              * twice closes a pipe end somebody else is still holding. */
             bool     released;
+            /* This process got the handle by being forked, as a copy of its
+             * parent's - the only way it can hold one that no fd of its own
+             * names (_PalStreamsKeepOnly). */
+            bool     inherited;
             /* PIPESRV only: this listener's slot in the arena's SHARED
              * rendezvous table, or -1 if it is a process-local listener.
              * A cross-process connect finds a listener by looking there,

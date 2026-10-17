@@ -143,6 +143,12 @@ int PalStreamDelete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
     return _PalStreamDelete(handle, delete_mode);
 }
 
+int PalStreamsKeepOnly(PAL_HANDLE* keep, size_t count) {
+    if (count && !keep)
+        return -PAL_ERROR_INVAL;
+    return _PalStreamsKeepOnly(keep, count);
+}
+
 int64_t _PalStreamRead(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buf) {
     const struct handle_ops* ops = HANDLE_OPS(handle);
 

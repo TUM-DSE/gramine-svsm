@@ -664,6 +664,23 @@ enum pal_delete_mode {
 int PalStreamDelete(PAL_HANDLE handle, enum pal_delete_mode delete_mode);
 
 /*!
+ * \brief Let go of every stream shared with other processes that is not in `keep`.
+ *
+ * \param keep   The streams this process still uses.
+ * \param count  How many there are.
+ *
+ * For a process image that is being replaced (execve): any such stream this
+ * process inherited by a fork that the LibOS does not list is one only the
+ * old image could reach - a copy of a pipe end another thread of its parent
+ * was still creating or using, which no fd of the child names. Its share is
+ * given back, so the other processes on that stream are not kept waiting for
+ * a process that can never close it. The handles themselves stay allocated.
+ *
+ * \returns 0, or -PAL_ERROR_NOTIMPLEMENTED on a host with no shared streams.
+ */
+int PalStreamsKeepOnly(PAL_HANDLE* keep, size_t count);
+
+/*!
  * \brief Map a file to a virtual memory address in the current process.
  *
  * \param handle  Handle to the stream to be mapped.
