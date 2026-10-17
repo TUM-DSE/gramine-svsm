@@ -68,27 +68,28 @@ static inline void unlock(struct libos_lock* l) {
 }
 
 /*
- * A lock held ACROSS A BLOCKING OPERATION - a socket's recv_lock, held while a
- * recv waits for data that may never come - and so NOT counted for the fork.
+ * A blocking wait made while holding `n` locks: for its length they are not
+ * counted for the fork (lock_holds_pause), and counted again after it
+ * (lock_holds_resume).
  *
- * Counted, it was a hold that never drained: every fork from a process with a
- * thread idle in recv waited the drain's whole bound (100 ms), every time, and
- * a fork that refuses undrained holds would refuse every fork. Uncounted, the
- * fork goes ahead with it held - so whoever owns one makes the child a fresh
- * one (sockets_after_cow_fork), since the thread that held it there does not
+ * Counted, a lock held across a wait that may never end - a socket's
+ * recv_lock while recv waits for data, its locks while connect waits for the
+ * network service - was a hold that never drained: every fork from the
+ * process waited the drain's whole bound (100 ms) and went ahead with it.
+ * Only the WAIT is uncounted, so the bookkeeping either side of it (the peek
+ * buffer, the state) is still waited out by a fork. A fork that lands in the
+ * wait copies the locks held, so whoever owns such locks makes the child
+ * fresh ones (sockets_after_cow_fork) - the thread that held them does not
  * exist in the child.
  */
-static inline void lock_uncounted(struct libos_lock* l) {
-    assert(l->lock);
-    while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
-        /* nop */;
-    l->owner = get_cur_tid();
+static inline void lock_holds_pause(int n) {
+    while (n-- > 0)
+        PalLockHold(NULL, -1);
 }
 
-static inline void unlock_uncounted(struct libos_lock* l) {
-    assert(l->lock);
-    l->owner = 0;
-    PalEventSet(l->lock);
+static inline void lock_holds_resume(int n) {
+    while (n-- > 0)
+        PalLockHold(NULL, 1);
 }
 
 #ifdef DEBUG

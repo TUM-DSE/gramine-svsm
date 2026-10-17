@@ -214,6 +214,24 @@ bool mark_child_exited_by_pid(IDTYPE pid, IDTYPE child_uid, int exit_code, int s
     return mark_child_exited(cmp_child_by_pid, (unsigned long)pid, child_uid, exit_code, signal);
 }
 
+/* A child of ours under `pid` that the host must have deleted - reaped as
+ * killed, with its OWN uid in what the parent is told. */
+bool reap_stale_child(IDTYPE pid) {
+    bool found = false;
+    IDTYPE uid = 0;
+    lock(&g_process.children_lock);
+    struct libos_child_process* child;
+    LISTP_FOR_EACH_ENTRY(child, &g_process.children, list) {
+        if (child->pid == pid && child->by_host) {
+            found = true;
+            uid = child->uid;
+            break;
+        }
+    }
+    unlock(&g_process.children_lock);
+    return found && mark_child_exited_by_pid(pid, uid, 0, SIGKILL);
+}
+
 bool mark_child_exited_by_pid_ipc(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal) {
     return mark_child_exited(cmp_child_by_pid_ipc, (unsigned long)pid, child_uid, exit_code,
                              signal);

@@ -293,7 +293,7 @@ void detach_all_fds(void);
 void close_cloexec_handles(struct libos_handle_map* map);
 /* At execve: let go of shared streams no fd names (libos_handle.c). */
 void keep_only_fd_streams(struct libos_handle_map* map);
-/* In a copy-on-write fork's child: fresh socket recv locks (libos_handle.c). */
+/* In a copy-on-write fork's child: fresh socket locks (libos_handle.c). */
 void sockets_after_cow_fork(void);
 void close_handle_range(uint32_t first, uint32_t last, bool cloexec);
 

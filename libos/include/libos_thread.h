@@ -350,4 +350,7 @@ void futexes_after_cow_fork(void);
 void itimer_after_cow_fork(void);
 /* In a copy-on-write fork's child: nobody is reaping (libos_wait.c). */
 void wait_after_cow_fork(void);
+/* Hold off / allow host reaps, around recording a new forked child. */
+void host_reap_hold(void);
+void host_reap_release(void);
 void release_clear_child_tid(int* clear_child_tid);

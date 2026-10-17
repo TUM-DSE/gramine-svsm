@@ -96,6 +96,8 @@ bool mark_child_exited_by_vmid(IDTYPE vmid, IDTYPE child_uid, int exit_code, int
 bool mark_child_exited_by_pid(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal);
 /* The same, for what the IPC layer says: never a child the host reports on. */
 bool mark_child_exited_by_pid_ipc(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal);
+/* A host-reported child under `pid` the host deleted: reaped as SIGKILL. */
+bool reap_stale_child(IDTYPE pid);
 
 /*!
  * \brief Check whether the process is a zombie process (terminated but not yet waited for).

@@ -845,7 +845,9 @@ void pal_svsm_pipes_fork_parent(uint64_t child_serial) {
      * call passed in that register. A real child serial is always newer than
      * its parent's - serials are issued in order and the child was made
      * after - so anything else is left for the child, which stamps its own. */
-    if (child_serial > self_serial())
+    /* Only with a row to stamp: self_serial() reads the directory page,
+     * which a process holding no region and no channel does not have. */
+    if (g_fork_ledger && child_serial > self_serial())
         (void)ledger_stamp(g_fork_ledger, g_fork_gen, child_serial);
     g_fork_ledger = NULL;
 }
@@ -872,7 +874,11 @@ void pal_svsm_pipes_child_after_fork(uint64_t from_fork) {
      * one reads it; the one the fork call handed back only if that is not
      * there. A monitor that left the register 0 would otherwise make every
      * stamp fail - and the loop below cut every inherited pipe. */
-    uint64_t self = self_serial() ?: from_fork;
+    struct pipe_ledger* r = g_fork_ledger;
+    /* Only with a row: a child of a parent that held no region (no shared
+     * pipes, no channel) has no directory page to read - the monitor gives
+     * it one only for a parent that held something (fork_share). */
+    uint64_t self = r ? (self_serial() ?: from_fork) : 0;
     /* The names are not freed either: nothing at fork return should depend
      * on an allocator, and it is at most PIPE_PENDING_MAX short strings. */
     for (size_t i = 0; i < PIPE_PENDING_MAX; i++) {
@@ -882,7 +888,6 @@ void pal_svsm_pipes_child_after_fork(uint64_t from_fork) {
     for (size_t i = 0; i < PIPE_LIVE_MAX; i++)
         if (g_live[i])
             g_live[i]->pipe.inherited = true;
-    struct pipe_ledger* r = g_fork_ledger;
     bool mine = ledger_stamp(r, g_fork_gen, self);
     g_fork_ledger = NULL;
     /* The parent's row is not this process's to write in, whatever happens. */
@@ -1254,13 +1259,13 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
     if (handle->hdr.type != PAL_TYPE_PIPE)
         return -PAL_ERROR_BADHANDLE;
     if (!handle->pipe.pair)   /* detached: nobody reads it */
-        return handle->pipe.released ? -PAL_ERROR_CONNFAILED : -PAL_ERROR_BADHANDLE;
+        return handle->pipe.released ? -PAL_ERROR_CONNFAILED_PIPE : -PAL_ERROR_BADHANDLE;
     if (!len)
         return 0;
 
     while (out_ring(handle)->used == PIPE_RING_SIZE) {
         if (pal_svsm_pipe_peer_gone(handle))
-            return -PAL_ERROR_CONNFAILED;
+            return -PAL_ERROR_CONNFAILED_PIPE;   /* EPIPE, and the LibOS sends SIGPIPE */
         if (handle->pipe.nonblocking)
             return -PAL_ERROR_TRYAGAIN;
         uint64_t dl;

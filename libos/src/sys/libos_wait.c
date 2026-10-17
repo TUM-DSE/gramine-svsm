@@ -130,6 +130,18 @@ void wait_after_cow_fork(void) {
     g_reaping = 0;
 }
 
+/* Every reap held off, for a fork that records its new child: the flag
+ * reap_host_children takes, waited for rather than tried. Yields; holds no
+ * lock while it waits. */
+void host_reap_hold(void) {
+    while (__atomic_exchange_n(&g_reaping, 1, __ATOMIC_ACQ_REL))
+        PalThreadYieldExecution();
+}
+
+void host_reap_release(void) {
+    __atomic_store_n(&g_reaping, 0, __ATOMIC_RELEASE);
+}
+
 static void reap_host_children(void) {
     /* One reaper at a time. Two threads waiting at once each took a snapshot
      * of the list and asked the monitor; with pids reused, one thread's

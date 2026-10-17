@@ -190,6 +190,17 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
         async_worker_after_cow_fork();
         itimer_after_cow_fork();
         wait_after_cow_fork();
+        /* The parent's children are not ours, and its zombies are not ours
+         * to reap. Inheriting either would let the child wait for - and
+         * collect - a process it never created. */
+        lock(&g_process.children_lock);
+        INIT_LISTP(&g_process.children);
+        INIT_LISTP(&g_process.zombies);
+        /* And whoever was waiting for them: the parent's threads blocked in
+         * a wait, which do not exist here - waking one later was a wake and
+         * a put of a thread this process does not have. */
+        g_process.wait_queue = NULL;
+        unlock(&g_process.children_lock);
         ipc_cld_exit_by_host();
 
         rwlock_write_lock(&g_process_id_lock);
@@ -214,18 +225,6 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
             log_error("fork: child %u has no IPC worker: %s", g_process.pid,
                       unix_strerror(ipc_ret));
         }
-
-        /* The parent's children are not ours, and its zombies are not ours
-         * to reap. Inheriting either would let the child wait for - and
-         * collect - a process it never created. */
-        lock(&g_process.children_lock);
-        INIT_LISTP(&g_process.children);
-        INIT_LISTP(&g_process.zombies);
-        /* And whoever was waiting for them: the parent's threads blocked in
-         * a wait, which do not exist here - waking one later was a wake and
-         * a put of a thread this process does not have. */
-        g_process.wait_queue = NULL;
-        unlock(&g_process.children_lock);
 
         id_ranges_after_cow_fork((IDTYPE)self_id);
         get_cur_thread()->tid = (IDTYPE)self_id;
@@ -255,12 +254,20 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
      * and once this one is on the list that look would ask about the NEW
      * child under the old one's entry - the old waitpid would block until
      * the new child ended and take its status. So it is reaped now, as
-     * killed, which is what the next look would have said. */
-    (void)mark_child_exited_by_pid((IDTYPE)child_id, child->uid, 0, SIGKILL);
-
+     * killed, which is what the next look would have said.
+     *
+     * With every reap held off around it: a reap that has its answer for
+     * the OLD child from the monitor - which freed the slot this fork got -
+     * but is still on its way to marking it would otherwise mark the NEW
+     * child with the old status, after this marked the old one as killed.
+     * Holding the reap flag makes that reap finish first (on the old entry,
+     * the only one with this pid), or start after the new child is listed. */
+    host_reap_hold();
+    (void)reap_stale_child((IDTYPE)child_id);
     lock(&g_process.children_lock);
     LISTP_ADD_TAIL(child, &g_process.children, list);
     unlock(&g_process.children_lock);
+    host_reap_release();
 
     if (set_parent_tid)
         *set_parent_tid = (IDTYPE)child_id;

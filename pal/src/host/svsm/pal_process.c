@@ -39,9 +39,10 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
      * That is POSIX's own caveat for a fork from a threaded program, and
      * refusing instead was worse: a hold that does not drain is a lock held
      * across a blocking operation, so a retry never helped and every fork
-     * from such a process failed. The one such lock the LibOS has, a
-     * socket's recv_lock, is not counted (lock_uncounted) and is made anew in
-     * the child, so this is for a counted hold that did not drain. */
+     * from such a process failed. The ones the LibOS has - a socket's locks
+     * across a recv or a connect - stop counting for the length of the wait
+     * (libos_lock.h lock_holds_pause) and are made anew in the child, so
+     * this is for a counted hold that did not drain. */
     int64_t foreign = pal_svsm_fork_quiesce(100 * 1000);
     if (foreign > 0)
         log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - forking "

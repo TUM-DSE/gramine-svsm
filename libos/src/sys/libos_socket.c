@@ -526,7 +526,7 @@ long libos_syscall_connect(int fd, void* addr, int _addrlen) {
 
     /* We need to take `recv_lock` just in case we free `peek` buffer in `disconnect` case.
      * This should not hurt though - nothing should be calling `recv` concurrently anyway. */
-    lock_uncounted(&sock->recv_lock);
+    lock(&sock->recv_lock);
     lock(&sock->lock);
 
     switch (sock->state) {
@@ -588,7 +588,11 @@ long libos_syscall_connect(int fd, void* addr, int _addrlen) {
     }
 
     bool inprogress;
+    /* Both locks held across what may be a long wait for the network
+     * service (lock_holds_pause). */
+    lock_holds_pause(2);
     ret = sock->ops->connect(handle, addr, addrlen, &inprogress);
+    lock_holds_resume(2);
     maybe_epoll_et_trigger(handle, ret, /*in=*/false, /*was_partial=*/false);
     if (ret < 0) {
         goto out;
@@ -615,7 +619,7 @@ out:
         }
     }
     unlock(&sock->lock);
-    unlock_uncounted(&sock->recv_lock);
+    unlock(&sock->recv_lock);
     put_handle(handle);
     return ret;
 }
@@ -913,7 +917,7 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
      * not result in a deadlock - hopefully some data arrives (or the socket is closed from
      * the remote side) and unlocks the first blocked thread.
      */
-    lock_uncounted(&sock->recv_lock);
+    lock(&sock->recv_lock);
 
     if (*flags & MSG_PEEK) {
         if (sock->type != SOCK_STREAM) {
@@ -946,9 +950,12 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
                 force_nonblocking = true;
             }
 
+            /* recv_lock held across a wait for data (lock_holds_pause). */
+            lock_holds_pause(1);
             ret = sock->ops->recv(handle, &tmp_iov, 1, /*msg_control=*/NULL,
                                   /*msg_controllen_ptr=*/NULL, &tmp_iov.iov_len, /*addr=*/NULL,
                                   /*addrlen_ptr=*/NULL, force_nonblocking);
+            lock_holds_resume(1);
             if (ret == -EAGAIN && sock->peek.data_size) {
                 /* We will just return what we have already. */
                 ret = 0;
@@ -991,8 +998,10 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
     assert(!(*flags & MSG_PEEK));
 
     size_t size = 0;
+    lock_holds_pause(1);                /* recv_lock across the wait */
     ret = sock->ops->recv(handle, iov, iov_len, msg_control, msg_controllen_ptr, &size, addr,
                           addrlen_ptr, force_nonblocking);
+    lock_holds_resume(1);
     maybe_epoll_et_trigger(handle, ret, /*in=*/true, !ret ? size < total_size : false);
     if (!ret) {
         ret = *flags & MSG_TRUNC ? size : MIN(size, total_size);
@@ -1000,7 +1009,7 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
     }
 
 out:
-    unlock_uncounted(&sock->recv_lock);
+    unlock(&sock->recv_lock);
     if (ret == -EINTR) {
         /* Timeout could have been changed in the meantime, but it should not matter - this is
          * a peculiar corner case that nothing should really care about. */
