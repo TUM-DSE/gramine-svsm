@@ -12,6 +12,7 @@
 #include "libos_process.h"
 #include "libos_signal.h"
 #include "libos_table.h"
+#include "libos_thread.h"
 #include "libos_utils.h"
 #include "spinlock.h"
 
@@ -52,6 +53,15 @@ static struct {
 } g_real_itimer;
 
 static spinlock_t g_real_itimer_lock = INIT_SPINLOCK_UNLOCKED;
+
+/* In a copy-on-write fork's child: ITIMER_REAL is not inherited (it is not on
+ * Linux either), and the parent's was armed through an async worker the child
+ * no longer has (async_worker_after_cow_fork). */
+void itimer_after_cow_fork(void) {
+    g_real_itimer.timeout = 0;
+    g_real_itimer.reset   = 0;
+    spinlock_init(&g_real_itimer_lock);
+}
 
 static void signal_itimer(IDTYPE caller, void* arg) {
     // XXX: Can we simplify this code or streamline with the other callback?

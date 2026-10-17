@@ -62,8 +62,8 @@ static IDTYPE g_monitor_named_id = 0;
  * allocates from now on out of a block of the id space of its own
  * (ipc_ids_after_cow_fork).
  *
- * No lock: the child is the forking thread alone here, and a lock copied held
- * (a fork that went ahead with foreign holds) would stop it at fork return.
+ * No lock: the child is the forking thread alone here, and taking one buys
+ * nothing at fork return.
  */
 void id_ranges_after_cow_fork(IDTYPE self_id) {
     g_monitor_named_id = self_id;

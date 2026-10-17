@@ -70,6 +70,24 @@ static struct avl_tree g_futex_tree = { .cmp = futex_tree_cmp };
 
 static spinlock_t g_futex_tree_lock = INIT_SPINLOCK_UNLOCKED;
 
+/*
+ * In a copy-on-write fork's child: forget every futex waiter.
+ *
+ * Each is one of the parent's other threads, parked on a futex at the copy -
+ * the forker is running, so it is waiting on nothing - and none of them runs
+ * in the child (threads_after_cow_fork). Left in the tree, a child thread that
+ * later waited on the same word queued behind a copy, and a FUTEX_WAKE of one
+ * woke the copy: the real waiter slept on, an untimed wait for ever, and the
+ * wake's return value counted a thread that does not exist. Dropped, not put:
+ * the waiters, the futexes and the threads they name are copies. No lock: the
+ * caller is the only thread there is, and the tree lock is re-made in case a
+ * copy held it.
+ */
+void futexes_after_cow_fork(void) {
+    g_futex_tree.root = NULL;
+    spinlock_init(&g_futex_tree_lock);
+}
+
 static void get_futex(struct libos_futex* futex) {
     refcount_inc(&futex->_ref_count);
 }

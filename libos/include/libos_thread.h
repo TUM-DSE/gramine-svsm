@@ -344,4 +344,8 @@ noreturn void thread_exit(int error_code, int term_signal);
 noreturn void process_exit(int error_code, int term_signal);
 
 void release_robust_list(struct robust_list_head* head);
+/* In a copy-on-write fork's child: no thread waits on any futex (libos_futex.c). */
+void futexes_after_cow_fork(void);
+/* In a copy-on-write fork's child: no interval timer is armed (libos_alarm.c). */
+void itimer_after_cow_fork(void);
 void release_clear_child_tid(int* clear_child_tid);

@@ -185,7 +185,9 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
          * copies that will never run here (the PAL took them off its ring on
          * the way out of the fork), and its async worker is one of them. */
         threads_after_cow_fork();
+        futexes_after_cow_fork();
         async_worker_after_cow_fork();
+        itimer_after_cow_fork();
         ipc_cld_exit_by_host();
 
         rwlock_write_lock(&g_process_id_lock);

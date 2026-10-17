@@ -485,8 +485,9 @@ bool check_last_thread(bool mark_self_dead) {
  * Not put: each reference, each tid and each PAL handle they hold is a copy of
  * the parent's, and giving one back here gives back something this process
  * never had. Their memory is a copy too, so leaving it is a leak of a copy.
- * No lock: the caller is the only thread there is, and a lock copied held is
- * what pal_svsm_fork_quiesce drained before the fork.
+ * No lock: the caller is the only thread there is, and no other thread held a
+ * LibOS lock at the copy - the PAL refuses a fork until none does
+ * (pal_svsm_fork_quiesce).
  */
 void threads_after_cow_fork(void) {
     struct libos_thread* self = get_cur_thread();
