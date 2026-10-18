@@ -2273,10 +2273,11 @@ int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_ar
         return 1;
     }
     if ((want & PAL_WAIT_WRITE) && !pal_svsm_sock_writable(handle)) {
-        /* A shared datagram socket waiting for WINDOW waits for a CREDIT
-         * frame, which arrives on the inbound ring - arming on the outbound
-         * head would sleep through it. */
-        if (handle->sock.type == PAL_SOCKET_UDP && sock_shares(handle)
+        /* A shared socket waiting for WINDOW waits for a CREDIT frame,
+         * which arrives on the inbound ring - arming on the outbound head
+         * would sleep through it. (writable has just routed, so the count
+         * is current.) */
+        if (sock_shares(handle)
             && (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
             *out_arm = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, *in.peer_tail);
             return 1;
@@ -2381,6 +2382,28 @@ bool pal_svsm_sock_readable(PAL_HANDLE handle) {
     return pal_chan_readable(&in) || sock_chan_gone(handle);
 }
 
+/* Has a sharing socket used up the service's window (MVMUX_OP_CREDIT)? A
+ * CREDIT frame is a message on the inbound ring, so the shared head is routed
+ * first - as a send does after its own wait - or a credit that has arrived
+ * would be counted as one that has not. */
+static bool sock_no_credit(PAL_HANDLE handle) {
+    if (!sock_shares(handle) || (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) > 0)
+        return false;
+    struct pal_chan_ring in;
+    ring_for(handle, &in, NULL);
+    mux_poll_route(handle, &in);
+    return (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0;
+}
+
+/* Room in the outbound ring for one more message, credit or not. What a
+ * blocked send waits for once it has its credit, and all a FIN or a connect
+ * request needs: neither spends any. */
+static bool sock_ring_room(PAL_HANDLE handle) {
+    struct pal_chan_ring out;
+    ring_for(handle, NULL, &out);
+    return pal_chan_writable(&out);
+}
+
 bool pal_svsm_sock_writable(PAL_HANDLE handle) {
     if (!sock_has_chan(handle)) {
         /* A datagram socket with no channel yet IS writable: the first
@@ -2397,25 +2420,23 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle) {
          * no address for a write to use - so it stays false. */
         return handle->sock.type == PAL_SOCKET_UDP;
     }
-    struct pal_chan_ring out;
-    ring_for(handle, NULL, &out);
-    /* A shared DATAGRAM socket is writable only with credit in hand. A send
-     * past the service's window cannot wait the way a stream send does - a
-     * resolver's sockets are non-blocking - so a POLLOUT that the send then
-     * answers with EAGAIN is a promise broken, and glibc gives the socket up
-     * on it. Routing first collects a CREDIT frame that has arrived. Stream
-     * sockets keep the ring-only answer: their send waits for credit itself,
-     * and their measured paths are not this change's business. */
-    if (handle->sock.type == PAL_SOCKET_UDP && sock_shares(handle)) {
-        if ((int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
-            struct pal_chan_ring in;
-            ring_for(handle, &in, NULL);
-            mux_poll_route(handle, &in);
-            if ((int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0)
-                return false;
-        }
-    }
-    return pal_chan_writable(&out);
+    /* A SHARED socket is writable only with credit in hand: past the
+     * service's window its send cannot go, however much room the ring has.
+     * A POLLOUT that the send then answers with EAGAIN is a promise broken,
+     * and each kind of caller pays for it differently:
+     *   - a datagram socket's: a resolver's sockets are non-blocking, and
+     *     glibc gives the socket up on the EAGAIN;
+     *   - a stream socket's: a socket with a timeout is non-blocking
+     *     underneath (CPython polls, then sends), so poll said yes, send
+     *     said EAGAIN, and poll said yes again - the caller can spin
+     *     without ever waiting for the credit. Requiring credit here took
+     *     447 ms off 504's 1.48 s PUT (native-gap pal-wait C, jamie
+     *     2026-10-18).
+     * Still true for a reset socket or a gone channel, as on Linux (POLLOUT
+     * with the error): the send says what happened rather than nobody. */
+    if (sock_no_credit(handle))
+        return handle->sock.broken || sock_chan_gone(handle);
+    return sock_ring_room(handle);
 }
 
 /* The test the scheduler makes for a thread blocked in sock_block: has what
@@ -2445,17 +2466,15 @@ pal_wait_flags_t pal_svsm_sock_wait_ready(PAL_HANDLE handle, pal_wait_flags_t wa
             got |= PAL_WAIT_READ;
     }
     if (want & PAL_WAIT_WRITE) {
-        if (pal_svsm_sock_writable(handle) || ended || sock_chan_gone(handle))
+        /* RING room, not poll(2)'s writable: a send waits for its credit as
+         * PAL_SVSM_WAIT_CREDIT, and the FIN and the connect request that wait
+         * here spend no credit at all - asking for one would hold a
+         * shutdown(SHUT_WR) behind data the service has not taken yet. */
+        if (sock_ring_room(handle) || ended || sock_chan_gone(handle))
             got |= PAL_WAIT_WRITE;
     }
     if (want & PAL_SVSM_WAIT_CREDIT) {
-        /* A CREDIT frame is a message on the inbound ring, collected by
-         * routing the shared head - as the send does after its own wait. */
-        struct pal_chan_ring in;
-        ring_for(handle, &in, NULL);
-        mux_poll_route(handle, &in);
-        if ((int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) > 0
-            || handle->sock.broken || sock_chan_gone(handle))
+        if (!sock_no_credit(handle) || handle->sock.broken || sock_chan_gone(handle))
             got |= PAL_SVSM_WAIT_CREDIT;
     }
     return got;
