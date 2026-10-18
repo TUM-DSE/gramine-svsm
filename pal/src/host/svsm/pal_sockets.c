@@ -74,6 +74,8 @@ static bool g_mux_granting;  /* a connect is asking for the vault's channel (_Pa
  * or idled prints nothing, so ordinary vaults' output is unchanged. A vault
  * the host deletes rather than one that exits never reaches here, and
  * prints nothing either. */
+static void mux_dump(void);
+
 void pal_svsm_net_ctr_report(void) {
     struct pal_svsm_net_ctr c;
     c.sends         = __atomic_load_n(&g_pal_svsm_net_ctr.sends, __ATOMIC_RELAXED);
@@ -86,6 +88,10 @@ void pal_svsm_net_ctr_report(void) {
                                              __ATOMIC_RELAXED);
     c.fin_lost      = __atomic_load_n(&g_pal_svsm_net_ctr.fin_lost, __ATOMIC_RELAXED);
     c.fin_resent    = __atomic_load_n(&g_pal_svsm_net_ctr.fin_resent, __ATOMIC_RELAXED);
+    /* Every connection still open on the shared channel at exit, with its
+     * credit state: for a stall, a vault that exits with the stuck socket
+     * still open says why nothing was arriving (net_client_tagged). */
+    mux_dump();
     if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready
           | c.credit_lost | c.fin_lost))
         return;
@@ -650,6 +656,33 @@ static uint32_t mux_grant(PAL_HANDLE h) {
         g = PAL_MUX_CREDIT_CAP;
     return g;
 }
+
+/* One line per live connection on the shared channel, and one for the pool. */
+static void mux_dump(void) {
+    int n = pal_svsm_mux_count();
+    if (!n)
+        return;
+    int claims = 0, live = 0;
+    for (int i = 0; i < PAL_SVSM_MUX_MAX_CONNS && live < n; i++) {
+        PAL_HANDLE s = pal_svsm_mux_conn_at(i);
+        if (!s)
+            continue;
+        live++;
+        claims += mux_claim(s);
+        if (live > 24)
+            continue;                    /* the lines; the sums still count */
+        log_always("pal_mux: conn %#x advert %u done %u win %u grew %u claim %d owed %d q %d "
+                   "rx %u/%u%s tx %u/%u fin %d broken %d closed %d grant-now %u",
+                   s->sock.conn_id, s->sock.rx_advert, s->sock.rx_done, s->sock.rx_win,
+                   s->sock.rx_grew, mux_claim(s), (int)s->sock.credit_owed, s->sock.q_count,
+                   s->sock.rx_off, s->sock.rx_len, s->sock.rx_pooled ? " pooled" : "",
+                   s->sock.tx_sent, s->sock.tx_limit, (int)s->sock.fin_seen,
+                   (int)s->sock.broken, (int)s->sock.closed, mux_grant(s));
+    }
+    log_always("pal_mux: live %d claims %d pool busy %d of %d", live, claims,
+               g_mux_pool_busy, PAL_MUX_POOL);
+}
+
 
 /* Tell the service this socket's limit, when saying so is worth a message.
  *
