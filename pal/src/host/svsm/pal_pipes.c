@@ -65,6 +65,13 @@ struct pal_svsm_pipe_pair {
      * side sees it - as a shutdown of a socket shared across fork is. */
     int    shut_wr[2];
     int    shut_rd[2];
+    /* Held by more than one process: a fork counted a hold on it, or it was
+     * made by a connect to another process's listener. Only then can a write
+     * or a close come from outside this process, so only then do its waits
+     * poll and look for dead holders (pal_svsm_pipe_is_shared). An arena pair
+     * that never crossed - most AF_UNIX socketpairs, asyncio's self-pipe -
+     * waits like a heap pair, for this process's own wake. */
+    int    crossed;
     int    in_use;                  /* 0 = this arena slot is free */
 };
 
@@ -602,6 +609,11 @@ static bool from_arena(const struct pal_svsm_pipe_pair* p) {
     return g_arena && p >= &g_arena->pair[0] && p < &g_arena->pair[PIPE_ARENA_PAIRS];
 }
 
+/* Has another process ever held this pair (see `crossed`)? */
+static bool pair_crossed(const struct pal_svsm_pipe_pair* p) {
+    return __atomic_load_n(&p->crossed, __ATOMIC_ACQUIRE) != 0;
+}
+
 /* Asked from outside, by poll: can ANOTHER PROCESS change what this handle
  * would report? If so the poll has to bound its wait and look again, because
  * `pal_svsm_poll_wake` only reaches threads in this process.
@@ -615,7 +627,7 @@ bool pal_svsm_pipe_is_shared(PAL_HANDLE handle) {
     if (handle->hdr.type == PAL_TYPE_PIPESRV)
         return handle->pipe.rdv >= 0;
     return handle->hdr.type == PAL_TYPE_PIPE && handle->pipe.pair
-           && from_arena(handle->pipe.pair);
+           && from_arena(handle->pipe.pair) && pair_crossed(handle->pipe.pair);
 }
 
 /* `shareable` is PAL_OPTION_INHERITABLE from the caller: only a pipe that a
@@ -670,6 +682,7 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
             memset(&p->dir, 0, sizeof(p->dir));
             memset(p->shut_wr, 0, sizeof(p->shut_wr));
             memset(p->shut_rd, 0, sizeof(p->shut_rd));
+            __atomic_store_n(&p->crossed, 0, __ATOMIC_RELEASE);
             p->holders[0] = 1;
             /* Side 1 does not exist until somebody accepts; until then side 0
              * must not see EOF, only "nothing yet". */
@@ -757,6 +770,8 @@ static void fork_count(int delta) {
             continue;
         __atomic_add_fetch(&h->pipe.pair->holders[h->pipe.side], delta, __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->pipe.pair->refs, delta, __ATOMIC_ACQ_REL);
+        if (delta > 0)
+            __atomic_store_n(&h->pipe.pair->crossed, 1, __ATOMIC_RELEASE);
         if (delta > 0 && g_fork_ledger) {
             size_t idx = (size_t)(h->pipe.pair - &g_arena->pair[0]);
             __atomic_add_fetch(&g_fork_ledger->held[idx][h->pipe.side], 1, __ATOMIC_ACQ_REL);
@@ -851,6 +866,11 @@ static bool ledger_stamp(struct pipe_ledger* r, uint64_t gen, uint64_t child_ser
 }
 
 void pal_svsm_pipes_fork_parent(uint64_t child_serial) {
+    /* The fork just made pairs CROSS (fork_count), and a thread of ours may
+     * be waiting on one with no deadline - right until now its only writer
+     * was in this process. Woken, every waiter looks again and bounds its
+     * wait from here on. */
+    pal_svsm_poll_wake();
     /* A monitor older than the one that returns it hands back the FLAGS this
      * call passed in that register. A real child serial is always newer than
      * its parent's - serials are issued in order and the child was made
@@ -948,7 +968,8 @@ static struct pal_svsm_pipe_ring* out_ring(PAL_HANDLE h) {
 }
 
 size_t pal_svsm_pipe_readable(PAL_HANDLE handle) {
-    if (!handle->pipe.pair)
+    /* Released is as good as detached: the pair may be someone else's now. */
+    if (!handle->pipe.pair || handle->pipe.released)
         return 0;
     return in_ring(handle)->used;
 }
@@ -959,7 +980,7 @@ bool pal_svsm_pipe_writable(PAL_HANDLE handle) {
     /* A detached end (pal_svsm_pipes_child_after_fork) is "writable" so that
      * a writer that polls first gets to its write and its EPIPE, instead of
      * polling for ever. */
-    if (!handle->pipe.pair)
+    if (!handle->pipe.pair || handle->pipe.released)
         return handle->pipe.released;
     /* Likewise an end whose write would be refused (no reader, or shut). */
     return out_ring(handle)->used < PIPE_RING_SIZE || pipe_write_refused(handle, false);
@@ -971,7 +992,7 @@ bool pal_svsm_pipe_writable(PAL_HANDLE handle) {
  * sweep costs a load per free ledger row when nobody has died. */
 bool pal_svsm_pipe_peer_gone(PAL_HANDLE handle) {
     struct pal_svsm_pipe_pair* p = handle->pipe.pair;
-    if (!p)
+    if (!p || handle->pipe.released)
         return true;
     unsigned far_side = 1 - handle->pipe.side;
     /* The far side said it writes no more (shutdown SHUT_WR), or this side
@@ -982,9 +1003,18 @@ bool pal_svsm_pipe_peer_gone(PAL_HANDLE handle) {
     int* far = &p->holders[far_side];
     if (__atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0)
         return true;
-    if (!from_arena(p) || !ledger_sweep())
+    if (!from_arena(p) || !pair_crossed(p) || !ledger_sweep())
         return false;
     return __atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0;
+}
+
+/* Nobody holds the other end (poll's hang-up). Holders only - a shutdown of
+ * one direction is not one - and no sweep: a poll asks this every time. */
+bool pal_svsm_pipe_hung_up(PAL_HANDLE handle) {
+    struct pal_svsm_pipe_pair* p = handle->pipe.pair;
+    if (!p || handle->pipe.released)
+        return true;
+    return __atomic_load_n(&p->holders[1 - handle->pipe.side], __ATOMIC_ACQUIRE) <= 0;
 }
 
 /* Would a write to this end fail with EPIPE? No reader: the far side has no
@@ -1000,7 +1030,7 @@ static bool pipe_write_refused(PAL_HANDLE handle, bool sweep) {
     int* far = &p->holders[far_side];
     if (__atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0)
         return true;
-    if (!sweep || !from_arena(p) || !ledger_sweep())
+    if (!sweep || !from_arena(p) || !pair_crossed(p) || !ledger_sweep())
         return false;
     return __atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0;
 }
@@ -1061,6 +1091,8 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, pal_stream_options
             return -PAL_ERROR_NOMEM;
         }
         uint32_t idx = (uint32_t)(pair - &a->pair[0]);
+        /* Its other end is in another process (the listener's). */
+        __atomic_store_n(&pair->crossed, 1, __ATOMIC_RELEASE);
         if (rdv_claim(a, name, RDV_PENDING, idx) < 0) {
             log_error("pipe: no shared rendezvous slot to connect to '%s'", name);
             pair_release(pair, 1);   /* the pending hold the accept would take */
@@ -1256,7 +1288,7 @@ static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client,
 /* NULL for a private pair - its only writer is in this process, so a wake is
  * certain and waiting for one is free. */
 static const uint64_t* shared_poll_deadline(PAL_HANDLE handle, uint64_t* store) {
-    if (!from_arena(handle->pipe.pair))
+    if (!from_arena(handle->pipe.pair) || !pair_crossed(handle->pipe.pair))
         return NULL;
     *store = pal_svsm_now_usec() + PAL_SVSM_SHARED_PIPE_POLL_US;
     return store;
@@ -1266,7 +1298,7 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
     __UNUSED(offset);
     if (handle->hdr.type != PAL_TYPE_PIPE)
         return -PAL_ERROR_BADHANDLE;
-    if (!handle->pipe.pair)   /* detached (pal_svsm_pipes_child_after_fork) */
+    if (!handle->pipe.pair || handle->pipe.released)   /* detached, or let go */
         return handle->pipe.released ? 0 : -PAL_ERROR_BADHANDLE;
     if (!len)
         return 0;
@@ -1295,7 +1327,7 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
     __UNUSED(offset);
     if (handle->hdr.type != PAL_TYPE_PIPE)
         return -PAL_ERROR_BADHANDLE;
-    if (!handle->pipe.pair)   /* detached: nobody reads it */
+    if (!handle->pipe.pair || handle->pipe.released)   /* detached, or let go */
         return handle->pipe.released ? -PAL_ERROR_CONNFAILED_PIPE : -PAL_ERROR_BADHANDLE;
     if (!len)
         return 0;

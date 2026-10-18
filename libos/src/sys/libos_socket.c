@@ -1192,7 +1192,17 @@ long libos_syscall_shutdown(int fd, int how) {
             goto out;
     }
 
-    ret = PalStreamDelete(sock->pal_handle, mode);
+    /* An AF_UNIX socket is a PAL pipe: both directions shut, one after the
+     * other, so its end KEEPS its hold. ALL is a close there - the hold given
+     * back while the handle still pointed at the pair, which the peer's close
+     * could then free under it. */
+    if (sock->domain == AF_UNIX && mode == PAL_DELETE_ALL) {
+        ret = PalStreamDelete(sock->pal_handle, PAL_DELETE_READ);
+        if (ret >= 0)
+            ret = PalStreamDelete(sock->pal_handle, PAL_DELETE_WRITE);
+    } else {
+        ret = PalStreamDelete(sock->pal_handle, mode);
+    }
     if (ret < 0) {
         ret = pal_to_unix_errno(ret);
         goto out;

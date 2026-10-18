@@ -177,7 +177,7 @@ static PAL_HANDLE g_forking;           /* the context in a fork, or NULL */
 
 int64_t _PalLockHold(int64_t* word, int64_t delta) {
     PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
-    if (delta > 0 && tcb->lock_holds == 0) {
+    if (delta > 0 && tcb->lock_holds == 0 && tcb->paused_holds == 0) {
         while (__atomic_load_n(&g_forking, __ATOMIC_ACQUIRE)
                && __atomic_load_n(&g_forking, __ATOMIC_ACQUIRE) != tcb->handle)
             _PalThreadYieldExecution();
@@ -193,7 +193,7 @@ int64_t _PalLockHold(int64_t* word, int64_t delta) {
  * text, so nothing runs between the look at the gate and the count. */
 bool _PalLockHoldTry(void) {
     PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
-    if (tcb->lock_holds == 0) {
+    if (tcb->lock_holds == 0 && tcb->paused_holds == 0) {
         PAL_HANDLE f = __atomic_load_n(&g_forking, __ATOMIC_ACQUIRE);
         if (f && f != tcb->handle)
             return false;
@@ -201,6 +201,18 @@ bool _PalLockHoldTry(void) {
     tcb->lock_holds += 1;
     __atomic_add_fetch(&g_lock_holds, 1, __ATOMIC_SEQ_CST);
     return true;
+}
+
+/* `n` > 0: n of this context's holds stop counting for the fork, for a
+ * blocking wait made while holding them; `n` < 0: they count again. Never
+ * waits at the fork's gate, either way: a context with holds, paused or not,
+ * drains by finishing - waiting there while holding locks the fork does not
+ * know of kept a counted waiter on one of them from ever draining. */
+void _PalLockHoldPause(int64_t n) {
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    tcb->lock_holds   -= n;
+    tcb->paused_holds += n;
+    __atomic_sub_fetch(&g_lock_holds, n, __ATOMIC_SEQ_CST);
 }
 
 /* Until no other context holds a lock, or `max_us` has passed. Returns the

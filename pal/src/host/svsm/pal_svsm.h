@@ -31,6 +31,10 @@ typedef struct pal_svsm_tcb {
         void*      param;
         /* LibOS lock holds this context has counted (_PalLockHold). */
         int64_t    lock_holds;
+        /* Holds it has PAUSED for a blocking wait (_PalLockHoldPause): not
+         * counted for a fork, but still held - so this context never waits at
+         * the fork's gate while it has any. */
+        int64_t    paused_holds;
     };
 } PAL_SVSM_TCB;
 
@@ -260,6 +264,7 @@ void pal_svsm_pipes_exit(void);
 void pal_svsm_threads_child_after_fork(void);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
 bool   pal_svsm_pipe_peer_gone(PAL_HANDLE handle);
+bool   pal_svsm_pipe_hung_up(PAL_HANDLE handle);
 bool   pal_svsm_sock_peer_gone(PAL_HANDLE handle);
 bool   pal_svsm_pipesrv_pending(PAL_HANDLE handle);
 

@@ -18,6 +18,7 @@ PalEventClear
 PalEventWait
 PalLockHold
 PalLockHoldTry
+PalLockHoldPause
 PalStreamsWaitEvents
 PalStreamOpen
 PalStreamRead

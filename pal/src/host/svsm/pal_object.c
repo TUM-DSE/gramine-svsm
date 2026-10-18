@@ -26,6 +26,11 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
              * which is what poll(2) does with POLLHUP. */
             if ((want & PAL_WAIT_READ) && pal_svsm_pipe_peer_gone(handle))
                 got |= PAL_WAIT_READ;
+            /* And a hang-up when nobody holds the other end any more - as
+             * poll(2) says POLLHUP for a pipe whose writers have all closed.
+             * Not for a shutdown of one direction (the peer is still there). */
+            if (pal_svsm_pipe_hung_up(handle))
+                got |= PAL_WAIT_HANG_UP;
             break;
 
         case PAL_TYPE_SOCKET:

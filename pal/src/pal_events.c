@@ -30,6 +30,10 @@ bool PalLockHoldTry(void) {
     return _PalLockHoldTry();
 }
 
+void PalLockHoldPause(int64_t n) {
+    _PalLockHoldPause(n);
+}
+
 int PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
     assert(handle && handle->hdr.type == PAL_TYPE_EVENT);
     return _PalEventWait(handle, timeout_us);

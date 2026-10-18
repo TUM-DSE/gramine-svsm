@@ -116,13 +116,14 @@ static inline void lock_count_held(struct libos_lock* l) {
 }
 
 static inline void lock_holds_pause(int n) {
-    while (n-- > 0)
-        PalLockHold(NULL, -1);
+    PalLockHoldPause(n);
 }
 
+/* Counted again WITHOUT waiting at a fork's gate (PalLockHoldPause): the
+ * locks are held all along, and waiting there with them uncounted kept a
+ * counted waiter on them from draining. */
 static inline void lock_holds_resume(int n) {
-    while (n-- > 0)
-        PalLockHold(NULL, 1);
+    PalLockHoldPause(-n);
 }
 
 #ifdef DEBUG

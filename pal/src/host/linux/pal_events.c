@@ -115,3 +115,7 @@ int64_t _PalLockHold(int64_t* word, int64_t delta) {
 bool _PalLockHoldTry(void) {
     return true;    /* nothing gated, nothing counted */
 }
+
+void _PalLockHoldPause(int64_t n) {
+    __UNUSED(n);    /* nothing counted */
+}

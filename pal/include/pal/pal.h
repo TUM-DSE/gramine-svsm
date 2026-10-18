@@ -1109,6 +1109,16 @@ int64_t PalLockHold(int64_t* word, int64_t delta);
  */
 bool PalLockHoldTry(void);
 
+/*!
+ * \brief Pause (\p n > 0) or resume (\p n < 0) \p n of this thread's lock holds for a fork.
+ *
+ * Around a blocking wait made while holding locks (a socket's recv): paused holds are not counted
+ * for a fork, so the fork does not wait for the wait, and while any are paused the thread never
+ * waits at a fork's gate - its holds drain when it finishes. Whoever owns such locks remakes them
+ * in a forked child. Other PALs do nothing.
+ */
+void PalLockHoldPause(int64_t n);
+
 typedef uint32_t pal_wait_flags_t; /* bitfield */
 #define PAL_WAIT_READ     1
 #define PAL_WAIT_WRITE    2

@@ -37,3 +37,11 @@ struct handle_ops g_event_ops = {
 int64_t _PalLockHold(int64_t* word, int64_t delta) {
     return word ? __atomic_fetch_add(word, delta, __ATOMIC_SEQ_CST) : 0;
 }
+
+bool _PalLockHoldTry(void) {
+    return true;    /* nothing gated, nothing counted */
+}
+
+void _PalLockHoldPause(int64_t n) {
+    __UNUSED(n);    /* nothing counted */
+}
