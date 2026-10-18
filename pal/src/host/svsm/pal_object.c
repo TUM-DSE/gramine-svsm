@@ -27,8 +27,10 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
             if ((want & PAL_WAIT_READ) && pal_svsm_pipe_peer_gone(handle))
                 got |= PAL_WAIT_READ;
             /* And a hang-up when nobody holds the other end any more - as
-             * poll(2) says POLLHUP for a pipe whose writers have all closed.
-             * Not for a shutdown of one direction (the peer is still there). */
+             * poll(2) says POLLHUP for a pipe whose writers have all closed -
+             * or when shutdowns have closed both directions of a socket. Not
+             * for a shutdown of one direction (the peer is still there). The
+             * write end of a pipe turns this into POLLERR (fs/pipe). */
             if (pal_svsm_pipe_hung_up(handle))
                 got |= PAL_WAIT_HANG_UP;
             break;

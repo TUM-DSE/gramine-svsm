@@ -234,6 +234,9 @@ int64_t pal_svsm_fork_quiesce(uint64_t max_us) {
  * (pal_svsm_threads_child_after_fork) - left in the count, every later fork
  * from this child would wait them out for its whole bound. */
 void pal_svsm_lock_holds_after_fork(void) {
+    /* The forker pauses no hold: it forks from the clone path, not from inside
+     * a socket's blocking wait, so none of the holds it carries is uncounted. */
+    assert(pal_get_svsm_tcb()->paused_holds == 0);
     __atomic_store_n(&g_lock_holds, pal_get_svsm_tcb()->lock_holds, __ATOMIC_SEQ_CST);
 }
 

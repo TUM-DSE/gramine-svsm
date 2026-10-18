@@ -70,7 +70,13 @@ struct pal_svsm_pipe_pair {
      * or a close come from outside this process, so only then do its waits
      * poll and look for dead holders (pal_svsm_pipe_is_shared). An arena pair
      * that never crossed - most AF_UNIX socketpairs, asyncio's self-pipe -
-     * waits like a heap pair, for this process's own wake. */
+     * waits like a heap pair, for this process's own wake.
+     *
+     * Never cleared while the pair lives (only pair_new resets it): once a
+     * process has forked, every pair it held then keeps the polled wait even
+     * after the child has let go of it, because nothing tells the parent the
+     * last foreign hold is gone short of a sweep - which is what the poll
+     * costs to begin with. */
     int    crossed;
     int    in_use;                  /* 0 = this arena slot is free */
 };
@@ -1008,13 +1014,26 @@ bool pal_svsm_pipe_peer_gone(PAL_HANDLE handle) {
     return __atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0;
 }
 
-/* Nobody holds the other end (poll's hang-up). Holders only - a shutdown of
- * one direction is not one - and no sweep: a poll asks this every time. */
+/* Nobody holds the other end (poll's hang-up), or this end can neither read
+ * nor write any more. No sweep: a poll asks this every time.
+ *
+ * The second is Linux's unix_poll, which says EPOLLHUP once a socket's
+ * shutdown mask is full - its own shutdowns together with the mirror of its
+ * peer's (a peer's SHUT_WR is this end's SHUT_RD, and the other way round).
+ * A shutdown of one direction alone is not a hang-up. A pipe never sets the
+ * flags, so for a pipe this is holders only. */
 bool pal_svsm_pipe_hung_up(PAL_HANDLE handle) {
     struct pal_svsm_pipe_pair* p = handle->pipe.pair;
     if (!p || handle->pipe.released)
         return true;
-    return __atomic_load_n(&p->holders[1 - handle->pipe.side], __ATOMIC_ACQUIRE) <= 0;
+    unsigned side = handle->pipe.side, far_side = 1 - side;
+    bool rd_done = __atomic_load_n(&p->shut_rd[side], __ATOMIC_ACQUIRE)
+                   || __atomic_load_n(&p->shut_wr[far_side], __ATOMIC_ACQUIRE);
+    bool wr_done = __atomic_load_n(&p->shut_wr[side], __ATOMIC_ACQUIRE)
+                   || __atomic_load_n(&p->shut_rd[far_side], __ATOMIC_ACQUIRE);
+    if (rd_done && wr_done)
+        return true;
+    return __atomic_load_n(&p->holders[far_side], __ATOMIC_ACQUIRE) <= 0;
 }
 
 /* Would a write to this end fail with EPIPE? No reader: the far side has no

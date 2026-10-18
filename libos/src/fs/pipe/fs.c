@@ -300,12 +300,24 @@ static int pipe_close(struct libos_handle* handle) {
     return 0;
 }
 
+/* The write end of a pipe whose readers have all gone: poll(2) on Linux says
+ * POLLERR there (and POLLOUT, for the write that would fail EPIPE), keeping
+ * POLLHUP for a read end with no writers. The PAL cannot tell the two apart -
+ * an AF_UNIX socket is a pipe pair as well, and for it a far end with no
+ * holder IS a hang-up - so the pipe says it here, where it knows which end it
+ * is. */
+static void pipe_post_poll(struct libos_handle* hdl, pal_wait_flags_t* pal_ret_events) {
+    if (hdl->acc_mode == MAY_WRITE && (*pal_ret_events & PAL_WAIT_HANG_UP))
+        *pal_ret_events = (*pal_ret_events & ~PAL_WAIT_HANG_UP) | PAL_WAIT_ERROR;
+}
+
 static struct libos_fs_ops pipe_fs_ops = {
     .read     = &pipe_read,
     .write    = &pipe_write,
     .hstat    = &pipe_hstat,
     .setflags = &pipe_setflags,
     .close    = &pipe_close,
+    .post_poll = &pipe_post_poll,
 };
 
 static struct libos_fs_ops fifo_fs_ops = {
@@ -314,6 +326,7 @@ static struct libos_fs_ops fifo_fs_ops = {
     .hstat    = &pipe_hstat,
     .setflags = &pipe_setflags,
     .close    = &pipe_close,
+    .post_poll = &pipe_post_poll,
 };
 
 static struct libos_d_ops fifo_d_ops = {
