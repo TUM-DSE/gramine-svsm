@@ -2761,6 +2761,11 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
         }
         pal_svsm_mux_release(handle->sock.conn_id);
         handle->sock.conn_id = 0;
+        /* And its frames go back to the vault's pool now, not at close(2):
+         * with the id released it is out of mux_grant's walk, so buffers it
+         * kept would be pool nobody's claim covers (review by jamie). Every
+         * parked call is over (`closed`) and no reader takes from it again. */
+        mux_queue_release(handle);
         return 0;
     }
     /* Framed but not sharing: it owns a channel like any other socket, and
