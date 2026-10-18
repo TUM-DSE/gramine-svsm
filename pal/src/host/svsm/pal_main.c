@@ -850,7 +850,8 @@ noreturn void pal_svsm_main(void)
      * between the two of them.
      *
      * Absent keys = neither, which is every vault that is not a driver. */
-    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0;
+    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0, mmio_index = 0;
+    int64_t mmio_bdf = -1;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
     if (manifest_svsm) {
         toml_int_in(manifest_svsm, "device_window_pages", 0, &window_pages);
@@ -861,7 +862,18 @@ noreturn void pal_svsm_main(void)
          * they have always been - and wrong for modern virtio, which is
          * why this is a manifest key rather than an assumption. */
         toml_int_in(manifest_svsm, "device_mmio_bar", 0, &mmio_bar);
+        /* WHICH of several identical functions - a virtio-net-pci per vault,
+         * or a NIC's VFs: the n-th `vendor:device` in bus order (0 = the
+         * first, what every manifest got before), or one named by address,
+         * bus << 8 | device << 3 | function. The monitor checks the identity
+         * and still allows one holder per function. Measured with the rest
+         * of the manifest. */
+        toml_int_in(manifest_svsm, "device_mmio_index", 0, &mmio_index);
+        toml_int_in(manifest_svsm, "device_mmio_bdf", -1, &mmio_bdf);
     }
+    if (mmio_index < 0 || mmio_index > 255 || mmio_bdf < -1 || mmio_bdf > 0xFFFF)
+        pal_svsm_fail("svsm.device_mmio_index must be 0..255 and svsm.device_mmio_bdf "
+                      "a 16-bit bus:device.function", 0);
     if (window_pages > 0 && mmio_vendor <= 0) {
         /* A manifest error, and a measured one, so it can only be fixed by
          * changing the manifest - which is the right place for it. Loud,
@@ -879,7 +891,8 @@ noreturn void pal_svsm_main(void)
         uint64_t phys = 0;
         pal_svsm_device_mmio(((uint64_t)mmio_vendor & 0xFFFF) |
                              (((uint64_t)mmio_device & 0xFFFF) << 16),
-                             (uint8_t)(mmio_bar & 0xFF), &base, &size, &phys);
+                             (uint8_t)(mmio_bar & 0xFF), (uint8_t)mmio_index,
+                             (int32_t)mmio_bdf, &base, &size, &phys);
         g_pal_public_state.device_mmio.base = base;   /* always NULL */
         g_pal_public_state.device_mmio.size = size;
         g_pal_public_state.device_mmio.phys = phys;

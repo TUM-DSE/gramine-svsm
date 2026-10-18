@@ -213,12 +213,15 @@ void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size) {
  * rdx = base VA, r8 = physical address. The physical address comes back in
  * a register here, unlike the window's: these are somebody else's registers
  * and there is no header the monitor could have written it into. */
-void pal_svsm_device_mmio(uint64_t id, uint8_t bar, void** out_base, size_t* out_size,
-                          uint64_t* out_phys) {
+void pal_svsm_device_mmio(uint64_t id, uint8_t bar, uint8_t index, int32_t bdf,
+                          void** out_base, size_t* out_size, uint64_t* out_phys) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFED;
-    data.rbx = id | ((uint64_t)bar << 32);
-    data.rcx = 0;
+    /* rbx: vendor | device << 16 | bar << 32 | index << 40 - which of several
+     * identical functions, in bus order. rcx: bdf + 1 when the manifest names
+     * the function by address (0 = by index). */
+    data.rbx = id | ((uint64_t)bar << 32) | ((uint64_t)index << 40);
+    data.rcx = bdf >= 0 ? (uint64_t)bdf + 1 : 0;
     data.rdx = 0;
     data.r8  = 0;
     data.r9  = 0;
