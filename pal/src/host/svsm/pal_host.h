@@ -163,12 +163,16 @@ struct pal_handle_inner {
             uint64_t recvtimeout_us;
             uint64_t sendtimeout_us;
             bool     is_nonblocking;
-            bool     broken;        /* a malformed length: the stream is over */
+            /* A malformed length or a reset: the stream is over, and every
+             * later call fails CONNFAILED (ECONNRESET). It was DENIED -
+             * EACCES - which a caller could not tell from the channel quota's
+             * refusal at connect (net-share-test counted resets as that). */
+            bool     broken;
             /* The service sent a FIN frame for this connection: the far end
              * is finished and there will be no more data.
              *
              * NOT `broken`, which is an error and makes every later call
-             * return EACCES. A FIN is the ordinary end of a stream and recv(2)
+             * fail. A FIN is the ordinary end of a stream and recv(2)
              * answers it with 0, so it needs a flag of its own. It exists
              * because a shared channel cannot carry a close: the channel
              * outlives any one connection on it, so `pal_chan_peer_gone` -
@@ -177,6 +181,14 @@ struct pal_handle_inner {
             /* shutdown(SHUT_WR) has sent its FIN|HALF: the service
              * has been told this side sends nothing more, once. */
             bool     wr_shut;
+            /* shutdown(2) or close from another thread, which may find this
+             * socket's own calls parked in sock_block: SHUT_RD done
+             * (rd_shut), the connection or channel let go (closed) - and
+             * wr_shut above, once the FIN is out. Each ends the waits it
+             * concerns, as on Linux: a parked recv answers 0, a parked send
+             * EPIPE, a parked accept EINVAL. */
+            bool     rd_shut;
+            bool     closed;
             /* Does every message on this channel carry a mux frame header?
              *
              * True only for a socket this vault CONNECTED through a network

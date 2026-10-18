@@ -65,6 +65,7 @@ int      g_pal_svsm_net_protocol;
 
 struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
 static int g_fin_owed_n;   /* see mux_fin_flush */
+static bool g_mux_granting;  /* a connect is asking for the vault's channel (_PalSocketConnect) */
 
 /* One line, at exit, through the debug channel. log_always and not
  * log_error: SeBS manifests set log_level = "error", and these are not
@@ -101,6 +102,9 @@ void pal_svsm_net_ctr_reset(void) {
     memset(&g_pal_svsm_net_ctr, 0, sizeof g_pal_svsm_net_ctr);
     /* And the parent's owed FINs: its connections, its to send. */
     g_fin_owed_n = 0;
+    /* A grant in progress was another thread's, and that thread is not in
+     * this process: left set, every connect here would wait for it. */
+    g_mux_granting = false;
 }
 
 /* The frame header every message on a MUXED channel carries.
@@ -337,6 +341,22 @@ static int sock_block(PAL_HANDLE handle, pal_wait_flags_t want, const uint64_t* 
     if (pal_svsm_poll_block(&deadline) == PAL_SVSM_WAIT_INTERRUPTED && interruptible)
         return -PAL_ERROR_INTERRUPTED;
     return 0;
+}
+
+/* Has another thread ended this socket's reading - shutdown(SHUT_RD), a
+ * close, or a channel closed under it (a socket that owns its channel lets
+ * it go on any shutdown, sock_delete)? Asked after every wait, BEFORE the
+ * rings are looked at again: with no channel there are none to look at. */
+static bool sock_rd_over(PAL_HANDLE h) {
+    return h->sock.rd_shut || h->sock.closed || !sock_has_chan(h);
+}
+
+/* The same for writing: shutdown(SHUT_WR)'s FIN out, or the same close. A
+ * send parked across another thread's SHUT_WR must not put DATA behind its
+ * FIN; one that gets in while the FIN still waits for room goes before it,
+ * which is where Linux puts it too. */
+static bool sock_wr_over(PAL_HANDLE h) {
+    return h->sock.wr_shut || h->sock.closed || !sock_has_chan(h);
 }
 
 /* --------------------------------------------------- the frame pool, client
@@ -895,7 +915,7 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
                      struct pal_socket_addr* out_local_addr) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_INVAL;
-    if (!handle->sock.listening)
+    if (!handle->sock.listening || handle->sock.closed)
         return -PAL_ERROR_INVAL;
 
     bool nonblock = handle->sock.is_nonblocking || (options & PAL_OPTION_NONBLOCK);
@@ -935,6 +955,8 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
         int wr = sock_block(handle, PAL_WAIT_READ, NULL, 0, 50000, /*interruptible=*/true);
         if (wr < 0)
             return wr;
+        if (handle->sock.closed)
+            return -PAL_ERROR_INVAL;     /* shut down under it, as Linux has it */
     }
 }
 
@@ -973,22 +995,29 @@ static uint64_t mvnet_deadline(uint64_t us) {
     return mvnet_now() + (hz / 1000000ULL) * us;
 }
 
-/* One round of waiting: for room to send the request (`want` WRITE) or for
-   the reply (READ), watching that ring word, 2 ms at most. Not interruptible:
-   a connect abandoned between its request and the reply would leave the
-   service holding a connection nobody asked for, and the whole handshake is
-   bounded by PAL_MVNET_WAIT_US anyway. */
-static bool mvnet_wait(PAL_HANDLE handle, pal_wait_flags_t want) {
-    struct pal_chan_ring in, out;
-    ring_for(handle, &in, &out);
-    uint64_t arm = want & PAL_WAIT_WRITE
-                   ? pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_HEAD, *out.peer_head)
-                   : pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, *in.peer_tail);
+/* One round of waiting: for room to send the request (`want` WRITE: the
+   peer's head moving off `seen`) or for the reply (READ: its tail moving off
+   `seen`), 2 ms at most. `seen` is what the caller read BEFORE it looked, so
+   a move between its look and this park ends the park at once. Not
+   interruptible: a connect abandoned between its request and the reply would
+   leave the service holding a connection nobody asked for, and the whole
+   handshake is bounded by PAL_MVNET_WAIT_US anyway. `in` and `out` are the
+   caller's rings, set again afterwards. */
+static bool mvnet_wait(PAL_HANDLE handle, pal_wait_flags_t want, uint32_t seen,
+                       struct pal_chan_ring* in, struct pal_chan_ring* out) {
+    uint64_t arm = pal_chan_arm(sock_widx(handle),
+                                want & PAL_WAIT_WRITE ? PAL_CHAN_ARM_HEAD : PAL_CHAN_ARM_TAIL,
+                                seen);
     (void)sock_block(handle, want, &arm, 1, 2000, /*interruptible=*/false);
-    /* A FIN or reset for this connection, routed while it waited: the
-     * service refused it, and no reply is coming. False: give up now rather
-     * than wake at once for the rest of PAL_MVNET_WAIT_US. */
-    return !handle->sock.broken && !handle->sock.fin_seen;
+    /* Closed by another thread, or a FIN or reset for this connection routed
+     * while it waited (the service refused it, and no reply is coming).
+     * False: give up now rather than wake at once for the rest of
+     * PAL_MVNET_WAIT_US. */
+    if (handle->sock.closed || !sock_has_chan(handle) || handle->sock.broken
+        || handle->sock.fin_seen)
+        return false;
+    ring_for(handle, in, out);
+    return true;
 }
 
 /* Tell a network service where this connection is going, and wait for it
@@ -1054,12 +1083,15 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
     uint32_t chfl = handle->sock.muxed ? PAL_MVMUX_HDR_BYTES : 0;
 
     uint64_t deadline = mvnet_deadline(PAL_MVNET_WAIT_US);
-    while (pal_chan_send2(&out, chf, chfl, &req, sizeof(req)) != 0) {
+    for (;;) {
+        uint32_t seen = *out.peer_head;
+        if (pal_chan_send2(&out, chf, chfl, &req, sizeof(req)) == 0)
+            break;
         if (sock_chan_gone(handle))
             return -PAL_ERROR_CONNFAILED;
         if (mvnet_now() > deadline)
             return -PAL_ERROR_CONNFAILED;
-        if (!mvnet_wait(handle, PAL_WAIT_WRITE))
+        if (!mvnet_wait(handle, PAL_WAIT_WRITE, seen, &in, &out))
             return -PAL_ERROR_CONNFAILED;
     }
     pal_svsm_channel_notify(sock_widx(handle));
@@ -1068,6 +1100,7 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
     deadline = mvnet_deadline(PAL_MVNET_WAIT_US);
     for (;;) {
         uint32_t got = 0;
+        uint32_t seen = *in.peer_tail;      /* before looking: mvnet_wait */
         /* THE HEAD MAY NOT BE OURS. On a shared channel another socket's data
          * can be in front of this reply, and reading it as the reply loses the
          * data and fails the connect - so it goes through the same routing the
@@ -1086,7 +1119,7 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
              * deadline below still bounds this. */
             if (mvnet_now() > deadline)
                 return -PAL_ERROR_CONNFAILED;
-            if (!mvnet_wait(handle, PAL_WAIT_READ))
+            if (!mvnet_wait(handle, PAL_WAIT_READ, seen, &in, &out))
                 return -PAL_ERROR_CONNFAILED;
             continue;
         }
@@ -1113,7 +1146,7 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
             return -PAL_ERROR_CONNFAILED;
         if (mvnet_now() > deadline)
             return -PAL_ERROR_CONNFAILED;
-        if (!mvnet_wait(handle, PAL_WAIT_READ))
+        if (!mvnet_wait(handle, PAL_WAIT_READ, seen, &in, &out))
             return -PAL_ERROR_CONNFAILED;
     }
 }
@@ -1226,6 +1259,16 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
      * pages, two 2 MiB windows and a row in the VM-wide 64-entry region table
      * leaked per connect, which is the precise cost this step exists to stop
      * paying. */
+    /* ONE GRANT AT A TIME, for the same reason. The grant retry below gives
+     * the processor away, so a second thread's first connect could start
+     * while this one's was still asking: both were granted, the second
+     * overwrote the mux's window, and the first's sockets went on through a
+     * channel where the service had never heard of their ids - and its own
+     * channel leaked. So a connect that finds a grant in progress waits for
+     * it and then looks for the channel again. */
+    bool granting = PAL_MUX_SHARE_CHANNEL && g_pal_svsm_net_protocol;
+    while (granting && g_mux_granting && !g_pal_svsm_mux_open)
+        (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
     if (PAL_MUX_SHARE_CHANNEL && g_pal_svsm_net_protocol && g_pal_svsm_mux_open) {
         handle->sock.muxed = true;
         handle->sock.win   = 0;          /* the MUX owns the channel, not this */
@@ -1239,6 +1282,8 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
         goto have_channel;
     }
 
+    if (granting)
+        g_mux_granting = true;
     for (int try = 0; try < PAL_GRANT_TRIES; try++) {
         win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
         if (win >= 0 || win != PAL_SVSM_STATUS_BAD_STATE)
@@ -1247,6 +1292,11 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
          * alone, and the vault's other threads run meanwhile. */
         (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
     }
+    /* Cleared here, and nothing below yields before g_pal_svsm_mux_open is
+     * set (or this returns): PAL text is not preempted, so a waiter next
+     * runs with the channel recorded, or free to ask for its own. */
+    if (granting)
+        g_mux_granting = false;
     if (win < 0) {
         /*
          * A POLICY refusal is not a connection failure, and an application
@@ -1342,8 +1392,19 @@ have_channel:
             memcpy(handle->sock.local.local_addr, rep.local_addr, 4);
         }
         if (rc < 0) {
+            if (handle->sock.closed)
+                return rc;               /* another thread's close let it all go */
+            if (sock_shares(handle)) {
+                /* The CONNECTION failed, not the channel: it is the vault's,
+                 * other sockets may be on it already, and closing it would
+                 * close window 0 (this handle's widx) and hand the shared
+                 * window back to accept_find. Only the id goes. */
+                pal_svsm_mux_release(handle->sock.conn_id);
+                handle->sock.conn_id = 0;
+                return rc;
+            }
             pal_svsm_channel_close(handle->sock.widx);
-            sock_unclaim((unsigned)win);
+            sock_unclaim((unsigned)handle->sock.widx);
             handle->sock.win = 0;
             return rc;
         }
@@ -1470,9 +1531,14 @@ static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
     bool nonblock = force_nonblocking || handle->sock.is_nonblocking;
     int ret = -PAL_ERROR_TRYAGAIN;
     for (;;) {
-        /* Ended while this waited: another thread's read routed a reset. */
+        /* Ended while this waited: another thread's read routed a reset, or
+         * shut this socket's writing or closed it. */
         if (handle->sock.broken) {
-            ret = -PAL_ERROR_DENIED;
+            ret = -PAL_ERROR_CONNFAILED;
+            break;
+        }
+        if (sock_wr_over(handle)) {
+            ret = -PAL_ERROR_CONNFAILED_PIPE;
             break;
         }
         /* The service's window, as in _PalSocketSend: a frame sent past it
@@ -1511,6 +1577,8 @@ static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                 ret = wr;
                 break;
             }
+            if (sock_wr_over(handle))
+                continue;                    /* the loop's top says EPIPE */
             ring_for(handle, &in, &out);
             mux_poll_route(handle, &in);     /* which is what collects it */
             continue;
@@ -1543,6 +1611,8 @@ static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
             ret = wr;
             break;
         }
+        if (sock_wr_over(handle))
+            continue;                        /* the loop's top says EPIPE */
         ring_for(handle, NULL, &out);
     }
     free(buf);
@@ -1576,6 +1646,7 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                         && (uint32_t)(*in.peer_tail - *in.head) >= in.depth;
         uint32_t got = 0;
         int rc = -1;
+        bool head_blocked = false;
         /* DEMULTIPLEXED on a shared channel, for the reason udp_send frames:
          * the head may be any of this vault's sockets' traffic, and a frame
          * for THIS socket may already have been parked in `rx` or its queue
@@ -1601,6 +1672,7 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                         return -PAL_ERROR_CONNFAILED;
                     continue;
                 }
+                head_blocked = mh == MUX_HEAD_BLOCKED;
                 if (mh != MUX_HEAD_BLOCKED) {
                     rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
                     if (rc == 0) {
@@ -1608,7 +1680,7 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                             pal_svsm_channel_notify(sock_widx(handle));
                         if (got < PAL_MVMUX_HDR_BYTES) {
                             handle->sock.broken = true;
-                            return -PAL_ERROR_DENIED;
+                            return -PAL_ERROR_CONNFAILED;
                         }
                         struct pal_mvmux_hdr oh;
                         memcpy(&oh, handle->sock.rx, PAL_MVMUX_HDR_BYTES);
@@ -1640,14 +1712,14 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
             struct pal_mvnet_dgram hdr;
             if (blen < sizeof(hdr)) {
                 handle->sock.broken = true;
-                return -PAL_ERROR_DENIED;
+                return -PAL_ERROR_CONNFAILED;
             }
             memcpy(&hdr, body, sizeof(hdr));
             if (hdr.len > blen - sizeof(hdr)) {
                 /* The frame claims more than arrived. Not recoverable: the
                  * next message would be read as a header. */
                 handle->sock.broken = true;
-                return -PAL_ERROR_DENIED;
+                return -PAL_ERROR_CONNFAILED;
             }
             if (addr) {
                 memset(addr, 0, sizeof(*addr));
@@ -1680,7 +1752,7 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         }
         if (rc == -2) {
             handle->sock.broken = true;
-            return -PAL_ERROR_DENIED;
+            return -PAL_ERROR_CONNFAILED;
         }
         if (sock_chan_gone(handle)) {
             /* The service is gone. For a datagram socket there is no "end
@@ -1690,18 +1762,27 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         if (nonblock)
             return -PAL_ERROR_TRYAGAIN;
 
-        for (int i = 0; i < PAL_SOCK_SPINS && !pal_chan_readable(&in); i++)
-            __asm__ volatile("pause");
-        if (pal_chan_readable(&in))
-            continue;
+        /* Somebody else's frame at the head: wait at once, as the stream
+         * path does (_PalSocketRecv) - the ring is readable and will stay so
+         * until its owner runs. */
+        if (!head_blocked) {
+            for (int i = 0; i < PAL_SOCK_SPINS && !pal_chan_readable(&in); i++)
+                __asm__ volatile("pause");
+            if (pal_chan_readable(&in))
+                continue;
+        }
         uint32_t seen = *in.peer_tail;
-        if (seen != *in.head)
+        if (!head_blocked && seen != *in.head)
             continue;
         uint64_t arm = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, seen);
         int wr = sock_block(handle, PAL_WAIT_READ, &arm, 1, PAL_SOCK_PARK_US,
                             /*interruptible=*/true);
         if (wr < 0)
             return wr;
+        if (sock_rd_over(handle)) {
+            *out_total_size = 0;         /* shut or closed under it */
+            return 0;
+        }
         ring_for(handle, &in, NULL);
         /* Our FIN or reset, routed by the scheduler's look at this socket
          * while it waited (mux_poll_route): the session is over, as above,
@@ -1722,7 +1803,7 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
     if (!sock_has_chan(handle))
         return -PAL_ERROR_NOTCONNECTION;
     if (handle->sock.broken)
-        return -PAL_ERROR_DENIED;
+        return -PAL_ERROR_CONNFAILED;
     if (g_fin_owed_n && sock_shares(handle))
         mux_fin_flush();
 
@@ -1797,9 +1878,14 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
     int ret = -PAL_ERROR_TRYAGAIN;
     for (;;) {
-        /* Ended while this waited: another thread's read routed a reset. */
+        /* Ended while this waited: another thread's read routed a reset, or
+         * shut this socket's writing or closed it. */
         if (handle->sock.broken) {
-            ret = -PAL_ERROR_DENIED;
+            ret = -PAL_ERROR_CONNFAILED;
+            break;
+        }
+        if (sock_wr_over(handle)) {
+            ret = -PAL_ERROR_CONNFAILED_PIPE;
             break;
         }
         /* THE SERVICE'S WINDOW, before the ring's.
@@ -1836,6 +1922,8 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 ret = wr;
                 break;
             }
+            if (sock_wr_over(handle))
+                continue;                    /* the loop's top says EPIPE */
             ring_for(handle, &in, &out);
             mux_poll_route(handle, &in);     /* which is what collects it */
             continue;
@@ -1882,6 +1970,8 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             ret = wr;
             break;
         }
+        if (sock_wr_over(handle))
+            continue;                        /* the loop's top says EPIPE */
         ring_for(handle, NULL, &out);
     }
     free(buf);
@@ -1893,7 +1983,7 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_NOTCONNECTION;
     if (handle->sock.broken)
-        return -PAL_ERROR_DENIED;
+        return -PAL_ERROR_CONNFAILED;
     if (handle->sock.type == PAL_SOCKET_UDP)
         return udp_recv(handle, iov, iov_len, out_total_size, addr, force_nonblocking);
     /* A FIN already seen, and nothing left in the residue, is end of stream -
@@ -1945,6 +2035,7 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
     int ret;
     for (;;) {
+        bool head_blocked = false;
         /* Serve what is already here first - `rx`, then the queue behind it. */
         if (handle->sock.rx_off >= handle->sock.rx_len)
             mux_rx_refill(handle);
@@ -2076,6 +2167,7 @@ mux_blocked:
              * empty ring does: a non-blocking caller is told to try again, a
              * blocking one waits. */
             rc = -1;
+            head_blocked = true;
         }
         if (rc == -2) {
             /* A length that cannot be right - not "your buffer is small",
@@ -2083,7 +2175,7 @@ mux_blocked:
              * always offered. The head is not advanced, so nothing is
              * silently skipped; the stream is over. */
             handle->sock.broken = true;
-            ret = -PAL_ERROR_DENIED;
+            ret = -PAL_ERROR_CONNFAILED;
             break;
         }
         if (sock_chan_gone(handle)) {
@@ -2096,12 +2188,21 @@ mux_blocked:
             break;
         }
 
-        for (int i = 0; i < PAL_SOCK_SPINS && !pal_chan_readable(&in); i++)
-            __asm__ volatile("pause");
-        if (pal_chan_readable(&in))
-            continue;
+        /* A head that is somebody else's - their handshake reply, or a frame
+         * with no pool buffer to go to - is a ring that IS readable and has
+         * nothing for this socket: looking again at once, as for an empty
+         * ring that has just filled, would spin here for ever without
+         * letting the thread that owns the head run. So it waits at once,
+         * on the tail as it is now, and the predicate (false until the head
+         * moves) is what lets it go. */
+        if (!head_blocked) {
+            for (int i = 0; i < PAL_SOCK_SPINS && !pal_chan_readable(&in); i++)
+                __asm__ volatile("pause");
+            if (pal_chan_readable(&in))
+                continue;
+        }
         uint32_t seen = *in.peer_tail;
-        if (seen != *in.head)
+        if (!head_blocked && seen != *in.head)
             continue;                        /* it moved while we looked */
         uint64_t arms[2];
         arms[0] = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, seen);
@@ -2111,6 +2212,14 @@ mux_blocked:
                             /*interruptible=*/true);
         if (wr < 0) {
             ret = wr;
+            break;
+        }
+        /* Shut down or closed by another thread: end of stream, which is
+         * what a reader parked across shutdown(SHUT_RD or SHUT_RDWR) gets on
+         * Linux - and the usual way to stop one. */
+        if (sock_rd_over(handle)) {
+            *out_total_size = 0;
+            ret = 0;
             break;
         }
         ring_for(handle, &in, NULL);
@@ -2311,8 +2420,18 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle) {
  * on every pass for as long as its ring stays full. */
 pal_wait_flags_t pal_svsm_sock_wait_ready(PAL_HANDLE handle, pal_wait_flags_t want) {
     if (handle->sock.listening)
-        return (want & PAL_WAIT_READ) && accept_find() ? PAL_WAIT_READ : 0;
-    if (!sock_has_chan(handle))
+        return (want & PAL_WAIT_READ) && (handle->sock.closed || accept_find())
+               ? PAL_WAIT_READ : 0;
+    /* Another thread's shutdown or close: the waits it ends are over before
+     * anything is asked of the rings - which may be gone. */
+    pal_wait_flags_t over = 0;
+    if ((want & PAL_WAIT_READ) && sock_rd_over(handle))
+        over |= PAL_WAIT_READ;
+    if ((want & (PAL_WAIT_WRITE | PAL_SVSM_WAIT_CREDIT)) && sock_wr_over(handle))
+        over |= want & (PAL_WAIT_WRITE | PAL_SVSM_WAIT_CREDIT);
+    if (over)
+        return over;
+    if (!sock_has_chan(handle) || handle->sock.closed)
         return PAL_WAIT_ERROR;          /* closed under it: let it look */
     pal_wait_flags_t got = 0;
     bool ended = handle->sock.broken;
@@ -2480,6 +2599,8 @@ static int sock_half_close(PAL_HANDLE handle) {
          * is the only end-of-input the far end will get. */
         (void)sock_block(handle, PAL_WAIT_WRITE, &arm, 1, PAL_SOCK_PARK_US,
                          /*interruptible=*/false);
+        if (handle->sock.closed || !sock_has_chan(handle))
+            return -PAL_ERROR_CONNFAILED;  /* closed while the FIN waited */
         ring_for(handle, NULL, &out);
     }
 }
@@ -2492,10 +2613,13 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
          * then read never arrived (net_client_upload, 2026-10-14).
          * SHUT_RD has nothing to tell the service - the LibOS stops reading
          * on its own - and SHUT_WR is a half-close. Only ALL is a close. */
-        if (mode == PAL_DELETE_READ)
+        if (mode == PAL_DELETE_READ) {
+            handle->sock.rd_shut = true;     /* ends a parked recv: 0 */
             return 0;
+        }
         if (mode == PAL_DELETE_WRITE)
             return sock_half_close(handle);
+        handle->sock.closed = true;          /* ends every parked call */
         /* A SHARING socket owns a CONNECTION, not a channel. Closing it must
          * tell the service - the service holds an lwIP connection for it and
          * nothing else would ever end it - and must release the id, but must
@@ -2521,7 +2645,12 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
     }
     /* Framed but not sharing: it owns a channel like any other socket, and
      * leaving it open here would leak one of the service's max_channels per
-     * connection - the exact leak conn_drop's shutdown() was written to fix. */
+     * connection - the exact leak conn_drop's shutdown() was written to fix.
+     * Whatever the mode (a channel has no half-close; its closing is the
+     * peer's end of stream), and so every call of this socket parked in
+     * sock_block is over: `closed`, which they test before they look at a
+     * ring again. A listener lands here too, and its parked accept ends. */
+    handle->sock.closed = true;
     if (handle->sock.conn_id) {
         pal_svsm_mux_release(handle->sock.conn_id);
         handle->sock.conn_id = 0;
