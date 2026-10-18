@@ -61,6 +61,11 @@
  * enough to keep all three alive, rare enough not to turn a one-second sleep
  * into a million monitor calls. */
 #define SVSM_IDLE_SLICE_US 100
+/* Pauses between looks at the watched handles inside that slice: what a
+ * blocking socket call spun between looks at its ring when it waited by
+ * itself (PAL_SOCK_SPINS), so a wait the scheduler now does for it sees its
+ * data as soon as it did then. */
+#define SVSM_IDLE_TEST_PAUSES 200
 
 /* void pal_svsm_ctx_switch(void** save_rsp, void* new_rsp, uint64_t new_gs_base) */
 void pal_svsm_ctx_switch(void** save_rsp, void* new_rsp, uint64_t new_gs_base);
@@ -130,6 +135,19 @@ static void reap_stack(void) {
  * could not arm everything it wanted to. */
 #define SVSM_PARK_FALLBACK_US  1000000UL
 #define SVSM_PARK_PARTIAL_US     20000UL
+
+/* Is any blocked thread's watched handle ready? Read-only in the sense
+ * pal_svsm_poller_ready is: ring loads, no switch. */
+static bool any_watch_ready(void) {
+    PAL_HANDLE t = g_current;
+    do {
+        if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
+                && pal_svsm_poller_ready(t))
+            return true;
+        t = t->thread.next;
+    } while (t != g_current);
+    return false;
+}
 
 /*
  * The words that would make any blocked thread runnable, gathered for a
@@ -268,9 +286,17 @@ static void idle_until(uint64_t deadline_us) {
          * this into a 100 us poll interval instead of a 5 s one. */
         uint64_t until = now + (left < SVSM_IDLE_SLICE_US ? left : SVSM_IDLE_SLICE_US);
         /* Bare pause, not CPU_RELAX: yielding from the idle loop would come
-         * straight back here. */
-        while (pal_svsm_now_usec() < until)
-            __asm__ volatile("pause");
+         * straight back here. Looking at the watched handles every few
+         * hundred: a socket call that blocks waits HERE now, not in a spin
+         * of its own, and a whole slice before it looks again would make
+         * every reply inside an invoke up to 100 us late. pick_next makes
+         * the ready one runnable. */
+        while (pal_svsm_now_usec() < until) {
+            for (int i = 0; i < SVSM_IDLE_TEST_PAUSES; i++)
+                __asm__ volatile("pause");
+            if (any_watch_ready())
+                return;
+        }
         pal_svsm_nop();
         /* One round per slice spun here. A slice is at most
          * SVSM_IDLE_SLICE_US, so the count bounds how long a client sat
@@ -771,12 +797,29 @@ void pal_svsm_current_clear_interrupted(void) {
         g_current->thread.interrupted = false;
 }
 
+/* The arms and the watch belonged to the wait that set them. Anything that
+ * runs now re-tests what it is waiting for, so a stale word would only make
+ * the next park end early - but it would also make it end early for a
+ * DIFFERENT thread's wait, which is a bug that would look like a spurious
+ * wake and be very hard to see. And the watch points into the waiter's own
+ * frame, which is about to go: left set, the next wait that sets none (an
+ * event's) has the scheduler re-test handles through a dead stack. */
+static void wait_forget(PAL_HANDLE self) {
+    self->thread.n_arms        = 0;
+    self->thread.arms_partial  = false;
+    self->thread.n_watch       = 0;
+    self->thread.watch_handles = NULL;
+    self->thread.watch_events  = NULL;
+}
+
 enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
                                                 const uint64_t* deadline_us) {
     PAL_HANDLE self = g_current;
     assert(self);
 
     if (self->thread.interrupted) {
+        /* Before blocking, too: the caller set its arms and watch first. */
+        wait_forget(self);
         self->thread.interrupted = false;
         return PAL_SVSM_WAIT_INTERRUPTED;
     }
@@ -792,17 +835,7 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
 
     self->thread.waiting_on   = NULL;
     self->thread.has_deadline = false;
-    /* The arms belonged to this wait. Anything that runs now re-tests
-     * what it is waiting for, so a stale word would only make the next
-     * park end early - but it would also make it end early for a
-     * DIFFERENT thread's wait, which is a bug that would look like a
-     * spurious wake and be very hard to see. */
-    self->thread.n_arms       = 0;
-    self->thread.arms_partial = false;
-    /* Points into this call's own frame, which is about to go. */
-    self->thread.n_watch       = 0;
-    self->thread.watch_handles = NULL;
-    self->thread.watch_events  = NULL;
+    wait_forget(self);
 
     if (self->thread.interrupted) {
         self->thread.interrupted = false;

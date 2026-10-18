@@ -194,6 +194,15 @@ extern bool g_pal_svsm_is_service;
 int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_arm);
 bool pal_svsm_sock_readable(PAL_HANDLE handle);
 bool pal_svsm_sock_writable(PAL_HANDLE handle);
+/* A blocking socket call's own wait (sock_block), watched by the scheduler:
+ * PAL_SVSM_WAIT_SOCK marks the watch as one, and the test is then exactly the
+ * call's - pal_svsm_sock_wait_ready - rather than poll(2)'s, which reports a
+ * hang-up whatever was asked and would wake a writer for ever on a socket
+ * whose peer has half-closed. PAL_SVSM_WAIT_CREDIT is a send waiting for the
+ * service's window. Both are PAL-internal and above every PAL_WAIT_* bit. */
+#define PAL_SVSM_WAIT_SOCK   ((pal_wait_flags_t)1 << 30)
+#define PAL_SVSM_WAIT_CREDIT ((pal_wait_flags_t)1 << 29)
+pal_wait_flags_t pal_svsm_sock_wait_ready(PAL_HANDLE handle, pal_wait_flags_t want);
 
 /* Who this vault may connect to, from [svsm.net] in its measured manifest. */
 extern char     g_pal_svsm_net_name[32];

@@ -36,6 +36,10 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
             break;
 
         case PAL_TYPE_SOCKET:
+            /* A blocking send or recv waiting in the scheduler: its own test,
+             * and nothing it did not ask for (pal_svsm.h). */
+            if (want & PAL_SVSM_WAIT_SOCK)
+                return pal_svsm_sock_wait_ready(handle, want);
             /* Two loads from the ring's control words, no monitor call -
              * which is what makes a poll over many sockets cheap. A peer
              * that has gone reads as readable, so the caller gets its
