@@ -93,12 +93,25 @@ static inline void unlock(struct libos_lock* l) {
  * waits, and every fork would wait its bound again. A fork that lands while
  * this waits copies the lock held; its owner's child remakes it. Released
  * with the ordinary unlock().
+ *
+ * Taken, then counted only if no fork is waiting for this thread to hold
+ * nothing (PalLockHoldTry). If one is, the lock goes back, the fork is waited
+ * out, and it is taken again: sitting at the fork's gate WITH the lock - held
+ * but not counted - kept a counted waiter on it (one holding an epoll's lock,
+ * say) from ever draining, so the fork went ahead with that waiter's locks
+ * held, and those are not remade in the child.
  */
 static inline void lock_count_held(struct libos_lock* l) {
     assert(l->lock);
-    while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
-        /* nop */;
-    PalLockHold(NULL, 1);
+    for (;;) {
+        while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
+            /* nop */;
+        if (PalLockHoldTry())
+            break;
+        PalEventSet(l->lock);
+        PalLockHold(NULL, 1);           /* waits out the fork */
+        PalLockHold(NULL, -1);
+    }
     l->owner = get_cur_tid();
 }
 

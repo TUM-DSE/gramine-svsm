@@ -243,8 +243,15 @@ static int connect(struct libos_handle* handle, void* addr, size_t addrlen, bool
     unlock(&handle->lock);
 
     PAL_HANDLE pal_handle = NULL;
-    ret = PalStreamOpen(pipe_name, PAL_ACCESS_RDWR, /*share_flags=*/0, PAL_CREATE_IGNORED, options,
-                        &pal_handle);
+    /* PAL_OPTION_INHERITABLE, as pipe(2) asks: on the SVSM PAL that puts the
+     * PAIR in the lineage's shared arena, so a connected socket - and a
+     * socketpair(), which is a connect - survives a fork with both processes
+     * on one buffer. Without it the pair was this process's heap, a forked
+     * child got a private copy, and neither side ever saw the other's data
+     * (multiprocessing.Pipe() is a socketpair). The LISTENER stays local:
+     * accept() happens in the listening process either way. */
+    ret = PalStreamOpen(pipe_name, PAL_ACCESS_RDWR, /*share_flags=*/0, PAL_CREATE_IGNORED,
+                        options | PAL_OPTION_INHERITABLE, &pal_handle);
     if (ret < 0) {
         return (ret == -PAL_ERROR_CONNFAILED) ? -ENOENT : pal_to_unix_errno(ret);
     }

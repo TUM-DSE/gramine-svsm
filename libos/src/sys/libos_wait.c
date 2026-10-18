@@ -188,7 +188,7 @@ static void reap_host_children_locked(void) {
              * (as below). Skipped, it was never reaped: a parent waiting for
              * it waited for ever, and it stayed on the list. */
             if (by_host[i])
-                (void)mark_child_exited_by_pid(pids[i], uids[i], 0, SIGKILL);
+                (void)mark_child_exited_by_pid_host(pids[i], uids[i], 0, SIGKILL);
             continue;
         }
         if (reason == 0)
@@ -202,7 +202,7 @@ static void reap_host_children_locked(void) {
          * which is exactly what the host did. */
         int exit_code = (reason == 1) ? (int)value : 0;
         int term_signal = (reason == 1) ? 0 : SIGKILL;
-        (void)mark_child_exited_by_pid(pids[i], uids[i], exit_code, term_signal);
+        (void)mark_child_exited_by_pid_host(pids[i], uids[i], exit_code, term_signal);
     }
 }
 

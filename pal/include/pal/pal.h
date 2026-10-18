@@ -1095,6 +1095,20 @@ int PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us);
  */
 int64_t PalLockHold(int64_t* word, int64_t delta);
 
+/*!
+ * \brief Count one hold of a lock JUST TAKEN, unless a fork is waiting for this thread to hold
+ *        none.
+ *
+ * \returns true if the hold was counted. false - nothing counted - when this thread holds
+ *          nothing and a fork is in progress: the caller must give the lock back, wait out the
+ *          fork (#PalLockHold +1/-1 does) and take it again, rather than sit at the fork's gate
+ *          holding a lock the fork does not know about.
+ *
+ * For a lock counted only once held (a socket's, held across long waits): counting it before the
+ * wait would make every queued waiter a hold the fork waits for.
+ */
+bool PalLockHoldTry(void);
+
 typedef uint32_t pal_wait_flags_t; /* bitfield */
 #define PAL_WAIT_READ     1
 #define PAL_WAIT_WRITE    2

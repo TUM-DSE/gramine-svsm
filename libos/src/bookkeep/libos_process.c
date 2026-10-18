@@ -236,6 +236,11 @@ bool reap_stale_child(IDTYPE pid) {
     return found && mark_child_exited(cmp_child_by_pid_host, (unsigned long)pid, uid, 0, SIGKILL);
 }
 
+bool mark_child_exited_by_pid_host(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal) {
+    return mark_child_exited(cmp_child_by_pid_host, (unsigned long)pid, child_uid, exit_code,
+                             signal);
+}
+
 bool mark_child_exited_by_pid_ipc(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal) {
     return mark_child_exited(cmp_child_by_pid_ipc, (unsigned long)pid, child_uid, exit_code,
                              signal);

@@ -57,6 +57,14 @@ struct pal_svsm_pipe_pair {
      * new pipe had already claimed it. Whoever takes this to 0 frees it, and
      * that happens once. */
     int    refs;
+    /* shutdown(2) of one side, which keeps its holds: shut_wr[s] - side s
+     * writes no more (its peer reads end-of-file once the ring is empty);
+     * shut_rd[s] - side s reads no more (its peer's writes fail EPIPE). A
+     * pipe never sets them; an AF_UNIX socket, which is a pipe here
+     * (net/unix.c), does (pipe_delete). Per side, so every holder of that
+     * side sees it - as a shutdown of a socket shared across fork is. */
+    int    shut_wr[2];
+    int    shut_rd[2];
     int    in_use;                  /* 0 = this arena slot is free */
 };
 
@@ -646,7 +654,7 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
         p->holders[1] = 1;
         p->refs = 2;
         p->in_use = 1;
-        return p;
+        return p;   /* calloc: no side shut */
     }
     /* Twice at most: the second pass after giving back what dead members
      * held, which a full arena is the likeliest sign of. */
@@ -660,6 +668,8 @@ static struct pal_svsm_pipe_pair* pair_new(bool shareable) {
                 continue;
             struct pal_svsm_pipe_pair* p = &a->pair[i];
             memset(&p->dir, 0, sizeof(p->dir));
+            memset(p->shut_wr, 0, sizeof(p->shut_wr));
+            memset(p->shut_rd, 0, sizeof(p->shut_rd));
             p->holders[0] = 1;
             /* Side 1 does not exist until somebody accepts; until then side 0
              * must not see EOF, only "nothing yet". */
@@ -943,13 +953,16 @@ size_t pal_svsm_pipe_readable(PAL_HANDLE handle) {
     return in_ring(handle)->used;
 }
 
+static bool pipe_write_refused(PAL_HANDLE handle, bool sweep);
+
 bool pal_svsm_pipe_writable(PAL_HANDLE handle) {
     /* A detached end (pal_svsm_pipes_child_after_fork) is "writable" so that
      * a writer that polls first gets to its write and its EPIPE, instead of
      * polling for ever. */
     if (!handle->pipe.pair)
         return handle->pipe.released;
-    return out_ring(handle)->used < PIPE_RING_SIZE;
+    /* Likewise an end whose write would be refused (no reader, or shut). */
+    return out_ring(handle)->used < PIPE_RING_SIZE || pipe_write_refused(handle, false);
 }
 
 /* The far end has no holder left - or, on a shared pipe, has none once the
@@ -960,10 +973,34 @@ bool pal_svsm_pipe_peer_gone(PAL_HANDLE handle) {
     struct pal_svsm_pipe_pair* p = handle->pipe.pair;
     if (!p)
         return true;
-    int* far = &p->holders[1 - handle->pipe.side];
+    unsigned far_side = 1 - handle->pipe.side;
+    /* The far side said it writes no more (shutdown SHUT_WR), or this side
+     * said it reads no more: end-of-file once the ring is empty. */
+    if (__atomic_load_n(&p->shut_wr[far_side], __ATOMIC_ACQUIRE)
+            || __atomic_load_n(&p->shut_rd[handle->pipe.side], __ATOMIC_ACQUIRE))
+        return true;
+    int* far = &p->holders[far_side];
     if (__atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0)
         return true;
     if (!from_arena(p) || !ledger_sweep())
+        return false;
+    return __atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0;
+}
+
+/* Would a write to this end fail with EPIPE? No reader: the far side has no
+ * holder, or shut its reading (SHUT_RD), or this side shut its writing
+ * (SHUT_WR). `sweep`: also give back dead members' holds first - for a
+ * writer that is about to WAIT, not on the write's hot path. */
+static bool pipe_write_refused(PAL_HANDLE handle, bool sweep) {
+    struct pal_svsm_pipe_pair* p = handle->pipe.pair;
+    unsigned far_side = 1 - handle->pipe.side;
+    if (__atomic_load_n(&p->shut_rd[far_side], __ATOMIC_ACQUIRE)
+            || __atomic_load_n(&p->shut_wr[handle->pipe.side], __ATOMIC_ACQUIRE))
+        return true;
+    int* far = &p->holders[far_side];
+    if (__atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0)
+        return true;
+    if (!sweep || !from_arena(p) || !ledger_sweep())
         return false;
     return __atomic_load_n(far, __ATOMIC_ACQUIRE) <= 0;
 }
@@ -1264,12 +1301,15 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
         return 0;
 
     /* A reader gone is EPIPE now, as on Linux - not only once the ring has
-     * filled (the loop below). The count only: a write is the hot path, and
-     * the ledger sweep belongs to a writer that has to WAIT (peer_gone). */
-    if (__atomic_load_n(&handle->pipe.pair->holders[1 - handle->pipe.side], __ATOMIC_ACQUIRE) <= 0)
+     * filled (the loop below). No sweep here: a write is the hot path, and
+     * the ledger sweep belongs to a writer that has to WAIT. A far side that
+     * only shut its WRITING (SHUT_WR) still reads - an AF_UNIX client that
+     * shuts down and waits for the reply, which the first version of this
+     * check refused with EPIPE. */
+    if (pipe_write_refused(handle, /*sweep=*/false))
         return -PAL_ERROR_CONNFAILED_PIPE;
     while (out_ring(handle)->used == PIPE_RING_SIZE) {
-        if (pal_svsm_pipe_peer_gone(handle))
+        if (pipe_write_refused(handle, /*sweep=*/true))
             return -PAL_ERROR_CONNFAILED_PIPE;   /* EPIPE, and the LibOS sends SIGPIPE */
         if (handle->pipe.nonblocking)
             return -PAL_ERROR_TRYAGAIN;
@@ -1344,7 +1384,6 @@ static void pipe_destroy(PAL_HANDLE handle) {
 }
 
 static int pipe_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
-    __UNUSED(delete_mode);
     /* Closing the listener drops any connection nobody accepted; the
      * connecting end is still a valid handle, it just has no peer. */
     if (handle->hdr.type == PAL_TYPE_PIPESRV && handle->pipe.name) {
@@ -1356,6 +1395,21 @@ static int pipe_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
                 g_pending[i].pair = NULL;
             }
         }
+        return 0;
+    }
+    /* shutdown(2) of ONE direction keeps this end's hold - the pair is still
+     * this side's, and the other direction still works. It used to drop the
+     * whole hold whatever the mode: a client that shut its writing and
+     * waited for the reply had let go of its READ end too, so the server's
+     * reply over a ring's worth failed EPIPE, and the server's close could
+     * free the pair under the client's handle. */
+    struct pal_svsm_pipe_pair* p = handle->pipe.pair;
+    if (p && !handle->pipe.released
+            && (delete_mode == PAL_DELETE_WRITE || delete_mode == PAL_DELETE_READ)) {
+        int* flag = delete_mode == PAL_DELETE_WRITE ? &p->shut_wr[handle->pipe.side]
+                                                    : &p->shut_rd[handle->pipe.side];
+        __atomic_store_n(flag, 1, __ATOMIC_RELEASE);
+        pal_svsm_poll_wake();
         return 0;
     }
     pipe_let_go(handle);

@@ -189,6 +189,20 @@ int64_t _PalLockHold(int64_t* word, int64_t delta) {
     return old;
 }
 
+/* A hold counted only if this thread need not wait out a fork first: PAL
+ * text, so nothing runs between the look at the gate and the count. */
+bool _PalLockHoldTry(void) {
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    if (tcb->lock_holds == 0) {
+        PAL_HANDLE f = __atomic_load_n(&g_forking, __ATOMIC_ACQUIRE);
+        if (f && f != tcb->handle)
+            return false;
+    }
+    tcb->lock_holds += 1;
+    __atomic_add_fetch(&g_lock_holds, 1, __ATOMIC_SEQ_CST);
+    return true;
+}
+
 /* Until no other context holds a lock, or `max_us` has passed. Returns the
  * other contexts' holds left (0 = drained). Leaves the gate raised for
  * pal_svsm_fork_done. */

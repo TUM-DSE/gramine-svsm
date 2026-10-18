@@ -214,6 +214,7 @@ void _PalEventSet(PAL_HANDLE handle);
 void _PalEventClear(PAL_HANDLE handle);
 int _PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us);
 int64_t _PalLockHold(int64_t* word, int64_t delta);
+bool _PalLockHoldTry(void);
 
 /* PalVirtualMemory calls */
 int _PalVirtualMemoryAlloc(void* addr, uint64_t size, pal_prot_flags_t prot);
