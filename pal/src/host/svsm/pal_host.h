@@ -210,6 +210,9 @@ struct pal_handle_inner {
              * taken from the ring (which keeps the ring safe for the
              * several holders a fork makes) and the rest waits here. */
             char*    rx;            /* one slot's worth, allocated on demand */
+            char*    rx_spare;      /* this socket's own slot buffer while `rx`
+                                     * is a pool frame: kept, not freed, so the
+                                     * router never frees (pal_svsm_sched_ctx) */
             uint32_t rx_len;        /* bytes in it */
             uint32_t rx_off;        /* how many the caller has had */
             /* AND A QUEUE BEHIND IT, on a shared channel.

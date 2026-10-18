@@ -381,6 +381,14 @@ static int mux_pool_take(uint32_t slot) {
         if (g_mux_pool_used[i])
             continue;
         if (!g_mux_pool[i]) {
+            /* Allocated on first use - but never from the scheduler's
+             * re-test, which can run from a preemption upcall with the
+             * interrupted thread anywhere (pal_svsm_sched_ctx). The frame
+             * then stays at the head (BLOCKED) until a thread routes it. */
+            if (g_pal_svsm_sched_ctx) {
+                g_pal_svsm_sched_deferred = true;
+                continue;
+            }
             g_mux_pool[i] = malloc(slot);
             if (!g_mux_pool[i])
                 return -1;
@@ -414,6 +422,10 @@ static char* mux_scratch(uint32_t slot) {
     static char*    buf;
     static uint32_t have;
     if (!buf || have < slot) {
+        if (g_pal_svsm_sched_ctx) {
+            g_pal_svsm_sched_deferred = true;   /* wake the thread to do it */
+            return NULL;
+        }
         char* n = malloc(slot);
         if (!n)
             return NULL;
@@ -467,11 +479,16 @@ static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
         mux_rx_refill(h);
     if (h->sock.rx_off >= h->sock.rx_len && !h->sock.q_count) {
         /* `rx` is spent: this buffer becomes it, and the old one goes back to
-         * the pool if that is where it came from. */
+         * the pool if that is where it came from - or, if it was the socket's
+         * own, is KEPT (rx_spare) for its next direct read. Freed here, it was
+         * freed by whatever routed: the scheduler's re-test too, which runs
+         * from a preemption upcall with the interrupted thread anywhere. The
+         * heap is no place to be then (a free() of an unmapped allocation on
+         * the alternate stack, ryan nd1 2026-10-18). */
         if (h->sock.rx_pooled)
             mux_pool_put_ptr(h->sock.rx);
-        else
-            free(h->sock.rx);
+        else if (h->sock.rx && !h->sock.rx_spare)
+            h->sock.rx_spare = h->sock.rx;
         h->sock.rx        = buf;
         h->sock.rx_pooled = true;
         h->sock.rx_len    = len;
@@ -499,8 +516,8 @@ static bool mux_rx_refill(PAL_HANDLE h) {
      * becomes `rx`. No bytes move. */
     if (h->sock.rx_pooled)
         mux_pool_put_ptr(h->sock.rx);
-    else
-        free(h->sock.rx);
+    else if (h->sock.rx && !h->sock.rx_spare)
+        h->sock.rx_spare = h->sock.rx;      /* kept, as in mux_sink_buf */
     h->sock.rx        = h->sock.q[i];
     h->sock.rx_pooled = true;
     h->sock.rx_len    = h->sock.q_len[i];
@@ -1720,7 +1737,8 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         return -PAL_ERROR_NOTSUPPORT;
 
     if (!handle->sock.rx) {
-        handle->sock.rx = malloc(in.slot);
+        handle->sock.rx = handle->sock.rx_spare ? handle->sock.rx_spare : malloc(in.slot);
+        handle->sock.rx_spare = NULL;
         if (!handle->sock.rx)
             return -PAL_ERROR_NOMEM;
         handle->sock.rx_len = handle->sock.rx_off = 0;
@@ -2121,7 +2139,8 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
      * reads in 512-byte pieces, or peeks a byte, was dead on its first
      * read. */
     if (!handle->sock.rx) {
-        handle->sock.rx = malloc(in.slot);
+        handle->sock.rx = handle->sock.rx_spare ? handle->sock.rx_spare : malloc(in.slot);
+        handle->sock.rx_spare = NULL;
         if (!handle->sock.rx)
             return -PAL_ERROR_NOMEM;
         handle->sock.rx_len = handle->sock.rx_off = 0;
@@ -2680,7 +2699,9 @@ static void sock_destroy(PAL_HANDLE handle) {
         sock_unclaim((unsigned)handle->sock.widx);
     if (handle->sock.win)
         pal_svsm_channel_close(handle->sock.widx);
-    free(handle->sock.rx);          /* the residue buffer, if it was ever needed */
+    if (!handle->sock.rx_pooled)
+        free(handle->sock.rx);      /* the residue buffer, if it was ever needed */
+    free(handle->sock.rx_spare);
     free(handle);
 }
 
