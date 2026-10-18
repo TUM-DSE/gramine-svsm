@@ -210,6 +210,8 @@ struct pal_handle_inner {
              * taken from the ring (which keeps the ring safe for the
              * several holders a fork makes) and the rest waits here. */
             char*    rx;            /* one slot's worth, allocated on demand */
+            char*    rx_own;        /* this socket's own slot buffer; `rx` is it
+                                     * or a pool buffer (rx_pooled) */
             uint32_t rx_len;        /* bytes in it */
             uint32_t rx_off;        /* how many the caller has had */
             /* AND A QUEUE BEHIND IT, on a shared channel.

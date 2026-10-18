@@ -52,7 +52,7 @@
  * Not a monitor resource any more, so this is a table size and nothing else -
  * 256 entries of 16 bytes. The old limit was the service's `max_channels`, 32,
  * enforced by VMPL0 against a 64-entry VM-wide table. */
-#define MUX_MAX_CONNS  256   /* PAL_SVSM_MUX_MAX_CONNS (pal_svsm.h) */
+#define MUX_MAX_CONNS  PAL_SVSM_MUX_MAX_CONNS   /* pal_svsm.h, for the walkers */
 
 struct mux_conn {
     PAL_HANDLE handle;      /* whose it is; NULL for a free slot */

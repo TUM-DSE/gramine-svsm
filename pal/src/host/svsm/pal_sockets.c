@@ -470,8 +470,8 @@ static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
          * the pool if that is where it came from. */
         if (h->sock.rx_pooled)
             mux_pool_put_ptr(h->sock.rx);
-        else
-            free(h->sock.rx);
+        else if (!h->sock.rx_own)
+            h->sock.rx_own = h->sock.rx;  /* kept, not freed: reads land there */
         h->sock.rx        = buf;
         h->sock.rx_pooled = true;
         h->sock.rx_len    = len;
@@ -499,8 +499,8 @@ static bool mux_rx_refill(PAL_HANDLE h) {
      * becomes `rx`. No bytes move. */
     if (h->sock.rx_pooled)
         mux_pool_put_ptr(h->sock.rx);
-    else
-        free(h->sock.rx);
+    else if (!h->sock.rx_own)
+        h->sock.rx_own = h->sock.rx;
     h->sock.rx        = h->sock.q[i];
     h->sock.rx_pooled = true;
     h->sock.rx_len    = h->sock.q_len[i];
@@ -511,10 +511,28 @@ static bool mux_rx_refill(PAL_HANDLE h) {
     return h->sock.rx_off < h->sock.rx_len;
 }
 
+/* `rx` is spent: a pool buffer goes back to the pool NOW, and the socket's own
+ * buffer becomes `rx` again for the next frame read straight off the ring.
+ *
+ * Kept until the next frame replaced it, a spent pool buffer was a pool buffer
+ * no grant had counted: a socket with one and a FLOOR credit out needed two at
+ * once (mux_head_step takes a buffer before mux_sink_buf gives the old one
+ * back), so the floor reserve did not cover it (review by jamie). Returned at
+ * consumption, a socket's pool buffers are exactly the frames it was promised
+ * and has not finished with - which is what mux_claim counts. */
+static void mux_rx_spent(PAL_HANDLE h) {
+    h->sock.rx_len = h->sock.rx_off = 0;
+    if (h->sock.rx_pooled) {
+        mux_pool_put_ptr(h->sock.rx);
+        h->sock.rx        = h->sock.rx_own;
+        h->sock.rx_pooled = false;
+    }
+}
+
 static void mux_queue_release(PAL_HANDLE h) {
     if (h->sock.rx_pooled) {
         mux_pool_put_ptr(h->sock.rx);
-        h->sock.rx        = NULL;
+        h->sock.rx        = h->sock.rx_own;
         h->sock.rx_pooled = false;
         h->sock.rx_len = h->sock.rx_off = 0;
     }
@@ -534,14 +552,11 @@ static void mux_queue_release(PAL_HANDLE h) {
 /* What a socket can still have in the pool: every frame it was promised and
  * has not finished with (queued, in `rx`, or not yet arrived), at least the
  * floor - a new socket has advertised nothing and the service may still send
- * PAL_MVMUX_CREDIT_INIT. Plus one when it keeps a spent pool buffer as `rx`:
- * that buffer stays with the socket until its next frame replaces it. */
+ * PAL_MVMUX_CREDIT_INIT. A finished frame's buffer goes back at once
+ * (mux_rx_spent), so nothing else of the pool is ever the socket's. */
 static int mux_claim(PAL_HANDLE s) {
-    int owed  = (int32_t)(s->sock.rx_advert - s->sock.rx_done);
-    int claim = owed > PAL_MUX_CREDIT_FLOOR ? owed : PAL_MUX_CREDIT_FLOOR;
-    if (s->sock.rx_pooled && s->sock.rx_off >= s->sock.rx_len)
-        claim++;
-    return claim;
+    int owed = (int32_t)(s->sock.rx_advert - s->sock.rx_done);
+    return owed > PAL_MUX_CREDIT_FLOOR ? owed : PAL_MUX_CREDIT_FLOOR;
 }
 
 /* How many frames the service may have in flight for this socket: what the
@@ -557,8 +572,8 @@ static int mux_claim(PAL_HANDLE s) {
  * for good if the application was reading a different socket. The service's
  * relay had the same flaw (up_grant, netsvc 59bef6f); this is its mirror. */
 static uint32_t mux_grant(PAL_HANDLE h) {
-    int taken = 0, live = 0;
-    for (int i = 0; i < PAL_SVSM_MUX_MAX_CONNS; i++) {
+    int taken = 0, live = 0, n = pal_svsm_mux_count();
+    for (int i = 0; i < PAL_SVSM_MUX_MAX_CONNS && live < n; i++) {
         PAL_HANDLE s = pal_svsm_mux_conn_at(i);
         if (!s)
             continue;
@@ -568,8 +583,6 @@ static uint32_t mux_grant(PAL_HANDLE h) {
     }
     if (live < PAL_MUX_FLOORS)
         taken += (PAL_MUX_FLOORS - live) * PAL_MUX_CREDIT_FLOOR;
-    if (h->sock.rx_pooled && h->sock.rx_off >= h->sock.rx_len)
-        taken++;                         /* its own kept buffer */
     int left = PAL_MUX_POOL - taken;
     uint32_t g = left > PAL_MUX_CREDIT_FLOOR ? (uint32_t)left : (uint32_t)PAL_MUX_CREDIT_FLOOR;
     if (g > PAL_MUX_CREDIT_CAP)
@@ -605,11 +618,23 @@ static bool mux_credit_due(PAL_HANDLE h, uint32_t* out_want) {
      * handed to a socket that reads one small reply and then idles on a
      * keep-alive is pool no other socket may use. */
     uint32_t win = h->sock.rx_win ? h->sock.rx_win : PAL_MUX_CREDIT_FLOOR;
-    if ((int32_t)(h->sock.rx_advert - h->sock.rx_done) <= 2 && h->sock.rx_done != h->sock.rx_grew
+    /* Not while a credit is owed: rx_advert is then stale, and every frame
+     * consumed would double the window again on a promise never sent. */
+    if (!h->sock.credit_owed
+        && (int32_t)(h->sock.rx_advert - h->sock.rx_done) <= 2 && h->sock.rx_done != h->sock.rx_grew
         && (int32_t)(h->sock.rx_done - h->sock.rx_advert) >= -(int32_t)(win / 2)) {
         win = win * 2 > PAL_MUX_CREDIT_CAP ? PAL_MUX_CREDIT_CAP : win * 2;
         h->sock.rx_win  = win;
         h->sock.rx_grew = h->sock.rx_done;
+    }
+    /* Nothing the grant could change: the window alone is not more than what
+     * is advertised (or not by enough to be worth a message). Checked before
+     * mux_grant, which walks every connection, on every consumed frame. */
+    {
+        int32_t most = (int32_t)(h->sock.rx_done + win - h->sock.rx_advert);
+        bool blocked_now = (int32_t)(h->sock.rx_advert - h->sock.rx_done) <= 3;
+        if (most <= 0 || (!blocked_now && most < 4))
+            return false;
     }
     uint32_t g = mux_grant(h);
     uint32_t want = h->sock.rx_done + (win < g ? win : g);
@@ -861,6 +886,7 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
          * frame for good: it was sent against credit. */
         mux_pool_put_ptr(into);
         target->sock.rx_done++;
+        mux_credit_maybe(target);
         return MUX_HEAD_MOVED;
     }
 
@@ -1720,7 +1746,8 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         return -PAL_ERROR_NOTSUPPORT;
 
     if (!handle->sock.rx) {
-        handle->sock.rx = malloc(in.slot);
+        handle->sock.rx = handle->sock.rx_own ? handle->sock.rx_own : malloc(in.slot);
+        handle->sock.rx_own = handle->sock.rx;
         if (!handle->sock.rx)
             return -PAL_ERROR_NOMEM;
         handle->sock.rx_len = handle->sock.rx_off = 0;
@@ -1828,7 +1855,7 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
              * read into too small a buffer is truncated, and the remainder
              * is not the next datagram's business. The stream path keeps a
              * residue here; this must not. */
-            handle->sock.rx_len = handle->sock.rx_off = 0;
+            mux_rx_spent(handle);
             if (handle->sock.muxed) {
                 /* One frame finished, which is what earns the service more
                  * window - the same accounting as _PalSocketRecv. */
@@ -2121,7 +2148,8 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
      * reads in 512-byte pieces, or peeks a byte, was dead on its first
      * read. */
     if (!handle->sock.rx) {
-        handle->sock.rx = malloc(in.slot);
+        handle->sock.rx = handle->sock.rx_own ? handle->sock.rx_own : malloc(in.slot);
+        handle->sock.rx_own = handle->sock.rx;
         if (!handle->sock.rx)
             return -PAL_ERROR_NOMEM;
         handle->sock.rx_len = handle->sock.rx_off = 0;
@@ -2145,7 +2173,7 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             }
             handle->sock.rx_off += (uint32_t)off;
             if (handle->sock.rx_off >= handle->sock.rx_len) {
-                handle->sock.rx_len = handle->sock.rx_off = 0;
+                mux_rx_spent(handle);
                 /* One frame FINISHED, which is what earns the service more
                  * window - not one frame received, or the limit would promise
                  * room that is still occupied. */
@@ -2246,7 +2274,7 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 if (handle->sock.rx_off >= handle->sock.rx_len) {
                     /* A DATA frame with no body. Nothing for this caller;
                      * go round for the next message. */
-                    handle->sock.rx_len = handle->sock.rx_off = 0;
+                    mux_rx_spent(handle);
                     handle->sock.rx_done++;
                     mux_credit_maybe(handle);
                     continue;
@@ -2680,7 +2708,9 @@ static void sock_destroy(PAL_HANDLE handle) {
         sock_unclaim((unsigned)handle->sock.widx);
     if (handle->sock.win)
         pal_svsm_channel_close(handle->sock.widx);
-    free(handle->sock.rx);          /* the residue buffer, if it was ever needed */
+    /* The socket's own buffer; `rx` is it, or NULL, after the release above.
+     * A socket that never shared has only `rx`. */
+    free(handle->sock.rx_own ? handle->sock.rx_own : handle->sock.rx);
     free(handle);
 }
 
@@ -2761,6 +2791,11 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
         }
         pal_svsm_mux_release(handle->sock.conn_id);
         handle->sock.conn_id = 0;
+        /* And its frames go back to the vault's pool now, not at close(2):
+         * with the id released it is out of mux_grant's walk, so buffers it
+         * kept would be pool nobody's claim covers (review by jamie). Every
+         * parked call is over (`closed`) and no reader takes from it again. */
+        mux_queue_release(handle);
         return 0;
     }
     /* Framed but not sharing: it owns a channel like any other socket, and
