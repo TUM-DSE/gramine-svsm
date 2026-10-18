@@ -308,4 +308,6 @@ PAL_HANDLE pal_svsm_mux_conn_of(uint32_t id);
 int        pal_svsm_mux_claim(PAL_HANDLE handle, uint32_t* out_id);
 void       pal_svsm_mux_release(uint32_t id);
 int        pal_svsm_mux_count(void);
+PAL_HANDLE pal_svsm_mux_conn_at(int i);
+#define PAL_SVSM_MUX_MAX_CONNS 256
 bool       pal_svsm_mux_id_sane(uint32_t id);

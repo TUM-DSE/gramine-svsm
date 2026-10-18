@@ -52,7 +52,7 @@
  * Not a monitor resource any more, so this is a table size and nothing else -
  * 256 entries of 16 bytes. The old limit was the service's `max_channels`, 32,
  * enforced by VMPL0 against a 64-entry VM-wide table. */
-#define MUX_MAX_CONNS  256
+#define MUX_MAX_CONNS  256   /* PAL_SVSM_MUX_MAX_CONNS (pal_svsm.h) */
 
 struct mux_conn {
     PAL_HANDLE handle;      /* whose it is; NULL for a free slot */
@@ -128,6 +128,14 @@ void pal_svsm_mux_release(uint32_t id) {
 }
 
 int pal_svsm_mux_count(void) { return g_nconns; }
+
+/* The handle in table slot `i`, or NULL: for a walk over every live connection
+ * (the credit grant, pal_sockets.c). */
+PAL_HANDLE pal_svsm_mux_conn_at(int i) {
+    if (i < 0 || i >= MUX_MAX_CONNS || !g_conns[i].used)
+        return NULL;
+    return g_conns[i].handle;
+}
 
 /* Unused, but kept honest: generation 0 and a slot out of range are the two
  * ids that can never be live, and a reader that builds one has a bug. */

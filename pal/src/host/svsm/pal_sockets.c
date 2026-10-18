@@ -531,13 +531,47 @@ static void mux_queue_release(PAL_HANDLE h) {
  * floor always, plus what the pool can spare once every other live connection's
  * floor is covered, capped. The service's up_grant is the same rule from the
  * other end. */
+/* What a socket can still have in the pool: every frame it was promised and
+ * has not finished with (queued, in `rx`, or not yet arrived), at least the
+ * floor - a new socket has advertised nothing and the service may still send
+ * PAL_MVMUX_CREDIT_INIT. Plus one when it keeps a spent pool buffer as `rx`:
+ * that buffer stays with the socket until its next frame replaces it. */
+static int mux_claim(PAL_HANDLE s) {
+    int owed  = (int32_t)(s->sock.rx_advert - s->sock.rx_done);
+    int claim = owed > PAL_MUX_CREDIT_FLOOR ? owed : PAL_MUX_CREDIT_FLOOR;
+    if (s->sock.rx_pooled && s->sock.rx_off >= s->sock.rx_len)
+        claim++;
+    return claim;
+}
+
+/* How many frames the service may have in flight for this socket: what the
+ * pool has left after every OTHER socket's claim and the floors of the
+ * PAL_MUX_FLOORS sockets that may still open, at least the floor, capped.
+ *
+ * Claims, not g_mux_pool_busy. Busy counts only frames that have arrived, and
+ * the limit is cumulative - a socket keeps what it was promised - so each of
+ * several sockets was granted the cap against the same free buffers: five
+ * keep-alive sockets that had each finished a large reply held 80 frames of
+ * promise against a pool of 77. When the pool ran dry the head frame had no
+ * buffer (MUX_HEAD_BLOCKED) and every socket of the vault waited behind it,
+ * for good if the application was reading a different socket. The service's
+ * relay had the same flaw (up_grant, netsvc 59bef6f); this is its mirror. */
 static uint32_t mux_grant(PAL_HANDLE h) {
-    __UNUSED(h);
-    int others = pal_svsm_mux_count();
-    if (others > 0)
-        others -= 1;
-    int spare = PAL_MUX_POOL - g_mux_pool_busy - others * PAL_MUX_CREDIT_FLOOR;
-    uint32_t g = (uint32_t)PAL_MUX_CREDIT_FLOOR + (spare > 0 ? (uint32_t)spare : 0u);
+    int taken = 0, live = 0;
+    for (int i = 0; i < PAL_SVSM_MUX_MAX_CONNS; i++) {
+        PAL_HANDLE s = pal_svsm_mux_conn_at(i);
+        if (!s)
+            continue;
+        live++;
+        if (s != h)
+            taken += mux_claim(s);
+    }
+    if (live < PAL_MUX_FLOORS)
+        taken += (PAL_MUX_FLOORS - live) * PAL_MUX_CREDIT_FLOOR;
+    if (h->sock.rx_pooled && h->sock.rx_off >= h->sock.rx_len)
+        taken++;                         /* its own kept buffer */
+    int left = PAL_MUX_POOL - taken;
+    uint32_t g = left > PAL_MUX_CREDIT_FLOOR ? (uint32_t)left : (uint32_t)PAL_MUX_CREDIT_FLOOR;
     if (g > PAL_MUX_CREDIT_CAP)
         g = PAL_MUX_CREDIT_CAP;
     return g;
@@ -565,9 +599,22 @@ static uint32_t mux_grant(PAL_HANDLE h) {
 static bool mux_credit_due(PAL_HANDLE h, uint32_t* out_want) {
     if (!sock_shares(h) || !h->sock.conn_id)
         return false;
-    uint32_t want = h->sock.rx_done + mux_grant(h);
-    if (want == h->sock.rx_advert)
-        return false;
+    /* GROWN WITH USE, as the relay's upload window is: FLOOR, doubled when
+     * the socket has nearly consumed what it was promised and has consumed
+     * since the last doubling. A promise cannot be taken back, so the cap
+     * handed to a socket that reads one small reply and then idles on a
+     * keep-alive is pool no other socket may use. */
+    uint32_t win = h->sock.rx_win ? h->sock.rx_win : PAL_MUX_CREDIT_FLOOR;
+    if ((int32_t)(h->sock.rx_advert - h->sock.rx_done) <= 2 && h->sock.rx_done != h->sock.rx_grew
+        && (int32_t)(h->sock.rx_done - h->sock.rx_advert) >= -(int32_t)(win / 2)) {
+        win = win * 2 > PAL_MUX_CREDIT_CAP ? PAL_MUX_CREDIT_CAP : win * 2;
+        h->sock.rx_win  = win;
+        h->sock.rx_grew = h->sock.rx_done;
+    }
+    uint32_t g = mux_grant(h);
+    uint32_t want = h->sock.rx_done + (win < g ? win : g);
+    if ((int32_t)(want - h->sock.rx_advert) <= 0)
+        return false;                    /* only a greater limit means anything */
     bool blocked = (int32_t)(h->sock.rx_advert - h->sock.rx_done) <= 3;
     if (!blocked && (int32_t)(want - h->sock.rx_advert) < 4)
         return false;

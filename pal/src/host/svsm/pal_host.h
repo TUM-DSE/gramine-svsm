@@ -237,6 +237,8 @@ struct pal_handle_inner {
             /* The window this socket ADVERTISES, for frames coming down. */
             uint32_t rx_done;       /* DATA frames fully consumed, cumulative */
             uint32_t rx_advert;     /* the limit last advertised to the service */
+            uint32_t rx_win;        /* the window it has grown to (0 = FLOOR) */
+            uint32_t rx_grew;       /* rx_done when it last grew */
             /* And the window it RESPECTS, for frames going up. */
             uint32_t tx_sent;       /* DATA frames sent, cumulative */
             uint32_t tx_limit;      /* the limit the service advertised */
