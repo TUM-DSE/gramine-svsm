@@ -75,6 +75,14 @@ static bool g_mux_granting;  /* a connect is asking for the vault's channel (_Pa
  * the host deletes rather than one that exits never reaches here, and
  * prints nothing either. */
 static void mux_dump(void);
+/* Which test hooks this libpal has (meson svsm_test_hooks), readable from the
+ * binary: the lanes print it and skip the rows that need a hook it lacks. */
+#ifdef PAL_SVSM_TEST_HOOKS
+__attribute__((used)) static const char g_pal_svsm_test_hooks[] =
+    "PAL_SVSM_TEST_HOOKS=mux-dump,credit-hook";
+#else
+__attribute__((used)) static const char g_pal_svsm_test_hooks[] = "PAL_SVSM_TEST_HOOKS=none";
+#endif
 
 void pal_svsm_net_ctr_report(void) {
     struct pal_svsm_net_ctr c;
@@ -657,18 +665,21 @@ static uint32_t mux_grant(PAL_HANDLE h) {
     return g;
 }
 
-/* One line per live connection on the shared channel, and one for the pool. */
+/* Every connection on the shared channel with its credit state, and the pool:
+ * for a stall, what each socket was promised, has consumed and holds. ORPHANS
+ * is pool busy less every live socket's queued and pooled-rx buffers - a
+ * buffer taken from the pool that no socket holds, which is a frame lost. It
+ * must be 0 whenever no frame is mid-route (net_client_tagged asks at its end).
+ * Asked for with setsockopt(SO_RCVBUF, 0x4D5658) (sock_attrsetbyhdl). */
 static void mux_dump(void) {
-    int n = pal_svsm_mux_count();
-    if (!n)
-        return;
-    int claims = 0, live = 0;
+    int n = pal_svsm_mux_count(), live = 0, claims = 0, held = 0;
     for (int i = 0; i < PAL_SVSM_MUX_MAX_CONNS && live < n; i++) {
         PAL_HANDLE s = pal_svsm_mux_conn_at(i);
         if (!s)
             continue;
         live++;
         claims += mux_claim(s);
+        held += s->sock.q_count + (s->sock.rx_pooled ? 1 : 0);
         if (live > 24)
             continue;                    /* the lines; the sums still count */
         log_always("pal_mux: conn %#x advert %u done %u win %u grew %u claim %d owed %d q %d "
@@ -679,10 +690,9 @@ static void mux_dump(void) {
                    s->sock.tx_sent, s->sock.tx_limit, (int)s->sock.fin_seen,
                    (int)s->sock.broken, (int)s->sock.closed, mux_grant(s));
     }
-    log_always("pal_mux: live %d claims %d pool busy %d of %d", live, claims,
-               g_mux_pool_busy, PAL_MUX_POOL);
+    log_always("pal_mux: live %d claims %d pool busy %d of %d held %d orphans %d", live, claims,
+               g_mux_pool_busy, PAL_MUX_POOL, held, g_mux_pool_busy - held);
 }
-
 
 /* Tell the service this socket's limit, when saying so is worth a message.
  *
@@ -2779,12 +2789,20 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
      * the endpoint's measured manifest. Accepting the call and ignoring the
      * value is what Linux does when it clamps, and the truth is readable
      * through attrquery. */
+#ifdef PAL_SVSM_TEST_HOOKS
     /* ...except one value, a TEST HOOK: setsockopt(SO_SNDBUF, 0x4D5643) -
      * doubled by the LibOS as Linux does - makes this socket send past the
      * service's credit, as a misbehaving client would (netsvc-credit lane,
      * net_credit_violation). See ignore_credit. */
     if (attr->socket.send_buf_size == 2 * 0x4D5643)
         handle->sock.ignore_credit = true;
+    /* ...except one value, which asks for the mux dump: setsockopt(SO_RCVBUF,
+     * 0x4D5658), which the LibOS doubles as Linux does. It prints every
+     * connection on the shared channel while the caller's stuck one is still
+     * open (net_client_tagged does this on a timeout and at its end). */
+    if (attr->socket.recv_buf_size == 2 * 0x4D5658)
+        mux_dump();
+#endif
     return 0;
 }
 

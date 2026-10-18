@@ -11,6 +11,10 @@ option('svsm_call_insn', type: 'combo', choices: ['vmmcall', 'cpuid'],
     value: 'vmmcall',
     description: 'Instruction the svsm PAL issues monitor calls with (cpuid only for a monitor before VMMCALL calls)')
 
+option('svsm_test_hooks', type: 'combo', choices: ['disabled', 'enabled'],
+    value: 'disabled',
+    description: 'svsm PAL test hooks for the regression lanes: the mux dump (setsockopt SO_RCVBUF 0x4D5658) and the credit-ignoring socket (SO_SNDBUF 0x4D5643). Never in a production libpal.')
+
 option('libc', type: 'combo', choices: ['none', 'glibc', 'musl'],
     value: 'glibc', description: 'Choose (patched) libc that is to be built into runtime directory')
 

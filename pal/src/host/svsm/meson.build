@@ -15,6 +15,10 @@ cflags_svsm_call_insn = []
 if get_option('svsm_call_insn') == 'cpuid'
     cflags_svsm_call_insn += '-DPAL_SVSM_CALL_CPUID'
 endif
+# The lanes' test hooks (meson_options.txt svsm_test_hooks): off unless asked.
+if get_option('svsm_test_hooks') == 'enabled'
+    cflags_svsm_call_insn += '-DPAL_SVSM_TEST_HOOKS'
+endif
 
 libpal_svsm = shared_library('pal',
     'pal_console.c',
