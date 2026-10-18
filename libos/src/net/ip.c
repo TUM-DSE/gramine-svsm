@@ -194,7 +194,7 @@ static int accept(struct libos_handle* handle, bool is_nonblocking,
     pal_to_linux_sockaddr(&pal_ip_addr, &client_sock->remote_addr, &len);
     client_sock->remote_addrlen = len;
 
-    lock(&handle->info.sock.lock);
+    lock_count_held(&handle->info.sock.lock);
     if (is_linux_sockaddr_any(&handle->info.sock.local_addr)) {
         pal_to_linux_sockaddr(&pal_local_ip_addr, &client_sock->local_addr, &len);
         client_sock->local_addrlen = len;
@@ -721,7 +721,7 @@ static int send(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
             break;
         case SOCK_DGRAM:
             if (!addr) {
-                lock(&sock->lock);
+                lock_count_held(&sock->lock);
                 if (sock->remote_addr.ss_family == AF_UNSPEC) {
                     /* Not connected. */
                     unlock(&sock->lock);

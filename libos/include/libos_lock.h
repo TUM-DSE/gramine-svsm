@@ -77,11 +77,31 @@ static inline void unlock(struct libos_lock* l) {
  * network service - was a hold that never drained: every fork from the
  * process waited the drain's whole bound (100 ms) and went ahead with it.
  * Only the WAIT is uncounted, so the bookkeeping either side of it (the peek
- * buffer, the state) is still waited out by a fork. A fork that lands in the
- * wait copies the locks held, so whoever owns such locks makes the child
- * fresh ones (sockets_after_cow_fork) - the thread that held them does not
- * exist in the child.
+ * buffer) is still waited out by a fork. A fork that lands in the wait copies
+ * the locks held, so whoever owns such locks makes the child fresh ones
+ * (sockets_after_cow_fork) - the thread that held them does not exist in the
+ * child. It also copies the socket as the wait left it: a connect's paused
+ * span writes the addresses (and a unix socket's PAL handle), so a child
+ * forked during a connect has a socket that is neither connected nor quite
+ * new - as on Linux, a socket shared across fork mid-connect is the
+ * program's to sort out, and the child should not reuse it.
  */
+/*
+ * lock(), but counted for the fork only once it is HELD - for a lock another
+ * thread may hold across a long wait (a socket's, above). A thread queued
+ * behind such a holder would otherwise be a hold for as long as the holder
+ * waits, and every fork would wait its bound again. A fork that lands while
+ * this waits copies the lock held; its owner's child remakes it. Released
+ * with the ordinary unlock().
+ */
+static inline void lock_count_held(struct libos_lock* l) {
+    assert(l->lock);
+    while (PalEventWait(l->lock, /*timeout=*/NULL) < 0)
+        /* nop */;
+    PalLockHold(NULL, 1);
+    l->owner = get_cur_tid();
+}
+
 static inline void lock_holds_pause(int n) {
     while (n-- > 0)
         PalLockHold(NULL, -1);

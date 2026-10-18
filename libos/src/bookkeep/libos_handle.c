@@ -815,8 +815,16 @@ void sockets_after_cow_fork(void) {
         struct libos_fd_handle* fd_hdl = map->map[i];
         if (!HANDLE_ALLOCATED(fd_hdl) || !fd_hdl->handle || fd_hdl->handle->type != TYPE_SOCK)
             continue;
+        /* Once per socket, not per fd: a dup'd one is remade by its first. */
+        bool seen = false;
+        for (uint32_t k = 0; k < i && !seen; k++)
+            seen = HANDLE_ALLOCATED(map->map[k]) && map->map[k]->handle == fd_hdl->handle;
+        if (seen)
+            continue;
         struct libos_sock_handle* sock = &fd_hdl->handle->info.sock;
-        if (!create_lock(&sock->recv_lock) || !create_lock(&sock->lock))
+        bool ok = create_lock(&sock->recv_lock);
+        ok = create_lock(&sock->lock) && ok;
+        if (!ok)
             log_warning("fork: could not remake fd %u's socket locks - a use of it may block", i);
     }
 }
@@ -865,7 +873,7 @@ BEGIN_CP_FUNC(handle) {
         if (hdl->type == TYPE_SOCK) {
             /* We need this lock taken before `hdl->lock`. This checkpointing mess needs to be
              * untangled. */
-            lock(&hdl->info.sock.lock);
+            lock_count_held(&hdl->info.sock.lock);
         }
 
         /* TODO: this lock is not released on errors. The main problem here is that `DO_CP` can

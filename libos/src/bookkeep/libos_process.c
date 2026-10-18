@@ -140,6 +140,10 @@ static bool cmp_child_by_pid_ipc(const struct libos_child_process* child, unsign
     return cmp_child_by_pid(child, arg) && !child->by_host;
 }
 
+static bool cmp_child_by_pid_host(const struct libos_child_process* child, unsigned long arg) {
+    return cmp_child_by_pid(child, arg) && child->by_host;
+}
+
 static bool mark_child_exited(child_cmp_t child_cmp, unsigned long arg, IDTYPE child_uid,
                               int exit_code, int signal) {
     bool ret = false;
@@ -229,7 +233,7 @@ bool reap_stale_child(IDTYPE pid) {
         }
     }
     unlock(&g_process.children_lock);
-    return found && mark_child_exited_by_pid(pid, uid, 0, SIGKILL);
+    return found && mark_child_exited(cmp_child_by_pid_host, (unsigned long)pid, uid, 0, SIGKILL);
 }
 
 bool mark_child_exited_by_pid_ipc(IDTYPE pid, IDTYPE child_uid, int exit_code, int signal) {

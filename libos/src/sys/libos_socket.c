@@ -102,7 +102,7 @@ void check_connect_inprogress_on_poll(struct libos_handle* handle, bool error_ev
         return;
 
     struct libos_sock_handle* sock = &handle->info.sock;
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
 
     if (sock->state != SOCK_CONNECTING) {
         /* data race: another thread could have done another select/poll on this socket and
@@ -337,7 +337,7 @@ long libos_syscall_bind(int fd, void* addr, int _addrlen) {
 
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
 
     if (sock->state != SOCK_NEW) {
         ret = -EINVAL;
@@ -379,7 +379,7 @@ long libos_syscall_listen(int fd, int backlog) {
 
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
 
     switch (sock->state) {
         case SOCK_BOUND:
@@ -442,7 +442,7 @@ static int do_accept(int fd, void* addr, int* addrlen_ptr, int flags) {
     bool has_recvtimeout_set = false;
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
     if (sock->state != SOCK_LISTENING) {
         ret = -EINVAL;
     } else if (!sock->can_be_read) {
@@ -526,8 +526,8 @@ long libos_syscall_connect(int fd, void* addr, int _addrlen) {
 
     /* We need to take `recv_lock` just in case we free `peek` buffer in `disconnect` case.
      * This should not hurt though - nothing should be calling `recv` concurrently anyway. */
-    lock(&sock->recv_lock);
-    lock(&sock->lock);
+    lock_count_held(&sock->recv_lock);
+    lock_count_held(&sock->lock);
 
     switch (sock->state) {
         case SOCK_NEW:
@@ -695,7 +695,7 @@ ssize_t do_sendmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
             log_debug("MSG_MORE on TCP sockets is ignored");
     }
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
     if (sock->state == SOCK_CONNECTING) {
         unlock(&sock->lock);
         return -EAGAIN;
@@ -828,7 +828,7 @@ long libos_syscall_sendmmsg(int fd, struct mmsghdr* msg, unsigned int vlen, unsi
                 goto out;
             }
             if (!is_eintr_like(ret) && ret != -EAGAIN && ret != -EPIPE) {
-                lock(&handle->info.sock.lock);
+                lock_count_held(&handle->info.sock.lock);
                 /* Since `i > 0`, `do_sendmsg` has already verified that `handle` is a socket. */
                 handle->info.sock.last_error = -ret;
                 unlock(&handle->info.sock.lock);
@@ -864,7 +864,7 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
     bool force_nonblocking = *flags & MSG_DONTWAIT;
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
     if (sock->state == SOCK_CONNECTING) {
         unlock(&sock->lock);
         return -EAGAIN;
@@ -917,7 +917,7 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
      * not result in a deadlock - hopefully some data arrives (or the socket is closed from
      * the remote side) and unlocks the first blocked thread.
      */
-    lock(&sock->recv_lock);
+    lock_count_held(&sock->recv_lock);
 
     if (*flags & MSG_PEEK) {
         if (sock->type != SOCK_STREAM) {
@@ -1127,7 +1127,7 @@ long libos_syscall_recvmmsg(int fd, struct mmsghdr* msg, unsigned int vlen, unsi
                 goto out;
             }
             if (!is_eintr_like(ret) && ret != -EAGAIN) {
-                lock(&handle->info.sock.lock);
+                lock_count_held(&handle->info.sock.lock);
                 /* Since `i > 0`, `do_recvmsg` has already verified that `handle` is a socket. */
                 handle->info.sock.last_error = -ret;
                 unlock(&handle->info.sock.lock);
@@ -1163,7 +1163,7 @@ long libos_syscall_shutdown(int fd, int how) {
     int ret;
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
 
     switch (sock->state) {
         case SOCK_CONNECTED:
@@ -1246,7 +1246,7 @@ long libos_syscall_getsockname(int fd, void* addr, int* _addrlen) {
 
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
 
     /* If the user provided buffer is too small, the address is truncated, but we report the actual
      * address size in `_addrlen`. */
@@ -1290,7 +1290,7 @@ long libos_syscall_getpeername(int fd, void* addr, int* _addrlen) {
     int ret;
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
 
     if (sock->state != SOCK_CONNECTED) {
         ret = -ENOTCONN;
@@ -1351,7 +1351,7 @@ long libos_syscall_setsockopt(int fd, int level, int optname, char* optval, int 
 
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
     switch (level) {
         case SOL_SOCKET:
             ret = set_socket_option(handle, optname, optval, len);
@@ -1458,7 +1458,7 @@ long libos_syscall_getsockopt(int fd, int level, int optname, char* optval, int*
 
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
     switch (level) {
         case SOL_SOCKET:
             ret = get_socket_option(handle, optname, optval, &len);

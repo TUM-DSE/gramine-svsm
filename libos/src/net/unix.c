@@ -210,7 +210,7 @@ static int accept(struct libos_handle* handle, bool is_nonblocking,
     client_sock->remote_addr.ss_family = AF_UNIX;
     client_sock->remote_addrlen = sizeof(client_sock->remote_addr.ss_family);
 
-    lock(&handle->info.sock.lock);
+    lock_count_held(&handle->info.sock.lock);
     client_sock->local_addrlen = handle->info.sock.local_addrlen;
     memcpy(&client_sock->local_addr, &handle->info.sock.local_addr, client_sock->local_addrlen);
     unlock(&handle->info.sock.lock);

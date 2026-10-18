@@ -1263,6 +1263,11 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
     if (!len)
         return 0;
 
+    /* A reader gone is EPIPE now, as on Linux - not only once the ring has
+     * filled (the loop below). The count only: a write is the hot path, and
+     * the ledger sweep belongs to a writer that has to WAIT (peer_gone). */
+    if (__atomic_load_n(&handle->pipe.pair->holders[1 - handle->pipe.side], __ATOMIC_ACQUIRE) <= 0)
+        return -PAL_ERROR_CONNFAILED_PIPE;
     while (out_ring(handle)->used == PIPE_RING_SIZE) {
         if (pal_svsm_pipe_peer_gone(handle))
             return -PAL_ERROR_CONNFAILED_PIPE;   /* EPIPE, and the LibOS sends SIGPIPE */

@@ -175,9 +175,19 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
      */
     (void)vfs_attach();
 
+    /* Every reap held off from BEFORE the fork until the new child is
+     * listed (below). From the fork on, the monitor may hand this child a
+     * slot that an earlier child of ours - deleted by the host, not yet
+     * reaped - had: a reap that looked at that slot then would read the NEW
+     * child's status under the old entry. Held from here, no reap runs
+     * between the slot being taken and both entries being right. The child
+     * clears its copy (wait_after_cow_fork). */
+    host_reap_hold();
     int pret = PalProcessFork(PAL_PROCESS_FORK_RESIDENT, &child_id, &self_id);
-    if (pret < 0)
+    if (pret < 0) {
+        host_reap_release();
         return pal_to_unix_errno(pret);
+    }
 
     if (child_id == 0) {
         /* ---- the child ---- */
@@ -238,6 +248,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
          * here - it is already running - so say so rather than pretend the
          * fork failed. */
         log_error("fork: child %lu is running but could not be recorded", (unsigned long)child_id);
+        host_reap_release();
         return -ENOMEM;
     }
     child->pid  = (IDTYPE)child_id;
@@ -256,13 +267,9 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
      * the new child ended and take its status. So it is reaped now, as
      * killed, which is what the next look would have said.
      *
-     * With every reap held off around it: a reap that has its answer for
-     * the OLD child from the monitor - which freed the slot this fork got -
-     * but is still on its way to marking it would otherwise mark the NEW
-     * child with the old status, after this marked the old one as killed.
-     * Holding the reap flag makes that reap finish first (on the old entry,
-     * the only one with this pid), or start after the new child is listed. */
-    host_reap_hold();
+     * With every reap held off since before the fork (above): a reap that
+     * had its answer for the OLD child, or asked about the slot after this
+     * fork took it, would otherwise give one child's status to the other. */
     (void)reap_stale_child((IDTYPE)child_id);
     lock(&g_process.children_lock);
     LISTP_ADD_TAIL(child, &g_process.children, list);

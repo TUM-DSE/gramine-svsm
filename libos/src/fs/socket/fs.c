@@ -122,7 +122,7 @@ static int setflags(struct libos_handle* handle, unsigned int flags, unsigned in
     bool nonblocking = flags & O_NONBLOCK;
     struct libos_sock_handle* sock = &handle->info.sock;
 
-    lock(&sock->lock);
+    lock_count_held(&sock->lock);
     lock(&handle->lock);
 
     PAL_HANDLE pal_handle = __atomic_load_n(&sock->pal_handle, __ATOMIC_ACQUIRE);
