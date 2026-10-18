@@ -577,6 +577,35 @@ static uint32_t mux_grant(PAL_HANDLE h) {
     return g;
 }
 
+/* Every connection on the shared channel with its credit state, and the pool:
+ * for a stall, what each socket was promised, has consumed and holds. ORPHANS
+ * is pool busy less every live socket's queued and pooled-rx buffers - a
+ * buffer taken from the pool that no socket holds, which is a frame lost. It
+ * must be 0 whenever no frame is mid-route (net_client_tagged asks at its end).
+ * Asked for with setsockopt(SO_RCVBUF, 0x4D5658) (sock_attrsetbyhdl). */
+static void mux_dump(void) {
+    int n = pal_svsm_mux_count(), live = 0, claims = 0, held = 0;
+    for (int i = 0; i < PAL_SVSM_MUX_MAX_CONNS && live < n; i++) {
+        PAL_HANDLE s = pal_svsm_mux_conn_at(i);
+        if (!s)
+            continue;
+        live++;
+        claims += mux_claim(s);
+        held += s->sock.q_count + (s->sock.rx_pooled ? 1 : 0);
+        if (live > 24)
+            continue;                    /* the lines; the sums still count */
+        log_always("pal_mux: conn %#x advert %u done %u win %u grew %u claim %d owed %d q %d "
+                   "rx %u/%u%s tx %u/%u fin %d broken %d closed %d grant-now %u",
+                   s->sock.conn_id, s->sock.rx_advert, s->sock.rx_done, s->sock.rx_win,
+                   s->sock.rx_grew, mux_claim(s), (int)s->sock.credit_owed, s->sock.q_count,
+                   s->sock.rx_off, s->sock.rx_len, s->sock.rx_pooled ? " pooled" : "",
+                   s->sock.tx_sent, s->sock.tx_limit, (int)s->sock.fin_seen,
+                   (int)s->sock.broken, (int)s->sock.closed, mux_grant(s));
+    }
+    log_always("pal_mux: live %d claims %d pool busy %d of %d held %d orphans %d", live, claims,
+               g_mux_pool_busy, PAL_MUX_POOL, held, g_mux_pool_busy - held);
+}
+
 /* Tell the service this socket's limit, when saying so is worth a message.
  *
  * At once when the socket has nothing left coming, because then a message is
@@ -2671,6 +2700,12 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
      * the endpoint's measured manifest. Accepting the call and ignoring the
      * value is what Linux does when it clamps, and the truth is readable
      * through attrquery. */
+    /* ...except one value, which asks for the mux dump: setsockopt(SO_RCVBUF,
+     * 0x4D5658), which the LibOS doubles as Linux does. It prints every
+     * connection on the shared channel while the caller's stuck one is still
+     * open (net_client_tagged does this on a timeout and at its end). */
+    if (attr->socket.recv_buf_size == 2 * 0x4D5658)
+        mux_dump();
     return 0;
 }
 
