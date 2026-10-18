@@ -705,6 +705,27 @@ enum mux_head {
 };
 
 static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
+                                   bool was_full);
+
+/* Read the head message - but on a SHARED channel only what mux_head_step said
+ * is ours (MINE). EMPTY means the ring was empty when it PEEKED, not that it
+ * still is: the service fills it from another processor, so a message can land
+ * between that peek and this read, and reading it here takes it without the
+ * router ever seeing it - another socket's frame, or a CREDIT, handed to this
+ * caller as its own. That is how a reader parked on a connection whose peer
+ * never writes returned 01 00 00 00 (the body of a CREDIT with limit 1) on
+ * ryan, once in about 25 vault_sock_park runs, in the phase where signals keep
+ * its recv going round. -1, as for an empty ring: the caller looks again, and
+ * routes what has arrived. A socket that owns its channel is never routed
+ * (mux_head_step says EMPTY for it whatever is there) and reads directly. */
+static int mux_recv_mine(PAL_HANDLE handle, struct pal_chan_ring* in, enum mux_head mh,
+                         void* msg, uint32_t max, uint32_t* out_len) {
+    if (mh == MUX_HEAD_EMPTY && sock_shares(handle))
+        return -1;
+    return pal_chan_recv(in, msg, max, out_len);
+}
+
+static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
                                    bool was_full) {
     if (!sock_shares(handle))
         return MUX_HEAD_EMPTY;
@@ -1145,7 +1166,7 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
         }
         /* Big enough for the frame as well as the record. */
         unsigned char rbuf[PAL_MVMUX_HDR_BYTES + sizeof(rep)];
-        int rc = pal_chan_recv(&in, rbuf, sizeof(rbuf), &got);
+        int rc = mux_recv_mine(handle, &in, mh, rbuf, sizeof(rbuf), &got);
         if (rc == 0) {
             uint32_t off = handle->sock.muxed ? PAL_MVMUX_HDR_BYTES : 0;
             if (got != off + sizeof(rep))
@@ -1694,7 +1715,7 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                 }
                 head_blocked = mh == MUX_HEAD_BLOCKED;
                 if (mh != MUX_HEAD_BLOCKED) {
-                    rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
+                    rc = mux_recv_mine(handle, &in, mh, handle->sock.rx, in.slot, &got);
                     if (rc == 0) {
                         if (was_full)
                             pal_svsm_channel_notify(sock_widx(handle));
@@ -2139,7 +2160,7 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
         if (mh == MUX_HEAD_BLOCKED)
             goto mux_blocked;
 
-        int rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
+        int rc = mux_recv_mine(handle, &in, mh, handle->sock.rx, in.slot, &got);
         if (rc == 0) {
             if (was_full)
                 pal_svsm_channel_notify(sock_widx(handle));
