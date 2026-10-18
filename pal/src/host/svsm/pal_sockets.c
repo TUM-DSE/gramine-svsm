@@ -788,7 +788,11 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
         return MUX_HEAD_MOVED;
     }
     if (pooled) {
-        mux_pool_put_ptr(into);          /* a DATA frame with no body */
+        /* A DATA frame with no body. Counted done, as the read path counts
+         * one (_PalSocketRecv), or the service's window would shrink by a
+         * frame for good: it was sent against credit. */
+        mux_pool_put_ptr(into);
+        target->sock.rx_done++;
         return MUX_HEAD_MOVED;
     }
 
@@ -1848,13 +1852,14 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
      *
      * The gather was unconditional: malloc(total), memcpy into it,
      * pal_chan_send from it, free. For a stream socket `total` is clamped to
-     * `out.slot - 4` just above, which for this service's geometry is 16,380 -
+     * `out.slot - 4` just above, which for this service's geometry was 16,380
+     * (65,532 since the 64 KiB slots, further still from the slab) -
      * and the PAL slab's top level is 8288 - SLAB_HDR_SIZE = 8,272 B
      * (common/include/slabmgr.h:86-98). So every full-slot send missed the
      * slab, fell to LARGE_MEM_OBJ -> system_malloc (slabmgr.h:306-322), and
      * cost a page-granular MMAP on the way in and a MUNMAP on the way out -
      * two MONITOR CALLS per send that nothing in the tree accounted for. At
-     * the 11.2 us anchor and 65 sends per MiB that is ~1,456 us per MiB spent
+     * the 11.2 us anchor and 65 sends per MiB (then) that is ~1,456 us per MiB spent
      * on allocating a buffer whose only job was to be copied out of again.
      *
      * send(2), sendto(2) and write(2) all arrive here with iov_len == 1
@@ -1951,7 +1956,7 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
         }
 
         /* Header and body in one message, without building a combined buffer:
-         * that buffer was a 16,380-byte malloc that missed the PAL slab and
+         * that buffer was a slot-sized malloc (16,380 bytes then) that missed the PAL slab and
          * cost an mmap and a munmap through the monitor on every send. */
         if (pal_chan_send2(&out, fh, fhl, msg, (uint32_t)total) == 0) {
             /* The peer may be parked on this index; the monitor turns that
@@ -2448,10 +2453,17 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle) {
      *     without ever waiting for the credit. Requiring credit here took
      *     447 ms off 504's 1.48 s PUT (native-gap pal-wait C, jamie
      *     2026-10-18).
-     * Still true for a reset socket or a gone channel, as on Linux (POLLOUT
-     * with the error): the send says what happened rather than nobody. */
+     *
+     * Before any of that: writing over - shut down, closed, reset, or the
+     * channel gone - is POLLOUT, as Linux sets it once SEND_SHUTDOWN is
+     * (tcp_poll) or with the error, because the send then answers at once and
+     * says which. Asked after the credit test, a poll for writing after
+     * shutdown(SHUT_WR) waited for a credit that need never come, and a reset
+     * socket with a full ring was never writable at all. */
+    if (sock_wr_over(handle) || handle->sock.broken || sock_chan_gone(handle))
+        return true;
     if (sock_no_credit(handle))
-        return handle->sock.broken || sock_chan_gone(handle);
+        return false;
     return sock_ring_room(handle);
 }
 
