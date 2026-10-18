@@ -435,6 +435,8 @@ static char* mux_scratch(uint32_t slot) {
  * `off` is where the BODY starts, so the frame header travels with the buffer
  * and is skipped rather than moved. False means there was no room, and then the
  * caller must put the buffer back. */
+static bool mux_rx_refill(PAL_HANDLE h);
+
 static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
     /* `rx` spent AND nothing queued behind it - not just `rx` spent.
      *
@@ -450,6 +452,19 @@ static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
      * SHA-256 every time (10 of 10), the bad ranges holding the bytes from
      * exactly 0x3FF4 = 16,372 further on - one mux frame's payload - and
      * torch.load in SeBS 411 failed with KeyError 'storages'. */
+    /* `rx` spent WITH frames queued behind it: the oldest of them becomes
+     * `rx` first, so the queue has room for this one. The read that spent
+     * `rx` counted its frame done (rx_done) and so promised the service a
+     * slot - the window is CAP = `rx` + PAL_MUX_QUEUE - and without this the
+     * slot was not there until the next read: a socket with 15 frames queued
+     * behind a spent `rx` took the 16th as an overflow and was marked broken.
+     * The client read ECONNRESET in the middle of a download. Measured with
+     * 64 KiB frames, eight downloads at once from one vault: 7 of 8 reset
+     * (net_client_share, ryan 2026-10-18), every one of them here with the
+     * queue full and `rx` empty. Order is kept: the queue's head goes first,
+     * and the new frame to the queue's tail. */
+    if (h->sock.rx_off >= h->sock.rx_len && h->sock.q_count)
+        mux_rx_refill(h);
     if (h->sock.rx_off >= h->sock.rx_len && !h->sock.q_count) {
         /* `rx` is spent: this buffer becomes it, and the old one goes back to
          * the pool if that is where it came from. */
@@ -765,7 +780,8 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
         if (!mux_sink_buf(target, into, got, PAL_MVMUX_HDR_BYTES)) {
             /* Nowhere to put it, and it is already out of the ring. Dropping
              * would silently corrupt the stream, so the socket is marked rather
-             * than lied to. Unreachable while the advertised window holds. */
+             * than lied to. Unreachable while the advertised window holds -
+             * which it did not, until mux_sink_buf refilled a spent `rx`. */
             mux_pool_put_ptr(into);
             target->sock.broken = true;
         }
