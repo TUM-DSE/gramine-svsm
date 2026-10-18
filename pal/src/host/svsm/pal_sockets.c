@@ -376,6 +376,14 @@ static void* g_mux_pool[PAL_MUX_POOL];
 static bool  g_mux_pool_used[PAL_MUX_POOL];
 static int   g_mux_pool_busy;
 
+/* May this code use the heap? Not from the scheduler's re-test
+ * (pal_svsm_poller_ready), and not on a thread inside a preemption upcall: a
+ * large PAL allocation is the LibOS's VMA bookkeeping, which such a thread may
+ * have been interrupted in. */
+static inline bool pal_svsm_heap_unsafe(void) {
+    return g_pal_svsm_sched_ctx || pal_get_svsm_tcb()->handle->thread.in_upcall;
+}
+
 static int mux_pool_take(uint32_t slot) {
     for (int i = 0; i < PAL_MUX_POOL; i++) {
         if (g_mux_pool_used[i])
@@ -385,13 +393,29 @@ static int mux_pool_take(uint32_t slot) {
              * re-test, which can run from a preemption upcall with the
              * interrupted thread anywhere (pal_svsm_sched_ctx). The frame
              * then stays at the head (BLOCKED) until a thread routes it. */
-            if (g_pal_svsm_sched_ctx) {
+            if (pal_svsm_heap_unsafe()) {
                 g_pal_svsm_sched_deferred = true;
                 continue;
             }
-            g_mux_pool[i] = malloc(slot);
-            if (!g_mux_pool[i])
-                return -1;
+            /* Into a local, and the slot looked at again: the malloc can be
+             * preempted (pal_memory.c bkeep upcalls), and another thread may
+             * have filled this slot meanwhile - assigning straight over it
+             * orphaned that buffer and over-counted busy (review by jamie). */
+            void* n = malloc(slot);
+            if (!n)
+                return -2;                   /* NOMEM, not merely full */
+            if (g_mux_pool[i]) {
+                int j;
+                for (j = 0; j < PAL_MUX_POOL && g_mux_pool[j]; j++)
+                    ;
+                if (j < PAL_MUX_POOL)
+                    g_mux_pool[j] = n;       /* stocked for the next take */
+                else
+                    free(n);
+                i = -1;                      /* scan again from the start */
+                continue;
+            }
+            g_mux_pool[i] = n;
         }
         g_mux_pool_used[i] = true;
         g_mux_pool_busy++;
@@ -422,7 +446,7 @@ static char* mux_scratch(uint32_t slot) {
     static char*    buf;
     static uint32_t have;
     if (!buf || have < slot) {
-        if (g_pal_svsm_sched_ctx) {
+        if (pal_svsm_heap_unsafe()) {
             g_pal_svsm_sched_deferred = true;   /* wake the thread to do it */
             return NULL;
         }
@@ -447,6 +471,35 @@ static char* mux_scratch(uint32_t slot) {
  * `off` is where the BODY starts, so the frame header travels with the buffer
  * and is skipped rather than moved. False means there was no room, and then the
  * caller must put the buffer back. */
+/* Give a socket with no `rx` its own buffer, at a recv's entry.
+ *
+ * NOT `rx = malloc(...)` in one step. A slot-sized malloc goes to the LibOS's
+ * VMA bookkeeping (pal_memory.c bkeep upcalls), which is LibOS text and can be
+ * preempted - and the scheduler's re-test routes the shared channel meanwhile.
+ * A frame for this socket installed into `rx` then (rx_pooled) was overwritten
+ * by the assignment when the malloc returned: the frame lost, its pool buffer
+ * orphaned, rx_done never advancing, the connection stalled for good (review by
+ * jamie; the s2/s3 dumps on ryan). So: allocate into a local, and look again.
+ */
+static int mux_rx_own(PAL_HANDLE h, uint32_t slot) {
+    char* own = h->sock.rx_spare;
+    h->sock.rx_spare = NULL;
+    if (!own)
+        own = malloc(slot);
+    if (!own)
+        return -PAL_ERROR_NOMEM;
+    if (!h->sock.rx) {
+        h->sock.rx        = own;
+        h->sock.rx_pooled = false;
+        h->sock.rx_len = h->sock.rx_off = 0;
+    } else if (!h->sock.rx_spare) {
+        h->sock.rx_spare = own;          /* routed in meanwhile: keep it */
+    } else {
+        free(own);                       /* thread context: safe */
+    }
+    return 0;
+}
+
 static bool mux_rx_refill(PAL_HANDLE h);
 
 static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
@@ -487,8 +540,10 @@ static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
          * the alternate stack, ryan nd1 2026-10-18). */
         if (h->sock.rx_pooled)
             mux_pool_put_ptr(h->sock.rx);
-        else if (h->sock.rx && !h->sock.rx_spare)
+        else if (h->sock.rx) {
+            assert(!h->sock.rx_spare);   /* at most one own buffer per socket */
             h->sock.rx_spare = h->sock.rx;
+        }
         h->sock.rx        = buf;
         h->sock.rx_pooled = true;
         h->sock.rx_len    = len;
@@ -516,8 +571,10 @@ static bool mux_rx_refill(PAL_HANDLE h) {
      * becomes `rx`. No bytes move. */
     if (h->sock.rx_pooled)
         mux_pool_put_ptr(h->sock.rx);
-    else if (h->sock.rx && !h->sock.rx_spare)
-        h->sock.rx_spare = h->sock.rx;      /* kept, as in mux_sink_buf */
+    else if (h->sock.rx) {
+        assert(!h->sock.rx_spare);          /* kept, as in mux_sink_buf */
+        h->sock.rx_spare = h->sock.rx;
+    }
     h->sock.rx        = h->sock.q[i];
     h->sock.rx_pooled = true;
     h->sock.rx_len    = h->sock.q_len[i];
@@ -844,6 +901,8 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
     char* into;
     if (pooled) {
         pb = mux_pool_take(in->slot);
+        if (pb == -2)
+            return MUX_HEAD_NOMEM;      /* the heap said no: not a full pool */
         if (pb < 0)
             return MUX_HEAD_BLOCKED;    /* no buffer: leave it, come back */
         into = g_mux_pool[pb];
@@ -1737,11 +1796,9 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         return -PAL_ERROR_NOTSUPPORT;
 
     if (!handle->sock.rx) {
-        handle->sock.rx = handle->sock.rx_spare ? handle->sock.rx_spare : malloc(in.slot);
-        handle->sock.rx_spare = NULL;
-        if (!handle->sock.rx)
-            return -PAL_ERROR_NOMEM;
-        handle->sock.rx_len = handle->sock.rx_off = 0;
+        int arc = mux_rx_own(handle, in.slot);
+        if (arc < 0)
+            return arc;
     }
 
     bool nonblock = force_nonblocking || handle->sock.is_nonblocking;
@@ -2139,11 +2196,9 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
      * reads in 512-byte pieces, or peeks a byte, was dead on its first
      * read. */
     if (!handle->sock.rx) {
-        handle->sock.rx = handle->sock.rx_spare ? handle->sock.rx_spare : malloc(in.slot);
-        handle->sock.rx_spare = NULL;
-        if (!handle->sock.rx)
-            return -PAL_ERROR_NOMEM;
-        handle->sock.rx_len = handle->sock.rx_off = 0;
+        int arc = mux_rx_own(handle, in.slot);
+        if (arc < 0)
+            return arc;
     }
 
     int ret;

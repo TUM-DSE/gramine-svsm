@@ -84,6 +84,12 @@ struct pal_handle_inner {
             bool       has_deadline;
             bool       interrupted;  /* _PalThreadResume landed */
             bool       timed_out;
+            /* Inside a preemption upcall's yield (pal_exception.c): this
+             * thread was interrupted at an arbitrary LibOS or application
+             * instruction, so it must not reach the heap - a large PAL
+             * allocation is the LibOS's VMA bookkeeping (pal_memory.c, the
+             * bkeep upcalls), which may be exactly what it was in. */
+            uint32_t   in_upcall;
             /* The ring words that would make this thread runnable, as
              * `pal_chan_arm` encodes them. A blocked thread leaves them
              * here so that the PAL's scheduler, which is the thing that
