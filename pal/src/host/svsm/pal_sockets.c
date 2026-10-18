@@ -1780,7 +1780,12 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         if (wr < 0)
             return wr;
         if (sock_rd_over(handle)) {
-            *out_total_size = 0;         /* shut or closed under it */
+            /* Shut or closed under it. No datagram, so no sender either:
+             * the address must still say so (PAL_DISCONNECT, AF_UNSPEC to
+             * the LibOS), or ip.c converts whatever the stack held. */
+            if (addr)
+                memset(addr, 0, sizeof(*addr));
+            *out_total_size = 0;
             return 0;
         }
         ring_for(handle, &in, NULL);
@@ -2649,8 +2654,10 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
      * Whatever the mode (a channel has no half-close; its closing is the
      * peer's end of stream), and so every call of this socket parked in
      * sock_block is over: `closed`, which they test before they look at a
-     * ring again. A listener lands here too, and its parked accept ends. */
-    handle->sock.closed = true;
+     * ring again. A listener lands here too, and its parked accept ends -
+     * but not for SHUT_WR, which Linux ignores on a listening socket. */
+    if (!(handle->sock.listening && mode == PAL_DELETE_WRITE))
+        handle->sock.closed = true;
     if (handle->sock.conn_id) {
         pal_svsm_mux_release(handle->sock.conn_id);
         handle->sock.conn_id = 0;
