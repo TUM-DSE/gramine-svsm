@@ -84,6 +84,12 @@ struct pal_handle_inner {
             bool       has_deadline;
             bool       interrupted;  /* _PalThreadResume landed */
             bool       timed_out;
+            /* Inside a preemption upcall's yield (pal_exception.c): this
+             * thread was interrupted at an arbitrary LibOS or application
+             * instruction, so it must not reach the heap - a large PAL
+             * allocation is the LibOS's VMA bookkeeping (pal_memory.c, the
+             * bkeep upcalls), which may be exactly what it was in. */
+            uint32_t   in_upcall;
             /* The ring words that would make this thread runnable, as
              * `pal_chan_arm` encodes them. A blocked thread leaves them
              * here so that the PAL's scheduler, which is the thing that
@@ -210,6 +216,9 @@ struct pal_handle_inner {
              * taken from the ring (which keeps the ring safe for the
              * several holders a fork makes) and the rest waits here. */
             char*    rx;            /* one slot's worth, allocated on demand */
+            char*    rx_spare;      /* this socket's own slot buffer while `rx`
+                                     * is a pool frame: kept, not freed, so the
+                                     * router never frees (pal_svsm_sched_ctx) */
             uint32_t rx_len;        /* bytes in it */
             uint32_t rx_off;        /* how many the caller has had */
             /* AND A QUEUE BEHIND IT, on a shared channel.
