@@ -169,6 +169,12 @@ struct pal_handle_inner {
             uint64_t recvtimeout_us;
             uint64_t sendtimeout_us;
             bool     is_nonblocking;
+            /* TEST HOOK (netsvc-credit lane, net_credit_violation): this
+             * socket sends past the service's credit, as a misbehaving
+             * client would. Set by setsockopt(SO_SNDBUF, 0x4D5643); only
+             * this socket's own sends are affected, and the relay must cope
+             * with it anyway - a vault cannot be trusted to keep credit. */
+            bool     ignore_credit;
             /* A malformed length or a reset: the stream is over, and every
              * later call fails CONNFAILED (ECONNRESET). It was DENIED -
              * EACCES - which a caller could not tell from the channel quota's

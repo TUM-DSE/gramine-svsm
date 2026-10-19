@@ -1743,7 +1743,7 @@ static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
          * link. The relay advertises credit for datagram sessions too
          * (udp_step), so a socket at its limit is waiting for a frame that
          * comes. */
-        if (sock_shares(handle)
+        if (sock_shares(handle) && !handle->sock.ignore_credit
             && (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
             if (sock_chan_gone(handle)) {
                 ret = -PAL_ERROR_CONNFAILED;
@@ -2101,7 +2101,7 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
          *
          * Only for a sharing socket: one that owns its channel is the only
          * connection on it, so the ring's own fullness is the whole truth. */
-        if (sock_shares(handle)
+        if (sock_shares(handle) && !handle->sock.ignore_credit
             && (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
             if (sock_chan_gone(handle)) {
                 ret = -PAL_ERROR_CONNFAILED;
@@ -2473,7 +2473,7 @@ int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_ar
          * which arrives on the inbound ring - arming on the outbound head
          * would sleep through it. (writable has just routed, so the count
          * is current.) */
-        if (sock_shares(handle)
+        if (sock_shares(handle) && !handle->sock.ignore_credit
             && (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) <= 0) {
             *out_arm = pal_chan_arm(sock_widx(handle), PAL_CHAN_ARM_TAIL, *in.peer_tail);
             return 1;
@@ -2583,7 +2583,8 @@ bool pal_svsm_sock_readable(PAL_HANDLE handle) {
  * first - as a send does after its own wait - or a credit that has arrived
  * would be counted as one that has not. */
 static bool sock_no_credit(PAL_HANDLE handle) {
-    if (!sock_shares(handle) || (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) > 0)
+    if (!sock_shares(handle) || handle->sock.ignore_credit
+        || (int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) > 0)
         return false;
     struct pal_chan_ring in;
     ring_for(handle, &in, NULL);
@@ -2778,6 +2779,12 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
      * the endpoint's measured manifest. Accepting the call and ignoring the
      * value is what Linux does when it clamps, and the truth is readable
      * through attrquery. */
+    /* ...except one value, a TEST HOOK: setsockopt(SO_SNDBUF, 0x4D5643) -
+     * doubled by the LibOS as Linux does - makes this socket send past the
+     * service's credit, as a misbehaving client would (netsvc-credit lane,
+     * net_credit_violation). See ignore_credit. */
+    if (attr->socket.send_buf_size == 2 * 0x4D5643)
+        handle->sock.ignore_credit = true;
     return 0;
 }
 
