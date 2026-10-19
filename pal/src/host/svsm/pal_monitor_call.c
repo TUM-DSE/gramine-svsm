@@ -114,13 +114,17 @@ void extended_monitor_call(struct monitor_call_data* data) {
 size_t max_string_length = 100;
 
 //Forwards the errors in the pal to the monitor
-void pal_svsm_fail(const char* err, int errno){
+noreturn void pal_svsm_fail(const char* err, int errno){
     struct monitor_call_data data;
     data.rax = 0x4FFFFFFF;
     data.rbx = (uint64_t)err;
     data.rcx = errno;
     data.rdx = 0;
     monitor_call(&data);
+    /* The monitor retires the vault on this call and never comes back
+     * (process/exit.rs); if it ever did, nothing after a fail may run. */
+    for (;;)
+        __asm__ volatile("pause");
 }
 
 void pal_svsm_exit(int exitcode) {

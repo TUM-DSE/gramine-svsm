@@ -850,43 +850,44 @@ noreturn void pal_svsm_main(void)
      * between the two of them.
      *
      * Absent keys = neither, which is every vault that is not a driver. */
-    /* Every key starts ABSENT - a value no key can hold - so what follows is
-     * about the keys the manifest has, not about values that happen to look
-     * like defaults: an explicit index = 0 with an address is both; an
+    /* Presence is the manifest's own answer (toml_raw_in), not a default
+     * value read back: an explicit index = 0 with an address is both; an
      * explicit index = -1 is out of range, not "absent"; a device or a BAR
-     * with no vendor names nothing, and is refused rather than ignored. */
-#define MV_KEY_ABSENT (-0x7fffffffffffffffLL - 1)
-    int64_t window_pages = MV_KEY_ABSENT, mmio_vendor = MV_KEY_ABSENT, mmio_device = MV_KEY_ABSENT;
-    int64_t mmio_bar = MV_KEY_ABSENT, mmio_index = MV_KEY_ABSENT, mmio_bdf = MV_KEY_ABSENT;
+     * with no vendor, or a vendor with no device, names nothing, and is
+     * refused rather than ignored or defaulted. */
+    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0, mmio_index = 0;
+    int64_t mmio_bdf = -1;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
+#define MV_HAS(key) (manifest_svsm && toml_raw_in(manifest_svsm, key) != NULL)
+    int has_vendor = MV_HAS("device_mmio_vendor"), has_device = MV_HAS("device_mmio_device");
+    int has_bar = MV_HAS("device_mmio_bar"), has_index = MV_HAS("device_mmio_index");
+    int has_bdf = MV_HAS("device_mmio_bdf"), has_window = MV_HAS("device_window_pages");
+#undef MV_HAS
     if (manifest_svsm) {
         /* Each read is checked: a key of the wrong type (device_mmio_bdf =
          * "00:05.0") would otherwise leave its default, and the vault would
          * be given the FIRST match - another NIC than its manifest meant. */
         int bad = 0;
-        bad |= toml_int_in(manifest_svsm, "device_window_pages", MV_KEY_ABSENT, &window_pages);
-        bad |= toml_int_in(manifest_svsm, "device_mmio_vendor", MV_KEY_ABSENT, &mmio_vendor);
-        bad |= toml_int_in(manifest_svsm, "device_mmio_device", MV_KEY_ABSENT, &mmio_device);
+        bad |= toml_int_in(manifest_svsm, "device_window_pages", 0, &window_pages);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_vendor", 0, &mmio_vendor);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_device", 0, &mmio_device);
         /* Which BAR the registers are in. Zero unless the manifest says
          * otherwise, which is right for everything that keeps them where
          * they have always been - and wrong for modern virtio, which is
          * why this is a manifest key rather than an assumption. */
-        bad |= toml_int_in(manifest_svsm, "device_mmio_bar", MV_KEY_ABSENT, &mmio_bar);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_bar", 0, &mmio_bar);
         /* WHICH of several identical functions - a virtio-net-pci per vault,
          * or a NIC's VFs: the n-th `vendor:device` in bus order (0 = the
          * first, what every manifest got before), or one named by address,
          * bus << 8 | device << 3 | function. The monitor checks the identity
          * and still allows one holder per function. Measured with the rest
          * of the manifest. */
-        bad |= toml_int_in(manifest_svsm, "device_mmio_index", MV_KEY_ABSENT, &mmio_index);
-        bad |= toml_int_in(manifest_svsm, "device_mmio_bdf", MV_KEY_ABSENT, &mmio_bdf);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_index", 0, &mmio_index);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_bdf", -1, &mmio_bdf);
         if (bad < 0)
             pal_svsm_fail("svsm.device_window_pages and svsm.device_mmio_* must be "
                           "integers", 0);
     }
-    int has_vendor = mmio_vendor != MV_KEY_ABSENT, has_device = mmio_device != MV_KEY_ABSENT;
-    int has_bar = mmio_bar != MV_KEY_ABSENT, has_index = mmio_index != MV_KEY_ABSENT;
-    int has_bdf = mmio_bdf != MV_KEY_ABSENT, has_window = window_pages != MV_KEY_ABSENT;
     if ((has_index && (mmio_index < 0 || mmio_index > 255)) ||
         (has_bdf && (mmio_bdf < 0 || mmio_bdf > 0xFFFF)))
         pal_svsm_fail("svsm.device_mmio_index must be 0..255 and svsm.device_mmio_bdf "
@@ -901,10 +902,12 @@ noreturn void pal_svsm_main(void)
         pal_svsm_fail("svsm.device_mmio_device must be 0..0xFFFF", 0);
     if (has_bar && (mmio_bar < 0 || mmio_bar > 5))
         pal_svsm_fail("svsm.device_mmio_bar must be 0..5", 0);
-    /* The monitor's cap (service::WINDOW_MAX_PAGES): more is a window the
-     * monitor will refuse, and a manifest that cannot be honoured is
-     * refused here, at start. */
-    if (has_window && (window_pages < 0 || window_pages > 16384))
+    /* The monitor's cap: more is a window the monitor will refuse, and a
+     * manifest that cannot be honoured is refused here, at start. A copy of
+     * service::WINDOW_MAX_PAGES (monitor/kernel/src/service/mod.rs) - the
+     * two change together. */
+#define MV_WINDOW_MAX_PAGES 16384
+    if (has_window && (window_pages < 0 || window_pages > MV_WINDOW_MAX_PAGES))
         pal_svsm_fail("svsm.device_window_pages must be 0..16384", 0);
     /* The index and the address are two ways to say which; both is a
      * manifest that means two things. And any device key without a vendor
@@ -918,13 +921,10 @@ noreturn void pal_svsm_main(void)
     if ((has_device || has_bar) && !has_vendor)
         pal_svsm_fail("svsm.device_mmio_device or svsm.device_mmio_bar without "
                       "svsm.device_mmio_vendor", 0);
-    /* From here, absent is what it always meant. */
-    if (!has_vendor) mmio_vendor = 0;
-    if (!has_device) mmio_device = 0;
-    if (!has_bar) mmio_bar = 0;
-    if (!has_index) mmio_index = 0;
-    if (!has_bdf) mmio_bdf = -1;
-    if (!has_window) window_pages = 0;
+    /* And the other way: a vendor names no device on its own - device id 0
+     * is a default, not what the manifest said. */
+    if (has_vendor && !has_device)
+        pal_svsm_fail("svsm.device_mmio_vendor without svsm.device_mmio_device", 0);
     if (window_pages > 0 && mmio_vendor <= 0) {
         /* A manifest error, and a measured one, so it can only be fixed by
          * changing the manifest - which is the right place for it. Loud,
