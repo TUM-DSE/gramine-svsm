@@ -987,6 +987,16 @@ noreturn void pal_svsm_main(void)
         g_pal_public_state.device_mmio.phys = phys;
         g_pal_public_state.device_mmio.io = pal_svsm_device_io;
         g_pal_public_state.device_mmio.cfg = pal_svsm_device_config;
+    } else {
+        /* No device in the manifest: say so, which seals the zygote's one
+         * ask (B1) - nothing after this point, LibOS or app, can take a
+         * device the measured manifest does not name. A monitor before B1
+         * answers vendor 0 with nothing and changes nothing. */
+        void* base = NULL;
+        size_t size = 0;
+        uint64_t phys = 0;
+        uint32_t granted = 0;
+        pal_svsm_device_mmio(0, 0, 0, -1, &base, &size, &phys, &granted);
     }
 
     if (window_pages > 0) {
