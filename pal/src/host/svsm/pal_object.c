@@ -85,13 +85,33 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
  * must only read: `poll_one` is loads from rings and ring headers and does
  * nothing else.
  */
+int g_pal_svsm_sched_ctx;
+bool g_pal_svsm_sched_deferred;
+
 bool pal_svsm_poller_ready(PAL_HANDLE thread) {
-    for (size_t i = 0; i < thread->thread.n_watch; i++) {
+    /* SCHEDULER context: on the way here from a preemption upcall the
+     * interrupted thread may be anywhere in the LibOS or the application, on
+     * its alternate stack. What a re-test does must therefore be safe at any
+     * instruction boundary of theirs - no heap (pal_svsm_sched_ctx, read by
+     * the socket router). */
+    g_pal_svsm_sched_ctx++;
+    g_pal_svsm_sched_deferred = false;
+    bool ready = false;
+    for (size_t i = 0; i < thread->thread.n_watch && !ready; i++) {
         PAL_HANDLE h = thread->thread.watch_handles[i];
         if (h && poll_one(h, thread->thread.watch_events[i]))
-            return true;
+            ready = true;
     }
-    return false;
+    g_pal_svsm_sched_ctx--;
+    /* A re-test that needed the heap and did without it (a pool buffer not
+     * yet allocated, the scratch buffer) cannot tell whether this thread's
+     * handle is ready. So it is woken: it looks again in its own context,
+     * where the heap is safe, and allocates there. Otherwise the frame would
+     * wait at the head for a deadline - or for ever, under a poll() with
+     * none (review by jamie). */
+    if (!ready && g_pal_svsm_sched_deferred)
+        ready = true;
+    return ready;
 }
 
 /*

@@ -113,6 +113,10 @@ static inline PAL_HANDLE current_thread(void) {
     return pal_get_svsm_tcb()->handle;
 }
 
+#define PAL_SVSM_STACKS_DEFERRED 16
+static void* g_stacks_deferred[PAL_SVSM_STACKS_DEFERRED];
+static int   g_stacks_deferred_n;
+
 static void reap_stack(void) {
     /* The handover first, and unconditionally: a thread with no stack of its
      * own to free still has a LibOS waiter to release. */
@@ -121,11 +125,26 @@ static void reap_stack(void) {
         g_tid_to_clear = NULL;
         __atomic_store_n(tid, 0, __ATOMIC_RELEASE);
     }
+    /* A stack is a large allocation, and freeing it is the LibOS's VMA
+     * bookkeeping (pal_memory.c bkeep upcalls) - which a thread inside a
+     * preemption upcall may have been interrupted in, holding its lock, so
+     * it would spin on itself (review by jamie). Such a thread only queues
+     * the stack; the next reap from ordinary context frees it. */
     void* stack = g_stack_to_reap;
-    if (!stack)
-        return;
     g_stack_to_reap = NULL;
-    free(stack);
+    if (current_thread()->thread.in_upcall) {
+        if (stack) {
+            if (g_stacks_deferred_n < PAL_SVSM_STACKS_DEFERRED)
+                g_stacks_deferred[g_stacks_deferred_n++] = stack;
+            /* else: leaked, not freed in the wrong place - a 1-in-never
+             * pile-up of more exits than slots, all inside upcalls. */
+        }
+        return;
+    }
+    if (stack)
+        free(stack);
+    while (g_stacks_deferred_n)
+        free(g_stacks_deferred[--g_stacks_deferred_n]);
 }
 
 /* How long a park waits when nobody asked for a deadline: insurance, not
