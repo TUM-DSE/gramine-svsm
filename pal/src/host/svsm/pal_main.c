@@ -932,10 +932,11 @@ noreturn void pal_svsm_main(void)
         if (!size)
             pal_svsm_fail("svsm.device_mmio_vendor: the monitor refused the device", 0);
         /* A manifest that says WHICH function must get that one. The monitor
-         * reports the function it granted (G5); one that does not report it
-         * predates selection and gave the FIRST match whatever was asked -
-         * another device than this measured manifest names. And an address
-         * must come back as itself. */
+         * reports the function it granted (G5). One that does not cannot be
+         * trusted to have granted what was asked: before selection it gave
+         * the FIRST match whatever was asked, and between selection and G5 it
+         * selected but did not say which - either way this side cannot tell,
+         * so it fails closed. And an address must come back as itself. */
         if (mmio_index != 0 || mmio_bdf != -1) {
             if (!(granted & (1u << 31)))
                 pal_svsm_fail("svsm.device_mmio_index/_bdf: this monitor does not say which "
