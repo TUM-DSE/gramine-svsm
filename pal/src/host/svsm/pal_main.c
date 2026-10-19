@@ -854,26 +854,42 @@ noreturn void pal_svsm_main(void)
     int64_t mmio_bdf = -1;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
     if (manifest_svsm) {
-        toml_int_in(manifest_svsm, "device_window_pages", 0, &window_pages);
-        toml_int_in(manifest_svsm, "device_mmio_vendor", 0, &mmio_vendor);
-        toml_int_in(manifest_svsm, "device_mmio_device", 0, &mmio_device);
+        /* Each read is checked: a key of the wrong type (device_mmio_bdf =
+         * "00:05.0") would otherwise leave its default, and the vault would
+         * be given the FIRST match - another NIC than its manifest meant. */
+        int bad = 0;
+        bad |= toml_int_in(manifest_svsm, "device_window_pages", 0, &window_pages);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_vendor", 0, &mmio_vendor);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_device", 0, &mmio_device);
         /* Which BAR the registers are in. Zero unless the manifest says
          * otherwise, which is right for everything that keeps them where
          * they have always been - and wrong for modern virtio, which is
          * why this is a manifest key rather than an assumption. */
-        toml_int_in(manifest_svsm, "device_mmio_bar", 0, &mmio_bar);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_bar", 0, &mmio_bar);
         /* WHICH of several identical functions - a virtio-net-pci per vault,
          * or a NIC's VFs: the n-th `vendor:device` in bus order (0 = the
          * first, what every manifest got before), or one named by address,
          * bus << 8 | device << 3 | function. The monitor checks the identity
          * and still allows one holder per function. Measured with the rest
          * of the manifest. */
-        toml_int_in(manifest_svsm, "device_mmio_index", 0, &mmio_index);
-        toml_int_in(manifest_svsm, "device_mmio_bdf", -1, &mmio_bdf);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_index", 0, &mmio_index);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_bdf", -1, &mmio_bdf);
+        if (bad < 0)
+            pal_svsm_fail("svsm.device_window_pages and svsm.device_mmio_* must be "
+                          "integers", 0);
     }
     if (mmio_index < 0 || mmio_index > 255 || mmio_bdf < -1 || mmio_bdf > 0xFFFF)
         pal_svsm_fail("svsm.device_mmio_index must be 0..255 and svsm.device_mmio_bdf "
                       "a 16-bit bus:device.function", 0);
+    /* The index and the address are two ways to say which; both is a
+     * manifest that means two things. And either without a device names
+     * nothing. */
+    if (mmio_index != 0 && mmio_bdf != -1)
+        pal_svsm_fail("svsm.device_mmio_index and svsm.device_mmio_bdf: give one, "
+                      "not both", 0);
+    if ((mmio_index != 0 || mmio_bdf != -1) && mmio_vendor <= 0)
+        pal_svsm_fail("svsm.device_mmio_index or svsm.device_mmio_bdf without "
+                      "svsm.device_mmio_vendor", 0);
     if (window_pages > 0 && mmio_vendor <= 0) {
         /* A manifest error, and a measured one, so it can only be fixed by
          * changing the manifest - which is the right place for it. Loud,
