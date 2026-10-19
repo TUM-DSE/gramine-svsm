@@ -910,12 +910,18 @@ noreturn void pal_svsm_main(void)
                              (((uint64_t)mmio_device & 0xFFFF) << 16),
                              (uint8_t)(mmio_bar & 0xFF), (uint8_t)mmio_index,
                              (int32_t)mmio_bdf, &base, &size, &phys, &granted);
+        /* Refused: no such device, already held, or not this zygote's to
+         * ask for. Fail closed, as an AVX-512 declaration does: a driver
+         * that started without the device its measured manifest names would
+         * fail later, as something else (owner, 2026-10-19). */
+        if (!size)
+            pal_svsm_fail("svsm.device_mmio_vendor: the monitor refused the device", 0);
         /* A manifest that says WHICH function must get that one. The monitor
          * reports the function it granted (G5); one that does not report it
          * predates selection and gave the FIRST match whatever was asked -
          * another device than this measured manifest names. And an address
-         * must come back as itself. A refusal (size 0) stays what it was. */
-        if (size && (mmio_index != 0 || mmio_bdf != -1)) {
+         * must come back as itself. */
+        if (mmio_index != 0 || mmio_bdf != -1) {
             if (!(granted & (1u << 31)))
                 pal_svsm_fail("svsm.device_mmio_index/_bdf: this monitor does not say which "
                               "function it granted, so it may not select one", 0);
@@ -942,6 +948,12 @@ noreturn void pal_svsm_main(void)
             g_pal_public_state.device_window.base = base;
             g_pal_public_state.device_window.size = size;
             g_pal_public_state.device_window.gpa  = ((volatile uint64_t*)base)[1];
+        } else {
+            /* Refused: no window, or not one this side recognises. Loud, for
+             * the reason the device is - a driver that started without the
+             * memory its measured manifest asked for would fail later, as
+             * something else (owner, 2026-10-19). */
+            pal_svsm_fail("svsm.device_window_pages: the monitor refused the window", 0);
         }
     }
 
