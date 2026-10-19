@@ -850,7 +850,9 @@ noreturn void pal_svsm_main(void)
      * between the two of them.
      *
      * Absent keys = neither, which is every vault that is not a driver. */
-    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0, mmio_index = 0;
+    /* mmio_index starts at -1 = absent, so "one, not both" below is about
+     * the keys: an explicit index = 0 with an address is both. */
+    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0, mmio_index = -1;
     int64_t mmio_bdf = -1;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
     if (manifest_svsm) {
@@ -872,24 +874,37 @@ noreturn void pal_svsm_main(void)
          * bus << 8 | device << 3 | function. The monitor checks the identity
          * and still allows one holder per function. Measured with the rest
          * of the manifest. */
-        bad |= toml_int_in(manifest_svsm, "device_mmio_index", 0, &mmio_index);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_index", -1, &mmio_index);
         bad |= toml_int_in(manifest_svsm, "device_mmio_bdf", -1, &mmio_bdf);
         if (bad < 0)
             pal_svsm_fail("svsm.device_window_pages and svsm.device_mmio_* must be "
                           "integers", 0);
     }
-    if (mmio_index < 0 || mmio_index > 255 || mmio_bdf < -1 || mmio_bdf > 0xFFFF)
+    if (mmio_index < -1 || mmio_index > 255 || mmio_bdf < -1 || mmio_bdf > 0xFFFF)
         pal_svsm_fail("svsm.device_mmio_index must be 0..255 and svsm.device_mmio_bdf "
                       "a 16-bit bus:device.function", 0);
+    /* Every value in range BEFORE it is masked into the call: 0x18086
+     * would otherwise be granted as 8086, 0x10000 would become vendor 0 -
+     * "no device", silently - and BAR 260 would be BAR 4. 0 = no key. */
+    if (mmio_vendor < 0 || mmio_vendor > 0xFFFE)
+        pal_svsm_fail("svsm.device_mmio_vendor must be 1..0xFFFE", 0);
+    if (mmio_device < 0 || mmio_device > 0xFFFF)
+        pal_svsm_fail("svsm.device_mmio_device must be 0..0xFFFF", 0);
+    if (mmio_bar < 0 || mmio_bar > 5)
+        pal_svsm_fail("svsm.device_mmio_bar must be 0..5", 0);
+    if (window_pages < 0)
+        pal_svsm_fail("svsm.device_window_pages must not be negative", 0);
     /* The index and the address are two ways to say which; both is a
      * manifest that means two things. And either without a device names
      * nothing. */
-    if (mmio_index != 0 && mmio_bdf != -1)
+    if (mmio_index != -1 && mmio_bdf != -1)
         pal_svsm_fail("svsm.device_mmio_index and svsm.device_mmio_bdf: give one, "
                       "not both", 0);
-    if ((mmio_index != 0 || mmio_bdf != -1) && mmio_vendor <= 0)
+    if ((mmio_index != -1 || mmio_bdf != -1) && mmio_vendor <= 0)
         pal_svsm_fail("svsm.device_mmio_index or svsm.device_mmio_bdf without "
                       "svsm.device_mmio_vendor", 0);
+    if (mmio_index == -1)
+        mmio_index = 0;
     if (window_pages > 0 && mmio_vendor <= 0) {
         /* A manifest error, and a measured one, so it can only be fixed by
          * changing the manifest - which is the right place for it. Loud,
