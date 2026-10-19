@@ -309,5 +309,11 @@ int        pal_svsm_mux_claim(PAL_HANDLE handle, uint32_t* out_id);
 void       pal_svsm_mux_release(uint32_t id);
 int        pal_svsm_mux_count(void);
 PAL_HANDLE pal_svsm_mux_conn_at(int i);
+/* Non-zero while the scheduler re-tests a blocked thread's handles
+ * (pal_svsm_poller_ready): code reached from there must not use the heap. */
+extern int g_pal_svsm_sched_ctx;
+/* Set by such code when it needed the heap and did without: the thread being
+ * re-tested is then woken to look again itself. */
+extern bool g_pal_svsm_sched_deferred;
 #define PAL_SVSM_MUX_MAX_CONNS 256
 bool       pal_svsm_mux_id_sane(uint32_t id);

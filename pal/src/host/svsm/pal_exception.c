@@ -203,7 +203,12 @@ noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CON
          * This is what makes a compute-bound thread yield without its
          * cooperation - the thing the cooperative scheduler could not do.
          */
-        _PalThreadYieldExecution();
+        {
+            PAL_HANDLE self = pal_get_svsm_tcb()->handle;
+            self->thread.in_upcall++;
+            _PalThreadYieldExecution();
+            self->thread.in_upcall--;
+        }
 
         /*
          * And then deliver what the yield made pending (next.md 170.4).
