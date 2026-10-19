@@ -858,10 +858,27 @@ noreturn void pal_svsm_main(void)
     int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0, mmio_index = 0;
     int64_t mmio_bdf = -1;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
-#define MV_HAS(key) (manifest_svsm && toml_raw_in(manifest_svsm, key) != NULL)
+    /* Present = any value at all: a scalar (toml_raw_in), an array or a
+     * table. toml_raw_in alone is NULL for the last two, so
+     * `device_mmio_bdf = [0x28]` read as ABSENT and was granted the first
+     * match. Present but not a scalar is refused below (and a scalar that
+     * is not an integer by toml_int_in). */
+#define MV_HAS(key) (manifest_svsm && (toml_raw_in(manifest_svsm, key) != NULL || \
+                                       toml_array_in(manifest_svsm, key) != NULL || \
+                                       toml_table_in(manifest_svsm, key) != NULL))
+#define MV_SCALAR(key) (toml_raw_in(manifest_svsm, key) != NULL)
     int has_vendor = MV_HAS("device_mmio_vendor"), has_device = MV_HAS("device_mmio_device");
     int has_bar = MV_HAS("device_mmio_bar"), has_index = MV_HAS("device_mmio_index");
     int has_bdf = MV_HAS("device_mmio_bdf"), has_window = MV_HAS("device_window_pages");
+    if ((has_vendor && !MV_SCALAR("device_mmio_vendor")) ||
+        (has_device && !MV_SCALAR("device_mmio_device")) ||
+        (has_bar && !MV_SCALAR("device_mmio_bar")) ||
+        (has_index && !MV_SCALAR("device_mmio_index")) ||
+        (has_bdf && !MV_SCALAR("device_mmio_bdf")) ||
+        (has_window && !MV_SCALAR("device_window_pages")))
+        pal_svsm_fail("svsm.device_window_pages and svsm.device_mmio_* must be "
+                      "integers", 0);
+#undef MV_SCALAR
 #undef MV_HAS
     if (manifest_svsm) {
         /* Each read is checked: a key of the wrong type (device_mmio_bdf =
