@@ -905,10 +905,24 @@ noreturn void pal_svsm_main(void)
         void* base = NULL;
         size_t size = 0;
         uint64_t phys = 0;
+        uint32_t granted = 0;
         pal_svsm_device_mmio(((uint64_t)mmio_vendor & 0xFFFF) |
                              (((uint64_t)mmio_device & 0xFFFF) << 16),
                              (uint8_t)(mmio_bar & 0xFF), (uint8_t)mmio_index,
-                             (int32_t)mmio_bdf, &base, &size, &phys);
+                             (int32_t)mmio_bdf, &base, &size, &phys, &granted);
+        /* A manifest that says WHICH function must get that one. The monitor
+         * reports the function it granted (G5); one that does not report it
+         * predates selection and gave the FIRST match whatever was asked -
+         * another device than this measured manifest names. And an address
+         * must come back as itself. A refusal (size 0) stays what it was. */
+        if (size && (mmio_index != 0 || mmio_bdf != -1)) {
+            if (!(granted & (1u << 31)))
+                pal_svsm_fail("svsm.device_mmio_index/_bdf: this monitor does not say which "
+                              "function it granted, so it may not select one", 0);
+            if (mmio_bdf != -1 && (granted & 0xFFFF) != (uint32_t)mmio_bdf)
+                pal_svsm_fail("svsm.device_mmio_bdf: the monitor granted another function "
+                              "than the manifest names", 0);
+        }
         g_pal_public_state.device_mmio.base = base;   /* always NULL */
         g_pal_public_state.device_mmio.size = size;
         g_pal_public_state.device_mmio.phys = phys;

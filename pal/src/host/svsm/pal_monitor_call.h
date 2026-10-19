@@ -84,7 +84,8 @@ void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
  * modern device does not necessarily keep its registers in BAR0. Returns
  * where they are mapped and the physical address the BAR decodes at. */
 void pal_svsm_device_mmio(uint64_t id, uint8_t bar, uint8_t index, int32_t bdf,
-                          void** out_base, size_t* out_size, uint64_t* out_phys);
+                          void** out_base, size_t* out_size, uint64_t* out_phys,
+                          uint32_t* out_granted);
 /* DeviceConfig: one read of this vault's own device's PCI configuration
  * space. `width` is 1, 2 or 4. All ones if refused. A vault never learns
  * where its device sits on the bus - it says "mine, at this offset". */

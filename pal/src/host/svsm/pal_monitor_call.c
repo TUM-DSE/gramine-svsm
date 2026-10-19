@@ -91,13 +91,20 @@ void extended_monitor_call(struct monitor_call_data* data) {
     // VMSA regardless
     uint64_t code = data->rax;
 
+    /* r8 and r9 come BACK too: the monitor answers in them for some calls
+     * (DeviceMmio: r8 the BAR's physical address, r9 the granted function).
+     * They were inputs only, so every such answer read as the 0 the caller
+     * had put there - device_mmio.phys was never anything but 0. */
     __asm__ volatile(
         "mov %4, %%r8\r\n"
         "mov %5, %%r9\r\n"
         vc_injection
+        "\r\nmov %%r8, %4\r\n"
+        "mov %%r9, %5\r\n"
         : "+a" (data->rax), "+b" (data->rbx),
-          "+c" (data->rcx), "+d" (data->rdx)
-        : "r" (data->r8), "r" (data->r9)
+          "+c" (data->rcx), "+d" (data->rdx),
+          "+r" (data->r8), "+r" (data->r9)
+        :
         : "r8", "r9", "memory"
         );
 
@@ -214,7 +221,8 @@ void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size) {
  * a register here, unlike the window's: these are somebody else's registers
  * and there is no header the monitor could have written it into. */
 void pal_svsm_device_mmio(uint64_t id, uint8_t bar, uint8_t index, int32_t bdf,
-                          void** out_base, size_t* out_size, uint64_t* out_phys) {
+                          void** out_base, size_t* out_size, uint64_t* out_phys,
+                          uint32_t* out_granted) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFED;
     /* rbx: vendor | device << 16 | bar << 32 | index << 40 - which of several
@@ -229,6 +237,9 @@ void pal_svsm_device_mmio(uint64_t id, uint8_t bar, uint8_t index, int32_t bdf,
     *out_size = data.rcx;
     *out_base = (void*)data.rdx;
     *out_phys = data.r8;
+    /* The granted function, 1 << 31 | bus << 8 | device << 3 | function; a
+     * monitor that predates it leaves the 0 put in r9 above. */
+    *out_granted = (uint32_t)data.r9;
 }
 
 /* DeviceIo (0x4FFFFFEC): rbx = offset, rcx = width, rdx = 1 to write,
