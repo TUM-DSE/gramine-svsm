@@ -18,7 +18,7 @@ void extended_monitor_call(struct monitor_call_data* data);
  * changed. Executes VMMCALL with CallForged (0x4EFFFFFD) in rax, never
  * CPUID, so the monitor retires the vault; does not return. */
 noreturn void monitor_call_forged(void);
-void pal_svsm_fail(const char* err, int errno);
+noreturn void pal_svsm_fail(const char* err, int errno);
 void pal_svsm_exit(int exitcode);
 void pal_svsm_debug_putc(char c);
 void pal_svsm_debug_write(const uint8_t* bytes, size_t n);

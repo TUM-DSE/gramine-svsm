@@ -850,11 +850,36 @@ noreturn void pal_svsm_main(void)
      * between the two of them.
      *
      * Absent keys = neither, which is every vault that is not a driver. */
-    /* mmio_index starts at -1 = absent, so "one, not both" below is about
-     * the keys: an explicit index = 0 with an address is both. */
-    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0, mmio_index = -1;
+    /* Presence is the manifest's own answer (toml_raw_in), not a default
+     * value read back: an explicit index = 0 with an address is both; an
+     * explicit index = -1 is out of range, not "absent"; a device or a BAR
+     * with no vendor, or a vendor with no device, names nothing, and is
+     * refused rather than ignored or defaulted. */
+    int64_t window_pages = 0, mmio_vendor = 0, mmio_device = 0, mmio_bar = 0, mmio_index = 0;
     int64_t mmio_bdf = -1;
     toml_table_t* manifest_svsm = toml_table_in(g_pal_public_state.manifest_root, "svsm");
+    /* Present = any value at all: a scalar (toml_raw_in), an array or a
+     * table. toml_raw_in alone is NULL for the last two, so
+     * `device_mmio_bdf = [0x28]` read as ABSENT and was granted the first
+     * match. Present but not a scalar is refused below (and a scalar that
+     * is not an integer by toml_int_in). */
+#define MV_HAS(key) (manifest_svsm && (toml_raw_in(manifest_svsm, key) != NULL || \
+                                       toml_array_in(manifest_svsm, key) != NULL || \
+                                       toml_table_in(manifest_svsm, key) != NULL))
+#define MV_SCALAR(key) (toml_raw_in(manifest_svsm, key) != NULL)
+    int has_vendor = MV_HAS("device_mmio_vendor"), has_device = MV_HAS("device_mmio_device");
+    int has_bar = MV_HAS("device_mmio_bar"), has_index = MV_HAS("device_mmio_index");
+    int has_bdf = MV_HAS("device_mmio_bdf"), has_window = MV_HAS("device_window_pages");
+    if ((has_vendor && !MV_SCALAR("device_mmio_vendor")) ||
+        (has_device && !MV_SCALAR("device_mmio_device")) ||
+        (has_bar && !MV_SCALAR("device_mmio_bar")) ||
+        (has_index && !MV_SCALAR("device_mmio_index")) ||
+        (has_bdf && !MV_SCALAR("device_mmio_bdf")) ||
+        (has_window && !MV_SCALAR("device_window_pages")))
+        pal_svsm_fail("svsm.device_window_pages and svsm.device_mmio_* must be "
+                      "integers", 0);
+#undef MV_SCALAR
+#undef MV_HAS
     if (manifest_svsm) {
         /* Each read is checked: a key of the wrong type (device_mmio_bdf =
          * "00:05.0") would otherwise leave its default, and the vault would
@@ -874,37 +899,49 @@ noreturn void pal_svsm_main(void)
          * bus << 8 | device << 3 | function. The monitor checks the identity
          * and still allows one holder per function. Measured with the rest
          * of the manifest. */
-        bad |= toml_int_in(manifest_svsm, "device_mmio_index", -1, &mmio_index);
+        bad |= toml_int_in(manifest_svsm, "device_mmio_index", 0, &mmio_index);
         bad |= toml_int_in(manifest_svsm, "device_mmio_bdf", -1, &mmio_bdf);
         if (bad < 0)
             pal_svsm_fail("svsm.device_window_pages and svsm.device_mmio_* must be "
                           "integers", 0);
     }
-    if (mmio_index < -1 || mmio_index > 255 || mmio_bdf < -1 || mmio_bdf > 0xFFFF)
+    if ((has_index && (mmio_index < 0 || mmio_index > 255)) ||
+        (has_bdf && (mmio_bdf < 0 || mmio_bdf > 0xFFFF)))
         pal_svsm_fail("svsm.device_mmio_index must be 0..255 and svsm.device_mmio_bdf "
                       "a 16-bit bus:device.function", 0);
     /* Every value in range BEFORE it is masked into the call: 0x18086
      * would otherwise be granted as 8086, 0x10000 would become vendor 0 -
-     * "no device", silently - and BAR 260 would be BAR 4. 0 = no key. */
-    if (mmio_vendor < 0 || mmio_vendor > 0xFFFE)
+     * "no device", silently - and BAR 260 would be BAR 4. An explicit
+     * vendor 0 is not "no device" either: it is out of range. */
+    if (has_vendor && (mmio_vendor < 1 || mmio_vendor > 0xFFFE))
         pal_svsm_fail("svsm.device_mmio_vendor must be 1..0xFFFE", 0);
-    if (mmio_device < 0 || mmio_device > 0xFFFF)
+    if (has_device && (mmio_device < 0 || mmio_device > 0xFFFF))
         pal_svsm_fail("svsm.device_mmio_device must be 0..0xFFFF", 0);
-    if (mmio_bar < 0 || mmio_bar > 5)
+    if (has_bar && (mmio_bar < 0 || mmio_bar > 5))
         pal_svsm_fail("svsm.device_mmio_bar must be 0..5", 0);
-    if (window_pages < 0)
-        pal_svsm_fail("svsm.device_window_pages must not be negative", 0);
+    /* The monitor's cap: more is a window the monitor will refuse, and a
+     * manifest that cannot be honoured is refused here, at start. A copy of
+     * service::WINDOW_MAX_PAGES (monitor/kernel/src/service/mod.rs) - the
+     * two change together. */
+#define MV_WINDOW_MAX_PAGES 16384
+    if (has_window && (window_pages < 0 || window_pages > MV_WINDOW_MAX_PAGES))
+        pal_svsm_fail("svsm.device_window_pages must be 0..16384", 0);
     /* The index and the address are two ways to say which; both is a
-     * manifest that means two things. And either without a device names
-     * nothing. */
-    if (mmio_index != -1 && mmio_bdf != -1)
+     * manifest that means two things. And any device key without a vendor
+     * names nothing. */
+    if (has_index && has_bdf)
         pal_svsm_fail("svsm.device_mmio_index and svsm.device_mmio_bdf: give one, "
                       "not both", 0);
-    if ((mmio_index != -1 || mmio_bdf != -1) && mmio_vendor <= 0)
+    if ((has_index || has_bdf) && !has_vendor)
         pal_svsm_fail("svsm.device_mmio_index or svsm.device_mmio_bdf without "
                       "svsm.device_mmio_vendor", 0);
-    if (mmio_index == -1)
-        mmio_index = 0;
+    if ((has_device || has_bar) && !has_vendor)
+        pal_svsm_fail("svsm.device_mmio_device or svsm.device_mmio_bar without "
+                      "svsm.device_mmio_vendor", 0);
+    /* And the other way: a vendor names no device on its own - device id 0
+     * is a default, not what the manifest said. */
+    if (has_vendor && !has_device)
+        pal_svsm_fail("svsm.device_mmio_vendor without svsm.device_mmio_device", 0);
     if (window_pages > 0 && mmio_vendor <= 0) {
         /* A manifest error, and a measured one, so it can only be fixed by
          * changing the manifest - which is the right place for it. Loud,
@@ -925,14 +962,19 @@ noreturn void pal_svsm_main(void)
                              (((uint64_t)mmio_device & 0xFFFF) << 16),
                              (uint8_t)(mmio_bar & 0xFF), (uint8_t)mmio_index,
                              (int32_t)mmio_bdf, &base, &size, &phys, &granted);
+        /* Refused: no such device, already held, or not this zygote's to
+         * ask for. Fail closed, as an AVX-512 declaration does: a driver
+         * that started without the device its measured manifest names would
+         * fail later, as something else (owner, 2026-10-19). */
+        if (!size)
+            pal_svsm_fail("svsm.device_mmio_vendor: the monitor refused the device", 0);
         /* A manifest that says WHICH function must get that one. The monitor
          * reports the function it granted (G5). One that does not cannot be
          * trusted to have granted what was asked: before selection it gave
          * the FIRST match whatever was asked, and between selection and G5 it
          * selected but did not say which - either way this side cannot tell,
-         * so it fails closed. And an address must come back as itself. A
-         * refusal (size 0) stays what it was. */
-        if (size && (mmio_index != 0 || mmio_bdf != -1)) {
+         * so it fails closed. And an address must come back as itself. */
+        if (mmio_index != 0 || mmio_bdf != -1) {
             if (!(granted & (1u << 31)))
                 pal_svsm_fail("svsm.device_mmio_index/_bdf: this monitor does not say which "
                               "function it granted, so it may not select one", 0);
@@ -959,6 +1001,12 @@ noreturn void pal_svsm_main(void)
             g_pal_public_state.device_window.base = base;
             g_pal_public_state.device_window.size = size;
             g_pal_public_state.device_window.gpa  = ((volatile uint64_t*)base)[1];
+        } else {
+            /* Refused: no window, or not one this side recognises. Loud, for
+             * the reason the device is - a driver that started without the
+             * memory its measured manifest asked for would fail later, as
+             * something else (owner, 2026-10-19). */
+            pal_svsm_fail("svsm.device_window_pages: the monitor refused the window", 0);
         }
     }
 
