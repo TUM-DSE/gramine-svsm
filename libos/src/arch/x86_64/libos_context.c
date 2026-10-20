@@ -280,8 +280,36 @@ void prepare_sigframe(PAL_CONTEXT* context, siginfo_t* siginfo, void* handler, v
               siginfo->si_signo, sigframe, handler, restorer);
 }
 
+/* What the user code executed to make the call that is being restarted, ending at
+ * context->rip (the return address): Gramine's GRAMINE_SYSCALL macro
+ * (gramine_entry_api.h: `leaq .Lafter(%rip), %rcx; jmpq *%gs:24`, 7 + 8 bytes), or a raw
+ * `syscall` (0f 05) that maybe_emulate_syscall() redirected (it sets rcx = rip + 2). */
+static const uint8_t g_gramine_syscall_seq[] = {
+    0x48, 0x8d, 0x0d, 0x08, 0x00, 0x00, 0x00,              /* leaq 8(%rip), %rcx */
+    0x65, 0xff, 0x24, 0x25, 0x18, 0x00, 0x00, 0x00,        /* jmpq *%gs:24 */
+};
+
 void restart_syscall(PAL_CONTEXT* context, uint64_t syscall_nr) {
     context->rax = syscall_nr;
+    /* Restart the way Linux does: by rewinding the user PC to the instruction(s) that made the
+     * call, not by resuming inside the LibOS. It matters to glibc >= 2.41, whose SIGCANCEL
+     * handler acts only if the interrupted PC lies inside its cancellable syscall sequence
+     * ([__syscall_cancel_arch_start, __syscall_cancel_arch_end), nptl/pthread_cancel.c): a PC at
+     * libos_syscall_entry is outside it, so pthread_cancel() of a thread blocked in a restartable
+     * call (read, recv, futex: pthread_cond_wait, sem_wait, join...) was silently dropped and the
+     * call blocked again. A PC we cannot attribute keeps the old behaviour. */
+    const uint8_t* ret = (const uint8_t*)context->rip;
+    size_t n = sizeof(g_gramine_syscall_seq);
+    if ((uintptr_t)ret >= n && is_user_memory_readable(ret - n, n)
+            && !memcmp(ret - n, g_gramine_syscall_seq, n)) {
+        context->rip = (uint64_t)(ret - n);
+        return;
+    }
+    if ((uintptr_t)ret >= 2 && is_user_memory_readable(ret - 2, 2)
+            && ret[-2] == 0x0f && ret[-1] == 0x05) {
+        context->rip = (uint64_t)(ret - 2);
+        return;
+    }
     context->rip = (uint64_t)&libos_syscall_entry;
 }
 
