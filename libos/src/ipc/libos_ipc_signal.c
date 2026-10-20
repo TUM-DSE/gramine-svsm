@@ -56,17 +56,15 @@ static int ipc_pid_kill_send(enum kill_type type, IDTYPE sender, IDTYPE dest_pid
                 /* ... but it's a zombie! */
                 return 0;
             }
-            /* ... as far as the leader knows. A forked process's pid is its
-             * lineage name << ID_BLOCK_SHIFT and IS its IPC name, so one that
-             * is not our child (a sibling, a parent) is tried directly: a live
-             * one answers, a dead one has no listener and the connect fails -
-             * ESRCH below, never somebody else (names are not reused). */
-            if (type != KILL_PROCESS || (dest_pid & (((IDTYPE)1 << ID_BLOCK_SHIFT) - 1))
-                    || dest_pid < ((IDTYPE)1 << ID_BLOCK_SHIFT)) {
-                /* ... so it does not exist. */
-                return -ESRCH;
-            }
-            dest = dest_pid;
+            /* ... so it does not exist - or it is a forked process that is
+             * not our child (a sibling, our parent), whose ids the leader has
+             * never heard of. Trying such a pid by its IPC name HUNG on a dead
+             * one: a connect to a name nobody listens on is not refused in
+             * this PAL, it waits (lineage-vmid lane, 2026-10-20: "deadlock:
+             * every thread is blocked"). So ESRCH, promptly, and no other
+             * process ever (names are not reused); signalling a LIVE
+             * non-child forked process is not supported yet. */
+            return -ESRCH;
         }
     }
 send:
