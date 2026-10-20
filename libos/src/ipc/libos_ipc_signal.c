@@ -37,6 +37,20 @@ static int ipc_pid_kill_send(enum kill_type type, IDTYPE sender, IDTYPE dest_pid
                  * is a zombie by now, or it is gone. */
                 return is_zombie_process(dest_pid) ? 0 : -ESRCH;
             }
+            /* Any other signal travels over IPC to the child's listener -
+             * which exists only if this process runs an IPC worker (the
+             * child's is rebuilt from ours). Without one a connect would wait
+             * for ever on a name nobody listens on: say so, and refuse. */
+            if (!ipc_worker_running()) {
+                static bool said = false;
+                if (!said) {
+                    said = true;
+                    log_warning("kill: signal %d to forked child %u cannot be delivered - this "
+                                "process runs no IPC worker (only SIGKILL reaches a forked "
+                                "child here)", sig, dest_pid);
+                }
+                return -ENOSYS;
+            }
             dest = cvmid;
             goto send;
         }

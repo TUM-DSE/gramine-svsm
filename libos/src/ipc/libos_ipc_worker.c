@@ -439,6 +439,13 @@ int init_ipc_worker(void) {
  * end - and built again. The globals are reset by hand for the same reason:
  * `create_ipc_worker` asserts its way into a clean state.
  */
+/* Does this process run an IPC worker? A forked child has a listener only if
+ * its parent did (reinit_ipc_worker_after_fork), so a signal that must travel
+ * over IPC cannot reach a child of a process without one. */
+bool ipc_worker_running(void) {
+    return g_worker_thread != NULL;
+}
+
 int reinit_ipc_worker_after_fork(IDTYPE new_vmid) {
     /* Nothing to do if this process has no worker, which is the case whenever
      * `init_ipc_worker` is not run (see libos_init.c). Checked here rather

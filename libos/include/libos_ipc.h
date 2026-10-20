@@ -218,6 +218,7 @@ int ipc_alloc_id_range_callback(IDTYPE src, void* data, uint64_t seq);
 int ipc_release_id_range(IDTYPE start, IDTYPE end);
 /* In a copy-on-write fork's child: allocate in block `self_id` from now on. */
 void ipc_ids_after_cow_fork(IDTYPE self_pid, IDTYPE lo, IDTYPE hi);
+bool ipc_worker_running(void);
 int ipc_release_id_range_callback(IDTYPE src, void* data, uint64_t seq);
 
 /*!
