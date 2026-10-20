@@ -963,3 +963,29 @@ int _PalThreadGetCpuAffinity(PAL_HANDLE thread, unsigned long* cpu_mask, size_t 
 struct handle_ops g_thread_ops = {
     /* nothing */
 };
+
+/* svsm.fork_report (pal_main.c): set from the manifest, read at each fork. */
+bool g_pal_svsm_fork_report = false;
+
+/* Every OTHER context on the ring, at the moment a fork is about to copy the
+ * address space: its state, the LibOS lock holds it carries (counted, and
+ * paused across a blocking wait - both invisible to the child's owner-less
+ * copy of the lock), and where it is parked: its saved rsp and the first
+ * words of its stack, which are the return addresses of whatever made it
+ * yield. Symbolise against the image's maps. Diagnosis only. */
+void pal_svsm_threads_report_holds(int64_t foreign) {
+    PAL_HANDLE me = g_current;
+    log_warning("fork-report: forker %p holds %ld paused %ld; foreign holds after the quiesce %ld",
+                me, (long)pal_get_svsm_tcb()->lock_holds, (long)pal_get_svsm_tcb()->paused_holds,
+                (long)foreign);
+    for (PAL_HANDLE t = me->thread.next; t && t != me; t = t->thread.next) {
+        PAL_SVSM_TCB* tt = (PAL_SVSM_TCB*)t->thread.tcb;
+        const uint64_t* sp = (const uint64_t*)t->thread.rsp;
+        log_warning("fork-report: ctx %p state %d holds %ld paused %ld rsp %#lx stack "
+                    "%#lx %#lx %#lx %#lx %#lx %#lx", t, (int)t->thread.state,
+                    tt ? (long)tt->lock_holds : -1L, tt ? (long)tt->paused_holds : -1L,
+                    (unsigned long)t->thread.rsp,
+                    sp ? sp[0] : 0, sp ? sp[1] : 0, sp ? sp[2] : 0,
+                    sp ? sp[3] : 0, sp ? sp[4] : 0, sp ? sp[5] : 0);
+    }
+}

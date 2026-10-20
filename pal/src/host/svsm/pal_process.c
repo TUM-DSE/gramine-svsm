@@ -44,6 +44,8 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
      * (libos_lock.h lock_holds_pause) and are made anew in the child, so
      * this is for a counted hold that did not drain. */
     int64_t foreign = pal_svsm_fork_quiesce(100 * 1000);
+    if (g_pal_svsm_fork_report)
+        pal_svsm_threads_report_holds(foreign);
     if (foreign > 0)
         log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - forking "
                     "anyway; the child may block on them", foreign);

@@ -379,6 +379,21 @@ noreturn void pal_svsm_main(void)
         }
     }
 
+    /* The stuck-child diagnosis (owner, 2026-10-20), never in production:
+     *
+     *   [svsm]
+     *   fork_report = true
+     *
+     * makes every fork say, before its snapshot, which of the OTHER contexts
+     * hold LibOS locks (counted, and paused across a blocking wait) and where
+     * each is parked (pal_svsm_threads_report_holds). */
+    if (manifest_svsm_early) {
+        bool fr = false;
+        if (toml_bool_in(manifest_svsm_early, "fork_report", false, &fr) < 0)
+            pal_svsm_fail("svsm.fork_report is not a boolean", 0);
+        g_pal_svsm_fork_report = fr;
+    }
+
     /* Does this image run with AVX-512?
      *
      *   [svsm.avx512]

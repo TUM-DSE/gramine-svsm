@@ -38,6 +38,9 @@ typedef struct pal_svsm_tcb {
     };
 } PAL_SVSM_TCB;
 
+extern bool g_pal_svsm_fork_report;
+void pal_svsm_threads_report_holds(int64_t foreign);
+
 static inline PAL_SVSM_TCB* pal_get_svsm_tcb(void) {
     return (PAL_SVSM_TCB*)pal_get_tcb();
 }
