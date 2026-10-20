@@ -972,16 +972,20 @@ bool g_pal_svsm_fork_report = false;
  * paused across a blocking wait - both invisible to the child's owner-less
  * copy of the lock), and where it is parked: its saved rsp and the first
  * words of its stack, which are the return addresses of whatever made it
- * yield. Symbolise against the image's maps. Diagnosis only. */
+ * yield. Symbolise against the image's maps. Diagnosis only.
+ *
+ * At ERROR level: the manifests it is meant for (SeBS, the fork fixtures)
+ * set log_level = "error", which dropped every warning-level line of the
+ * first run of it (q41: no report at all). */
 void pal_svsm_threads_report_holds(int64_t foreign) {
     PAL_HANDLE me = g_current;
-    log_warning("fork-report: forker %p holds %ld paused %ld; foreign holds after the quiesce %ld",
+    log_error("fork-report: forker %p holds %ld paused %ld; foreign holds after the quiesce %ld",
                 me, (long)pal_get_svsm_tcb()->lock_holds, (long)pal_get_svsm_tcb()->paused_holds,
                 (long)foreign);
     for (PAL_HANDLE t = me->thread.next; t && t != me; t = t->thread.next) {
         PAL_SVSM_TCB* tt = (PAL_SVSM_TCB*)t->thread.tcb;
         const uint64_t* sp = (const uint64_t*)t->thread.rsp;
-        log_warning("fork-report: ctx %p state %d holds %ld paused %ld rsp %#lx stack "
+        log_error("fork-report: ctx %p state %d holds %ld paused %ld rsp %#lx stack "
                     "%#lx %#lx %#lx %#lx %#lx %#lx", t, (int)t->thread.state,
                     tt ? (long)tt->lock_holds : -1L, tt ? (long)tt->paused_holds : -1L,
                     (unsigned long)t->thread.rsp,
