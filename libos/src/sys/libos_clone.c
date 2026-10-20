@@ -150,9 +150,25 @@ static int migrate_fork(struct libos_cp_store* store, struct libos_process* proc
  * says the same thing about fork in a threaded program, and the usual user
  * - a subprocess launch, which execs at once - never touches them.
  */
+/*
+ * The pid a forked process goes by, and its block of thread ids.
+ *
+ * With a lineage name (lineage-vmid, 2026-10-20) the pid is `name << 12` - the
+ * first id of the process's own 4096-id block, so the main thread's tid is the
+ * pid as on Linux and its other threads take the remaining 4095 - and is
+ * never the monitor's id, which the monitor reuses as soon as a slot is free.
+ * A pid that names a dead child therefore resolves to nobody (ESRCH), not to
+ * whoever the monitor gave that slot next. A monitor without names says 0, and
+ * the old layout stands: pid = monitor id, block = id << 12.
+ */
+static IDTYPE cow_pid(uint32_t name, uint64_t monitor_id) {
+    return name ? (IDTYPE)name << ID_BLOCK_SHIFT : (IDTYPE)monitor_id;
+}
+
 static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
     uint64_t child_id = 0;
     uint64_t self_id = 0;
+    struct pal_fork_ids ids;
 
     /*
      * Root the lineage filesystem BEFORE the fork, if this manifest asked for
@@ -183,11 +199,13 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
      * between the slot being taken and both entries being right. The child
      * clears its copy (wait_after_cow_fork). */
     host_reap_hold();
-    int pret = PalProcessFork(PAL_PROCESS_FORK_RESIDENT, &child_id, &self_id);
+    int pret = PalProcessFork(PAL_PROCESS_FORK_RESIDENT, &ids);
     if (pret < 0) {
         host_reap_release();
         return pal_to_unix_errno(pret);
     }
+    child_id = ids.child;
+    self_id  = ids.self;
 
     if (child_id == 0) {
         /* ---- the child ---- */
@@ -213,9 +231,10 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
         unlock(&g_process.children_lock);
         ipc_cld_exit_by_host();
 
+        IDTYPE self_pid = cow_pid(ids.name, self_id);
         rwlock_write_lock(&g_process_id_lock);
         g_process.ppid = g_process.pid;
-        g_process.pid  = (IDTYPE)self_id;
+        g_process.pid  = self_pid;
         rwlock_write_unlock(&g_process_id_lock);
 
         /* Its IPC identity and its own worker, TOGETHER and only if this
@@ -230,14 +249,22 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
          * makes it answer out of its COPY of the leader's tables - which is
          * how a child took a POSIX lock its parent was holding and was told
          * nothing. One switch, both halves. */
-        int ipc_ret = reinit_ipc_worker_after_fork((IDTYPE)self_id);
+        int ipc_ret = reinit_ipc_worker_after_fork(self_pid);
         if (ipc_ret < 0) {
             log_error("fork: child %u has no IPC worker: %s", g_process.pid,
                       unix_strerror(ipc_ret));
         }
 
-        id_ranges_after_cow_fork((IDTYPE)self_id);
-        get_cur_thread()->tid = (IDTYPE)self_id;
+        /* With a name the pid is the block's first id, and the threads get
+         * the rest of it; without one, the old layout (block = id << 12, the
+         * pid outside it). */
+        IDTYPE lo = ids.name ? self_pid + 1 : (IDTYPE)self_id << ID_BLOCK_SHIFT;
+        IDTYPE hi = (ids.name ? self_pid : (IDTYPE)self_id << ID_BLOCK_SHIFT)
+                    + ((IDTYPE)1 << ID_BLOCK_SHIFT) - 1;
+        if (!ids.name && self_id >= ID_MONITOR_LIMIT)
+            lo = hi = 0;                /* no block: ipc_ids_after_cow_fork says so */
+        id_ranges_after_cow_fork(self_pid, lo, hi);
+        get_cur_thread()->tid = self_pid;
         return 0;
     }
 
@@ -251,10 +278,13 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
         host_reap_release();
         return -ENOMEM;
     }
-    child->pid  = (IDTYPE)child_id;
-    /* `vmid` is what the monitor knows it by, which for this host is the
-     * same number - and it is what PalProcessWait is asked about. */
-    child->vmid = (IDTYPE)child_id;
+    IDTYPE child_pid = cow_pid(ids.name, child_id);
+    child->pid  = child_pid;
+    /* The IPC name is the pid (the child's listener is "pipe:<instance>/<pid>"),
+     * and the host knows it by id AND serial - what PalProcessWait is asked. */
+    child->vmid = child_pid;
+    child->monitor_id = child_id;
+    child->monitor_serial = ids.serial;
     child->child_termination_signal = flags & CSIGNAL;
     child->uid = get_cur_thread()->uid;
     child->by_host = true;              /* reap_host_children, not IPC */
@@ -270,15 +300,15 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
      * With every reap held off since before the fork (above): a reap that
      * had its answer for the OLD child, or asked about the slot after this
      * fork took it, would otherwise give one child's status to the other. */
-    (void)reap_stale_child((IDTYPE)child_id);
+    (void)reap_stale_child(child_pid);
     lock(&g_process.children_lock);
     LISTP_ADD_TAIL(child, &g_process.children, list);
     unlock(&g_process.children_lock);
     host_reap_release();
 
     if (set_parent_tid)
-        *set_parent_tid = (IDTYPE)child_id;
-    return (long)child_id;
+        *set_parent_tid = child_pid;
+    return (long)child_pid;
 }
 
 static long do_clone_new_vm(IDTYPE child_vmid, unsigned long flags, struct libos_thread* thread,

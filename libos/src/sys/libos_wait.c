@@ -156,7 +156,8 @@ static void reap_host_children(void) {
 
 static void reap_host_children_locked(void) {
     IDTYPE pids[32];
-    IDTYPE vmids[32];
+    uint64_t mids[32];
+    uint64_t serials[32];
     IDTYPE uids[32];
     bool by_host[32];
     size_t n = 0;
@@ -167,7 +168,10 @@ static void reap_host_children_locked(void) {
         if (n >= ARRAY_SIZE(pids))
             break;
         pids[n]  = child->pid;
-        vmids[n] = child->vmid;
+        /* The host's names for it: id and serial (lineage-vmid). A child
+         * recorded before monitor ids were kept apart has its pid there. */
+        mids[n]    = child->monitor_id ? child->monitor_id : child->vmid;
+        serials[n] = child->monitor_serial;
         uids[n]  = child->uid;
         by_host[n] = child->by_host;
         n++;
@@ -180,7 +184,7 @@ static void reap_host_children_locked(void) {
     for (size_t i = 0; i < n; i++) {
         int64_t reason = 0;
         uint64_t value = 0;
-        if (PalProcessWait(vmids[i], &reason, &value) < 0) {
+        if (PalProcessWait(mids[i], serials[i], &reason, &value) < 0) {
             /* Refused: the monitor no longer links this child to us. For a
              * child the copy-on-write fork made, that happens one way - the
              * HOST deleted it, and its teardown dropped the link along with

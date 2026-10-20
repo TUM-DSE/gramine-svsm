@@ -135,6 +135,9 @@ static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
     static_assert((((IDTYPE)ID_MONITOR_LIMIT - 1) << ID_BLOCK_SHIFT)
                   + ((IDTYPE)1 << ID_BLOCK_SHIFT) - 1 <= PID_MAX,
                   "the last monitor id's block must fit below PID_MAX");
+    static_assert((((IDTYPE)ID_LINEAGE_NAME_END - 1) << ID_BLOCK_SHIFT)
+                  + ((IDTYPE)1 << ID_BLOCK_SHIFT) - 1 <= PID_MAX,
+                  "the last lineage name's block must fit below PID_MAX");
 
     /* The root process's very first id is its own pid, 1 - a range of one, so
      * that its threads start in block 0 rather than at 2, among the pids. */
@@ -159,11 +162,11 @@ static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
  * `self_id`. The tree is the parent's - its ranges are its threads' - and is
  * dropped, nodes freed: they are this process's copies. No lock: the caller is
  * the only thread there is. */
-void ipc_ids_after_cow_fork(IDTYPE self_id) {
-    if (!self_id || self_id >= ID_MONITOR_LIMIT) {
-        /* Not a monitor id this layout has a block for: keep the copy, which
-         * is what every child did before. */
-        log_warning("fork: id %u has no id block - the child shares its parent's ids", self_id);
+void ipc_ids_after_cow_fork(IDTYPE self_pid, IDTYPE lo, IDTYPE hi) {
+    if (!lo || lo > hi) {
+        /* Not an id this layout has a block for: keep the copy, which is
+         * what every child did before. */
+        log_warning("fork: pid %u has no id block - the child shares its parent's ids", self_pid);
         return;
     }
     struct avl_tree_node* node;
@@ -171,8 +174,8 @@ void ipc_ids_after_cow_fork(IDTYPE self_id) {
         avl_tree_delete(&g_id_owners_tree, node);
         free(container_of(node, struct id_range, node));
     }
-    g_ids_lo = self_id << ID_BLOCK_SHIFT;
-    g_ids_hi = g_ids_lo + ((IDTYPE)1 << ID_BLOCK_SHIFT) - 1;
+    g_ids_lo = lo;
+    g_ids_hi = hi;
     g_last_id = 0;
     g_ids_own_block = true;
 }

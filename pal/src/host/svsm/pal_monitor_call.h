@@ -67,7 +67,8 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
  * child, its child's in the parent (0 if the fork failed). The parent needs
  * it to say whose record of shared-pipe holds it filled for the child
  * (pal_pipes.c, the ledger). */
-uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial);
+uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
+                       uint32_t* out_name);
 
 /* Wait (0x4FFFFFD5): how did my child end?
  *
@@ -77,7 +78,7 @@ uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial)
  * A NEGATIVE reason is a refusal - the id is not this vault's child, or its
  * slot has been reissued - and must not be read as "still running". */
 #define PAL_SVSM_EXIT_LIVE 0
-int64_t pal_svsm_wait(uint64_t child_id, uint64_t* out_value);
+int64_t pal_svsm_wait(uint64_t child_id, uint64_t child_serial, uint64_t* out_value);
 void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
 /* DeviceMmio: a device's registers. `id` is vendor | device << 16, 0 only
  * asks what this vault already has. `bar` says which BAR to map, because a

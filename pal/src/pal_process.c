@@ -18,21 +18,21 @@ int PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
     return _PalProcessCreate(args, reserved_mem_ranges, reserved_mem_ranges_len, out_handle);
 }
 
-int PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
-    if (!out_child || !out_self)
+int PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
+    if (!out)
         return -PAL_ERROR_INVAL;
-    *out_child = 0;
-    *out_self = 0;
-    return _PalProcessFork(flags, out_child, out_self);
+    memset(out, 0, sizeof(*out));
+    return _PalProcessFork(flags, out);
 }
 
-int PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value) {
+int PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
+                   uint64_t* out_value) {
     if (!out_reason)
         return -PAL_ERROR_INVAL;
     *out_reason = 0;
     if (out_value)
         *out_value = 0;
-    return _PalProcessWait(child, out_reason, out_value);
+    return _PalProcessWait(child, child_serial, out_reason, out_value);
 }
 
 noreturn void PalProcessExit(int exitcode) {

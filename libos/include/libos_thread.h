@@ -150,7 +150,7 @@ int init_threading(void);
 int init_id_ranges(IDTYPE preload_tid);
 /* In a copy-on-write fork's child: `self_id`, its tid, came from the monitor
  * and is never released to the id ranges (libos_pid.c). */
-void id_ranges_after_cow_fork(IDTYPE self_id);
+void id_ranges_after_cow_fork(IDTYPE self_pid, IDTYPE lo, IDTYPE hi);
 /* In a copy-on-write fork's child: the calling thread is the only one
  * (libos_thread.c). */
 void threads_after_cow_fork(void);

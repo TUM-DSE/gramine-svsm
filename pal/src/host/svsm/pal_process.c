@@ -25,7 +25,7 @@ int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
-int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
+int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint64_t self = 0;
     /* No other context may hold a LibOS lock at the instant the address
      * space is copied (pal_events.c). Nothing between the last look at the
@@ -55,7 +55,8 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
      * Nothing from here to the monitor call can yield. */
     pal_svsm_pipes_fork_prepare();
     uint64_t serial = 0;
-    uint64_t rc = pal_svsm_fork(fflags, &self, &serial);
+    uint32_t name = 0;
+    uint64_t rc = pal_svsm_fork(fflags, &self, &serial, &name);
     pal_svsm_fork_done();
     /* UINT64_MAX is the one answer that is neither a parent nor a child.
      * It has to be checked here: a failed fork returns ONCE, and a caller
@@ -65,11 +66,13 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
         pal_svsm_pipes_fork_failed();   /* there is no child to hold them */
         return -PAL_ERROR_DENIED;
     }
-    *out_child = rc;
+    out->child  = rc;
+    out->serial = serial;
+    out->name   = name;
     if (rc != 0)
         pal_svsm_pipes_fork_parent(serial);
     if (rc == 0) {
-        *out_self = self;               /* we are the child; this is us */
+        out->self = self;               /* we are the child; this is us */
         /* First, before anything here can switch: the parent's other
          * threads are copies on this process's ring and must not run. */
         pal_svsm_threads_child_after_fork();
@@ -83,9 +86,10 @@ int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
     return 0;
 }
 
-int _PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value) {
+int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
+                    uint64_t* out_value) {
     uint64_t value = 0;
-    int64_t reason = pal_svsm_wait(child, &value);
+    int64_t reason = pal_svsm_wait(child, child_serial, &value);
     /* Negative is a refusal - not this vault's child, or its slot has been
      * reissued - and must never be reported as a reason, because every real
      * reason is >= 0 and "still running" is 0. Reading a refusal as "not

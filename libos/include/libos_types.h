@@ -27,7 +27,11 @@ typedef Elf64_auxv_t elf_auxv_t;
 typedef uint32_t IDTYPE;
 #define IDTYPE_MAX UINT32_MAX
 
-#define PID_MAX_LIMIT 4194304 /* Linux limit 2^22, this value is *one greater* than max PID */
+/* One greater than the largest pid. Linux's is 2^22; here it is 2^31: a forked
+ * child's pid is its lineage name << 12 (lineage-vmid, 2026-10-20), names run
+ * below 2^19, so pids are multiples of 4096 up to 2^31 - 4096 (the positive
+ * range of pid_t). /proc/sys/kernel/pid_max reports this value. */
+#define PID_MAX_LIMIT 2147483648u
 #define PID_MAX (PID_MAX_LIMIT - 1)
 
 typedef uint64_t HASHTYPE;

@@ -225,8 +225,9 @@ int _PalRuntimeImageMap(void* addr, uint64_t size, pal_prot_flags_t prot, uint64
 int _PalLineageFsAttach(uint64_t pages, void** base, size_t* size);
 int _PalLineageSelf(uint64_t* out);
 int _PalLineageMemberAlive(uint64_t serial, bool* out);
-int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self);
-int _PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value);
+int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out);
+int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
+                    uint64_t* out_value);
 
 /* PalObject calls */
 void _PalObjectDestroy(PAL_HANDLE object_handle);

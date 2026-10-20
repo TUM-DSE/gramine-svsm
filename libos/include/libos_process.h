@@ -28,6 +28,12 @@ struct libos_child_process {
     /* A copy-on-write fork's child: how it ended comes from the host
      * (reap_host_children), never from the IPC layer (libos_process.c). */
     bool by_host;
+    /* And how the host knows it: its monitor id, which the monitor REUSES,
+     * and its serial, which it never does. The pid above is the child's name
+     * in its lineage (lineage-vmid) and is not the monitor id; a wait asks by
+     * id and serial, so a reused id cannot answer for this child. */
+    uint64_t monitor_id;
+    uint64_t monitor_serial;
 
     /* These 3 fields are set when the child terminates. */
     int exit_code;

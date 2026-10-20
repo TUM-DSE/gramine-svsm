@@ -65,8 +65,8 @@ static IDTYPE g_monitor_named_id = 0;
  * No lock: the child is the forking thread alone here, and taking one buys
  * nothing at fork return.
  */
-void id_ranges_after_cow_fork(IDTYPE self_id) {
-    g_monitor_named_id = self_id;
+void id_ranges_after_cow_fork(IDTYPE self_pid, IDTYPE lo, IDTYPE hi) {
+    g_monitor_named_id = self_pid;
     free(g_last_range);
     g_last_range = NULL;
     g_last_used_id = 0;
@@ -75,7 +75,7 @@ void id_ranges_after_cow_fork(IDTYPE self_id) {
         avl_tree_delete(&g_used_ranges_tree, node);
         free(container_of(node, struct id_range, node));
     }
-    ipc_ids_after_cow_fork(self_id);
+    ipc_ids_after_cow_fork(self_pid, lo, hi);
 }
 
 int init_id_ranges(IDTYPE preload_tid) {

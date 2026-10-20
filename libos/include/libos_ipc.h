@@ -191,6 +191,10 @@ void ipc_child_disconnect_callback(IDTYPE vmid);
  * of 1 << ID_BLOCK_SHIFT, one per process (libos_ipc_pid.c). */
 #define ID_MONITOR_LIMIT 1024
 #define ID_BLOCK_SHIFT   12
+/* A forked child's pid is its lineage name << ID_BLOCK_SHIFT, the first id of
+ * its own block, and its threads take the other 4095 (lineage-vmid; the
+ * monitor's fork.rs NAME_FIRST..NAME_END). */
+#define ID_LINEAGE_NAME_END (1u << 19)
 
 /*!
  * \brief Request a new ID range from the IPC leader.
@@ -213,7 +217,7 @@ int ipc_alloc_id_range_callback(IDTYPE src, void* data, uint64_t seq);
  */
 int ipc_release_id_range(IDTYPE start, IDTYPE end);
 /* In a copy-on-write fork's child: allocate in block `self_id` from now on. */
-void ipc_ids_after_cow_fork(IDTYPE self_id);
+void ipc_ids_after_cow_fork(IDTYPE self_pid, IDTYPE lo, IDTYPE hi);
 int ipc_release_id_range_callback(IDTYPE src, void* data, uint64_t seq);
 
 /*!

@@ -41,15 +41,16 @@ struct handle_ops g_proc_ops = {
     .destroy = &proc_destroy,
 };
 
-int _PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self) {
+int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     __UNUSED(flags);
-    __UNUSED(out_child);
-    __UNUSED(out_self);
+    __UNUSED(out);
     return -PAL_ERROR_NOTIMPLEMENTED;   /* not implemented */
 }
 
-int _PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value) {
+int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
+                    uint64_t* out_value) {
     __UNUSED(child);
+    __UNUSED(child_serial);
     __UNUSED(out_reason);
     __UNUSED(out_value);
     return -PAL_ERROR_NOTIMPLEMENTED;

@@ -451,12 +451,27 @@ int PalLineageMemberAlive(uint64_t serial, bool* out);
  * for ever.
  */
 #define PAL_PROCESS_FORK_RESIDENT 1UL
-int PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self);
+/* What a fork tells each side (lineage-vmid, 2026-10-20). `child` is set in
+ * the parent and 0 in the child, which is how each knows which it is; `self`
+ * is the child's own monitor id, in the child. `serial` and `name` are the
+ * CHILD's on both sides: the serial is never reused (ask the monitor about a
+ * child by id AND serial), and the name is the child's in its lineage, never
+ * reused within a full cycle - the LibOS's pid is `name << 12`, so a pid is
+ * never the reusable monitor id. */
+struct pal_fork_ids {
+    uint64_t child;
+    uint64_t self;
+    uint64_t serial;
+    uint32_t name;
+};
+int PalProcessFork(uint64_t flags, struct pal_fork_ids* out);
 
 /*!
  * \brief How did my child end?
  *
  * \param      child       the child's id, as #PalProcessFork reported it.
+ * \param      child_serial  its serial (#pal_fork_ids), so that a reused id
+ *                         can never answer for it; 0 asks by id alone.
  * \param[out] out_reason  0 while it is still running, >0 for a reason it
  *                         ended, and the call fails rather than reporting a
  *                         negative one.
@@ -469,7 +484,8 @@ int PalProcessFork(uint64_t flags, uint64_t* out_child, uint64_t* out_self);
  * already has one answer to "who runs next" and a second waiting mechanism
  * here would give it two.
  */
-int PalProcessWait(uint64_t child, int64_t* out_reason, uint64_t* out_value);
+int PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
+                   uint64_t* out_value);
 
 /*!
  * \brief Set upcalls for memory bookkeeping
