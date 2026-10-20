@@ -1,5 +1,5 @@
 # Pinned: mod/2/libpal.so embeds gcc-13 include paths (= 24.04), and
-# glibc 2.39 does not build with newer toolchains (gcc 15's kernel
+# glibc (2.39, 2.40) does not build with newer toolchains (gcc 15's kernel
 # headers redefine OPEN_TREE_CLONE -> -Werror failure).
 FROM ubuntu:24.04
 RUN apt-get update

@@ -5,7 +5,7 @@
 
 [wrap-file]
 directory = glibc-2.40-1
-source_url = https://ftp.gnu.org/gnu/glibc/glibc-2.40.tar.gz
+source_url = https://ftpmirror.gnu.org/glibc/glibc-2.40.tar.gz
 source_fallback_url = https://packages.gramineproject.io/distfiles/glibc-2.40.tar.gz
 source_filename = glibc-2.40.tar.gz
 source_hash = 2abc038f5022949cb67e996c3cae0e7764f99b009f0b9b7fd954dfc6577b599e
