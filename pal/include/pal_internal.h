@@ -228,6 +228,7 @@ int _PalLineageMemberAlive(uint64_t serial, bool* out);
 int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out);
 int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                     uint64_t* out_value);
+int _PalProcessKill(uint64_t child, uint64_t child_serial);
 
 /* PalObject calls */
 void _PalObjectDestroy(PAL_HANDLE object_handle);

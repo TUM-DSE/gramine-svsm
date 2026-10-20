@@ -17,6 +17,30 @@ static int ipc_pid_kill_send(enum kill_type type, IDTYPE sender, IDTYPE dest_pid
     int ret;
 
     IDTYPE dest = 0;
+    /* One of our own copy-on-write children. The IPC leader has never heard of
+     * a forked child's ids - its block is allocated in the child - so asking it
+     * answered "nobody" and every kill of a forked child was ESRCH, reaching
+     * nothing (Popen.kill swallows that: a hung child "did not die",
+     * fork_parallel 2026-10-20). SIGKILL is the HOST's to carry out - it cannot
+     * be caught, and the child's own threads need not run for it; any other
+     * signal goes over IPC straight to the child's name. */
+    if (type == KILL_PROCESS && dest_pid != g_process.pid) {
+        uint64_t mid = 0, mserial = 0;
+        IDTYPE cvmid = 0;
+        if (lookup_host_child(dest_pid, &mid, &mserial, &cvmid)) {
+            if (sig == 0)
+                return 0;                       /* it exists: that is all kill(pid, 0) asks */
+            if (sig == SIGKILL) {
+                if (mid && mserial && PalProcessKill(mid, mserial) == 0)
+                    return 0;                   /* reaped as SIGKILL through the host */
+                /* Refused: the host no longer links it to us - it ended and
+                 * is a zombie by now, or it is gone. */
+                return is_zombie_process(dest_pid) ? 0 : -ESRCH;
+            }
+            dest = cvmid;
+            goto send;
+        }
+    }
     if (type == KILL_ALL) {
         if (g_process_ipc_ids.leader_vmid) {
             dest = g_process_ipc_ids.leader_vmid;
@@ -31,12 +55,21 @@ static int ipc_pid_kill_send(enum kill_type type, IDTYPE sender, IDTYPE dest_pid
             if (is_zombie_process(dest_pid)) {
                 /* ... but it's a zombie! */
                 return 0;
-            } else {
+            }
+            /* ... as far as the leader knows. A forked process's pid is its
+             * lineage name << ID_BLOCK_SHIFT and IS its IPC name, so one that
+             * is not our child (a sibling, a parent) is tried directly: a live
+             * one answers, a dead one has no listener and the connect fails -
+             * ESRCH below, never somebody else (names are not reused). */
+            if (type != KILL_PROCESS || (dest_pid & (((IDTYPE)1 << ID_BLOCK_SHIFT) - 1))
+                    || dest_pid < ((IDTYPE)1 << ID_BLOCK_SHIFT)) {
                 /* ... so it does not exist. */
                 return -ESRCH;
             }
+            dest = dest_pid;
         }
     }
+send:
 
     struct libos_ipc_pid_kill msgin = {
         .sender = sender,
@@ -86,6 +119,10 @@ static int ipc_pid_kill_send(enum kill_type type, IDTYPE sender, IDTYPE dest_pid
         }
     }
 
+    /* A target with no listener is a process that does not exist: the
+     * POSIX answer, not a PAL error or a retryable one (lineage-vmid). */
+    if (ret < 0 && ret != -ESRCH && ret != -EPERM && ret != -EINVAL && type == KILL_PROCESS)
+        ret = -ESRCH;
     return ret;
 }
 

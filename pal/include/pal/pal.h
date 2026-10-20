@@ -488,6 +488,19 @@ int PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                    uint64_t* out_value);
 
 /*!
+ * \brief SIGKILL one of my children - by the host, not by asking it.
+ *
+ * \param child         the child's id, as #PalProcessFork reported it.
+ * \param child_serial  its serial; the host refuses anything that is not
+ *                      this process's own child by both.
+ *
+ * \returns 0 if the child is ended or will be at its next return (a running
+ * one is pulled back first), negative if it is not this process's child.
+ * It is then reaped through #PalProcessWait like any child the host ended.
+ */
+int PalProcessKill(uint64_t child, uint64_t child_serial);
+
+/*!
  * \brief Set upcalls for memory bookkeeping
  *
  * \param alloc  Function to call to get a memory range.

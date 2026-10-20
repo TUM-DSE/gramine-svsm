@@ -79,6 +79,7 @@ uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
  * slot has been reissued - and must not be read as "still running". */
 #define PAL_SVSM_EXIT_LIVE 0
 int64_t pal_svsm_wait(uint64_t child_id, uint64_t child_serial, uint64_t* out_value);
+int64_t pal_svsm_kill_child(uint64_t child_id, uint64_t child_serial);
 void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
 /* DeviceMmio: a device's registers. `id` is vendor | device << 16, 0 only
  * asks what this vault already has. `bar` says which BAR to map, because a

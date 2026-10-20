@@ -246,6 +246,27 @@ bool mark_child_exited_by_pid_ipc(IDTYPE pid, IDTYPE child_uid, int exit_code, i
                              signal);
 }
 
+/* One of OUR copy-on-write children, still running (not yet reaped from the
+ * host): how the host and the IPC layer know it. For kill() of a forked
+ * child, which the IPC leader has never heard of (lineage-vmid). */
+bool lookup_host_child(IDTYPE pid, uint64_t* out_monitor_id, uint64_t* out_serial,
+                       IDTYPE* out_vmid) {
+    bool found = false;
+    lock(&g_process.children_lock);
+    struct libos_child_process* child;
+    LISTP_FOR_EACH_ENTRY(child, &g_process.children, list) {
+        if (child->by_host && child->pid == pid) {
+            *out_monitor_id = child->monitor_id;
+            *out_serial     = child->monitor_serial;
+            *out_vmid       = child->vmid;
+            found = true;
+            break;
+        }
+    }
+    unlock(&g_process.children_lock);
+    return found;
+}
+
 bool is_zombie_process(IDTYPE pid) {
     bool found = false;
     lock(&g_process.children_lock);

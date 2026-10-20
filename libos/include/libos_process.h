@@ -115,3 +115,5 @@ bool reap_stale_child(IDTYPE pid);
  * Returns `true` if the process \p pid is found in the zombie list of `g_process`.
  */
 bool is_zombie_process(IDTYPE pid);
+bool lookup_host_child(IDTYPE pid, uint64_t* out_monitor_id, uint64_t* out_serial,
+                       IDTYPE* out_vmid);

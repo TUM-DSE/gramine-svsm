@@ -35,6 +35,12 @@ int PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
     return _PalProcessWait(child, child_serial, out_reason, out_value);
 }
 
+int PalProcessKill(uint64_t child, uint64_t child_serial) {
+    if (!child || !child_serial)
+        return -PAL_ERROR_INVAL;
+    return _PalProcessKill(child, child_serial);
+}
+
 noreturn void PalProcessExit(int exitcode) {
     _PalProcessExit(exitcode);
 }

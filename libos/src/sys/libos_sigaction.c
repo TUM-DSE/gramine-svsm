@@ -379,6 +379,47 @@ int do_kill_pgroup(IDTYPE sender, IDTYPE pgid, int sig) {
     return kill_current_proc(&info);
 }
 
+/*
+ * kill(-1) and kill(0 / -pgid) reach the processes the IPC layer knows; our
+ * copy-on-write children are not among them (the leader never hears of their
+ * ids), so they were skipped and the call still said 0. They are signalled
+ * here too, one by one, through do_kill_proc - which for a forked child means
+ * the host for SIGKILL and its own IPC name otherwise (lineage-vmid). For a
+ * process group only the children still in ours are signalled: a forked
+ * child keeps its parent's group unless it moved, and one that moved is not
+ * ours to reach this way. Their own children are not reached from here; that
+ * is said once, rather than claimed.
+ */
+static int kill_host_children(int sig, bool all, IDTYPE pgid) {
+    IDTYPE pids[64];
+    size_t n = 0;
+    lock(&g_process.children_lock);
+    struct libos_child_process* child;
+    LISTP_FOR_EACH_ENTRY(child, &g_process.children, list) {
+        if (child->by_host && n < ARRAY_SIZE(pids))
+            pids[n++] = child->pid;
+    }
+    unlock(&g_process.children_lock);
+    rwlock_read_lock(&g_process_id_lock);
+    IDTYPE current_pgid = g_process.pgid;
+    rwlock_read_unlock(&g_process_id_lock);
+    if (!all && (pgid ? pgid : current_pgid) != current_pgid)
+        return 0;
+    static bool said = false;
+    if (n && !said) {
+        said = true;
+        log_warning("kill(%s): forked children are signalled directly; their own children "
+                    "are not reached by this call", all ? "-1" : "pgroup");
+    }
+    int first_err = 0;
+    for (size_t i = 0; i < n; i++) {
+        int ret = do_kill_proc(g_process.pid, pids[i], sig);
+        if (ret < 0 && ret != -ESRCH && !first_err)
+            first_err = ret;
+    }
+    return first_err;
+}
+
 long libos_syscall_kill(pid_t pid, int sig) {
     if (sig < 0 || sig > SIGS_CNT) {
         return -EINVAL;
@@ -396,15 +437,21 @@ long libos_syscall_kill(pid_t pid, int sig) {
         /* If `pid` equals -1, then signal is sent to every process for which the calling process
          * has permission to send, which means all processes in Gramine. NOTE: On Linux, kill(-1)
          * does not signal the calling process. */
-        return ipc_kill_all(g_process.pid, sig);
+        int r = kill_host_children(sig, /*all=*/true, 0);
+        int ret = ipc_kill_all(g_process.pid, sig);
+        return ret < 0 ? ret : r;
     } else if (pid == 0) {
         /* If `pid` equals 0, then signal is sent to every process in the process group of
          * the calling process. */
-        return do_kill_pgroup(g_process.pid, 0, sig);
+        int r = kill_host_children(sig, /*all=*/false, /*pgid=*/0);
+        int ret = do_kill_pgroup(g_process.pid, 0, sig);
+        return ret < 0 ? ret : r;
     } else { // pid < -1
         /* If `pid` is less than -1, then signal is sent to every process in the process group
          * `-pid`. */
-        return do_kill_pgroup(g_process.pid, -pid, sig);
+        int r = kill_host_children(sig, /*all=*/false, (IDTYPE)-pid);
+        int ret = do_kill_pgroup(g_process.pid, -pid, sig);
+        return ret < 0 ? ret : r;
     }
 }
 

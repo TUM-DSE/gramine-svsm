@@ -129,3 +129,9 @@ struct handle_ops g_proc_ops = {
     .write = &proc_write,
     .destroy = &proc_destroy,
 };
+
+int _PalProcessKill(uint64_t child, uint64_t child_serial) {
+    /* A refusal - not this process's child by id and serial - is negative,
+     * and is reported as such rather than as a kill that happened. */
+    return pal_svsm_kill_child(child, child_serial) < 0 ? -PAL_ERROR_INVAL : 0;
+}

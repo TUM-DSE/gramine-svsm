@@ -197,6 +197,18 @@ uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
     return data.rcx;
 }
 
+/* KillChild (0x4FFFFFD3): rbx = my child's id, rcx = its serial -> rcx 0 or
+ * a negative status. */
+int64_t pal_svsm_kill_child(uint64_t child_id, uint64_t child_serial) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFD3;
+    data.rbx = child_id;
+    data.rcx = child_serial;
+    data.rdx = 0;
+    monitor_call(&data);
+    return (int64_t)data.rcx;
+}
+
 /* Wait (0x4FFFFFD5): rbx = the child's id, rcx = its serial (0: by id
  * alone) -> rcx = reason, rdx = value. */
 int64_t pal_svsm_wait(uint64_t child_id, uint64_t child_serial, uint64_t* out_value) {

@@ -43,6 +43,7 @@ PalStreamAttributesQuery
 PalProcessCreate
 PalProcessFork
 PalProcessWait
+PalProcessKill
 PalProcessExit
 PalSystemTimeQuery
 PalRandomBitsRead

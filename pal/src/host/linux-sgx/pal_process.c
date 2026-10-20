@@ -370,3 +370,9 @@ int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
     __UNUSED(out_value);
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
+
+int _PalProcessKill(uint64_t child, uint64_t child_serial) {
+    __UNUSED(child);
+    __UNUSED(child_serial);
+    return -PAL_ERROR_NOTIMPLEMENTED;
+}
