@@ -51,6 +51,7 @@ libpal_svsm = shared_library('pal',
         cflags_custom_stack_protector,
         cflags_sanitizers,
         '-DHOST_TYPE=Svsm',
+        '-DPAL_RTLD_WRITECOPY_ALL=0',
         cflags_svsm_call_insn,
 
         # in Skeleton, every single parameter is unused

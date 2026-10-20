@@ -25,6 +25,7 @@ install_headers('sgx_arch.h', 'sgx_attest.h', subdir : 'gramine')
 cflags_pal_sgx = [
     cflags_pal_common,
     '-DHOST_TYPE=Linux-SGX',
+    '-DPAL_RTLD_WRITECOPY_ALL=0',
     # Some of the code uses `alignof` on expressions, which is a GNU extension. Silence Clang - it
     # complains but does support it.
     '-Wno-gnu-alignof-expression',

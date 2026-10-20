@@ -553,7 +553,7 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
         /* Writable segments need a private copy (relocations, .data); read-only
            and text segments are mapped as they are, so a LibOS that comes from
            a shared store (svsm, LibOS/runtime split) is not copied per zygote. */
-        pal_prot_flags_t seg_prot = c->prot | ((c->prot & PAL_PROT_WRITE) ? PAL_PROT_WRITECOPY : 0);
+        pal_prot_flags_t seg_prot = c->prot | ((PAL_RTLD_WRITECOPY_ALL || (c->prot & PAL_PROT_WRITE)) ? PAL_PROT_WRITECOPY : 0);
         ret = _PalStreamMap(handle, map_addr, seg_prot, c->map_off, map_size);
         if (ret < 0) {
             log_error("Failed to map segment from ELF file");

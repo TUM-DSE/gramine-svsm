@@ -39,6 +39,7 @@ libpal_skeleton = shared_library('pal',
         cflags_custom_stack_protector,
         cflags_sanitizers,
         '-DHOST_TYPE=Skeleton',
+        '-DPAL_RTLD_WRITECOPY_ALL=0',
 
         # in Skeleton, every single parameter is unused
         '-Wno-unused-parameter',

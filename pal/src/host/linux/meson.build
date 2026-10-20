@@ -47,6 +47,7 @@ libpal_direct = shared_library('pal',
         cflags_sanitizers,
         cflags_custom_stack_protector,
         '-DHOST_TYPE=Linux',
+        '-DPAL_RTLD_WRITECOPY_ALL=1',
     ],
 
     link_args: [
