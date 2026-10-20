@@ -191,8 +191,15 @@ static void reap_host_children_locked(void) {
              * any status - so it is reaped as killed, the nearest POSIX truth
              * (as below). Skipped, it was never reaped: a parent waiting for
              * it waited for ever, and it stayed on the list. */
-            if (by_host[i])
+            if (by_host[i]) {
+                /* Said: this is one of the ways a child that exited cleanly
+                 * could be reported as SIGKILLed (fork_parallel "rc -9 out
+                 * '1'", 2026-10-20). */
+                log_warning("reap: pid %u (host id %lu serial %lu): the host refused the wait - "
+                            "reaped as SIGKILL", pids[i], (unsigned long)mids[i],
+                            (unsigned long)serials[i]);
                 (void)mark_child_exited_by_pid_host(pids[i], uids[i], 0, SIGKILL);
+            }
             continue;
         }
         if (reason == 0)
@@ -206,6 +213,10 @@ static void reap_host_children_locked(void) {
          * which is exactly what the host did. */
         int exit_code = (reason == 1) ? (int)value : 0;
         int term_signal = (reason == 1) ? 0 : SIGKILL;
+        if (reason != 1)
+            log_warning("reap: pid %u (host id %lu serial %lu) ended with reason %ld value %lu - "
+                        "reaped as SIGKILL", pids[i], (unsigned long)mids[i],
+                        (unsigned long)serials[i], (long)reason, (unsigned long)value);
         (void)mark_child_exited_by_pid_host(pids[i], uids[i], exit_code, term_signal);
     }
 }

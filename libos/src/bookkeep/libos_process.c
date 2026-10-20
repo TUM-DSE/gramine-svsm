@@ -233,6 +233,9 @@ bool reap_stale_child(IDTYPE pid) {
         }
     }
     unlock(&g_process.children_lock);
+    if (found)
+        log_warning("fork: a new child got pid %u while an unreaped child still had it - "
+                    "that one is reaped as SIGKILL", pid);
     return found && mark_child_exited(cmp_child_by_pid_host, (unsigned long)pid, uid, 0, SIGKILL);
 }
 
