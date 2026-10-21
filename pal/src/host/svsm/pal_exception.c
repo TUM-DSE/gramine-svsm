@@ -254,6 +254,33 @@ noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CON
         pal_svsm_exception_resume(context, xsave_area);
     }
 
+    if (event == PAL_EVENT_QUIT) {
+        /*
+         * The monitor's notice that this vault's invoke was abandoned - the
+         * host stopped driving it part-way (monitor signals.rs
+         * maybe_deliver_quit). Asynchronous like a preemption: the monitor
+         * took the vCPU between two instructions of code outside this PAL
+         * and built the frame from them. The LibOS raises SIGTERM for it
+         * (quit_upcall; on this PAL always, pal_public_state.quit_is_trusted),
+         * now if the interrupted code is the application's, otherwise at its
+         * next chance. A handler typically RETURNS into the code it
+         * interrupted - a Python one sets a flag - so the vector state goes
+         * with it, as on the preemption path above. No handler registered is
+         * no one to tell: resume.
+         */
+        pal_event_handler_t quit = _PalGetExceptionHandler(PAL_EVENT_QUIT);
+        if (quit) {
+            uint64_t rip_before = context->rip;
+            describe_xstate(context, xsave_area);
+            quit(rip_is_in_pal(context->rip), /*addr=*/0, context);
+            if (context->rip == rip_before) {
+                context->fpregs         = NULL;
+                context->is_fpregs_used = 0;
+            }
+        }
+        pal_svsm_exception_resume(context, xsave_area);
+    }
+
     pal_event_handler_t upcall = _PalGetExceptionHandler((enum pal_event)event);
 
     if (!upcall) {

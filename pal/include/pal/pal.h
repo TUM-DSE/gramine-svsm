@@ -207,6 +207,15 @@ struct pal_public_state {
     PAL_HANDLE parent_process;   /*!< handle of parent process */
     PAL_HANDLE first_thread;     /*!< handle of first thread */
     int log_level;               /*!< what log messages to enable */
+    /*!
+     * \brief PAL_EVENT_QUIT comes only from a trusted source.
+     *
+     * Set by a PAL whose only QUIT is not the host's: the SVSM PAL, where it is the monitor's
+     * notice that the vault's invoke was abandoned. The LibOS then delivers it (as SIGTERM)
+     * whatever `sys.enable_sigterm_injection` says, and every time, not once - that key gates
+     * the untrusted host's signal, which such a PAL has no path for.
+     */
+    bool quit_is_trusted;
 
     /*
      * Memory layout

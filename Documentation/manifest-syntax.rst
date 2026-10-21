@@ -368,6 +368,14 @@ Be careful! In SGX environment, the untrusted host could inject that signal in
 an arbitrary moment. Examine what your application's `SIGTERM` handler does and
 whether it poses any security threat.
 
+On the SVSM PAL (MicroVault) this key does not apply to the monitor: there is no
+host signal path at all, and the only `SIGTERM` the PAL raises is the monitor's
+notice that an invoke of the vault was abandoned (the host stopped driving it
+part-way). That one is always delivered, whatever this key says, and each time
+an invoke is abandoned, not once. A vault that handles it and returns to its
+idle point (its next result notify) is reusable; one that does not is refused
+until it is deleted.
+
 .. _disallowing-subprocesses-fork:
 
 Disallowing subprocesses (fork)
