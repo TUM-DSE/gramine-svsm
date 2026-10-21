@@ -516,7 +516,11 @@ static void illegal_upcall(bool is_in_pal, uintptr_t addr, PAL_CONTEXT* context)
 static void quit_upcall(bool is_in_pal, uintptr_t addr, PAL_CONTEXT* context) {
     __UNUSED(addr);
 
-    if (!g_inject_host_signal_enabled) {
+    /* A PAL whose QUIT is trusted (pal_public_state.quit_is_trusted: the SVSM
+     * PAL, where it is the monitor's notice of an abandoned invoke) is not the
+     * host injecting a signal, so the key does not gate it. */
+    bool trusted = g_pal_public_state->quit_is_trusted;
+    if (!g_inject_host_signal_enabled && !trusted) {
         return;
     }
 
@@ -524,8 +528,15 @@ static void quit_upcall(bool is_in_pal, uintptr_t addr, PAL_CONTEXT* context) {
     static_assert(SAME_TYPE(g_host_injected_signal, sig), "types must match");
     if (!__atomic_compare_exchange_n(&g_host_injected_signal, &sig, SIGTERM,
                                      /*weak=*/false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-        /* We already have 1 injected signal, bail out. */
-        return;
+        /* One already pending: bail out. A host's injection is one-time (-1 once taken); a
+         * trusted QUIT is not - a vault that recovered from one abandoned invoke is told of
+         * the next too. */
+        if (!trusted || sig != -1
+                || !__atomic_compare_exchange_n(&g_host_injected_signal, &sig, SIGTERM,
+                                                /*weak=*/false, __ATOMIC_RELAXED,
+                                                __ATOMIC_RELAXED)) {
+            return;
+        }
     }
 
     /* "quit" signal may occur during LibOS thread initialization (at which point `cur == NULL`) */

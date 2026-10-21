@@ -51,6 +51,10 @@ static void pal_initilize_memory() {
    g_pal_public_state.memory_address_start = (void*)0x58000000000;
    g_pal_public_state.memory_address_end = (void*)0x80000000000;
    g_pal_public_state.initial_mem_ranges_len = 100;
+   /* The monitor is this PAL's only source of PAL_EVENT_QUIT: its notice
+    * that an invoke of this vault was abandoned (monitor signals.rs
+    * maybe_deliver_quit). There is no host signal path to gate. */
+   g_pal_public_state.quit_is_trusted = true;
 
 }
 
