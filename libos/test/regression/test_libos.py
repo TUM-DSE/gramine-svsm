@@ -1015,6 +1015,16 @@ class TC_30_Syscall(RegressionTestCase):
         stdout, _ = self.run_binary(['pthread_set_get_affinity', '1000'])
         self.assertIn('TEST OK', stdout)
 
+    def test_104_pthread_cancel_blocked(self):
+        # glibc >= 2.41 cancels only from inside its syscall sequence: restart_syscall() must
+        # rewind to the caller's syscall instruction(s) (libos_context.c).
+        stdout, _ = self.run_binary(['pthread_cancel_blocked'], timeout=60)
+        self.assertIn('read: cancelled', stdout)
+        self.assertIn('recv: cancelled', stdout)
+        self.assertIn('cond_wait: cancelled', stdout)
+        self.assertIn('sleep: cancelled', stdout)
+        self.assertIn('TEST OK', stdout)
+
     def test_103_gettimeofday(self):
         stdout, _ = self.run_binary(['gettimeofday'])
         self.assertIn('TEST OK', stdout)
