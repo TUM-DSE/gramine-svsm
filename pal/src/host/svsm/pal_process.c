@@ -25,6 +25,33 @@ int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
+/*
+ * What a refused fork tells the caller.
+ *
+ * TRYAGAIN (EAGAIN, which a shell reports as "fork: Resource temporarily
+ * unavailable" and Python raises as BlockingIOError) for a LIMIT: the
+ * process store, a parent's children, a lineage's region holders, the
+ * scheduler's service slots. Each is freed by a reap or an exit, so a later
+ * fork may get in - which is what POSIX's EAGAIN for fork means. A RESIDENT
+ * fork with no service slot left used to SUCCEED into a child the scheduler
+ * never ran, and its parent's waitpid polled for ever; the monitor now says
+ * SERVICE_FULL instead, and the hang is this error.
+ *
+ * DENIED (EACCES) for everything else, as for every refusal before the
+ * monitor gave a reason: UNSUPPORTED and BAD_STATE are about this process
+ * (it holds a device, it is being deleted) and a retry will not change them,
+ * and 0 is a monitor that did not say.
+ */
+static int fork_refused(int64_t status) {
+    switch (status) {
+        case PAL_SVSM_STATUS_NO_RESOURCES:
+        case PAL_SVSM_STATUS_SERVICE_FULL:
+            return -PAL_ERROR_TRYAGAIN;
+        default:
+            return -PAL_ERROR_DENIED;
+    }
+}
+
 int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint64_t self = 0;
     /* No other context may hold a LibOS lock at the instant the address
@@ -58,7 +85,8 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     pal_svsm_pipes_fork_prepare();
     uint64_t serial = 0;
     uint32_t name = 0;
-    uint64_t rc = pal_svsm_fork(fflags, &self, &serial, &name);
+    int64_t status = 0;
+    uint64_t rc = pal_svsm_fork(fflags, &self, &serial, &name, &status);
     pal_svsm_fork_done();
     /* UINT64_MAX is the one answer that is neither a parent nor a child.
      * It has to be checked here: a failed fork returns ONCE, and a caller
@@ -66,7 +94,8 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
      * does not exist. */
     if (rc == ~0ULL) {
         pal_svsm_pipes_fork_failed();   /* there is no child to hold them */
-        return -PAL_ERROR_DENIED;
+        log_debug("fork: refused by the monitor (status %ld)", status);
+        return fork_refused(status);
     }
     out->child  = rc;
     out->serial = serial;

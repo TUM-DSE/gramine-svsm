@@ -41,6 +41,7 @@
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
+#include "pal_svsm_chan.h"
 
 /* Same shape as the Linux PAL's: 64 KiB is enough for LibOS and PAL frames,
  * and an application thread runs on the stack its clone() named, not this
@@ -170,15 +171,16 @@ static bool any_watch_ready(void) {
 
 /*
  * The words that would make any blocked thread runnable, gathered for a
- * Park.
+ * Park or a Sleep - so at most PAL_SVSM_PARK_ARMS, and only the kinds those
+ * take (pal_chan_arm_parkable).
  *
  * The PAL's scheduler is the thing that actually gives the processor
  * back, but the thread that knows WHY it is waiting is the one that
  * blocked. So a blocking thread leaves its arms on its own handle and
  * this collects them. A thread that had more waitable channels than it
- * could arm sets `arms_partial`, and so does an overflow here, because
- * both mean the same thing downstream: a wake may be missed, so the
- * park needs a bounded fallback.
+ * could arm sets `arms_partial`, and so does an overflow here, and so does
+ * an arm left out for its kind, because all three mean the same thing
+ * downstream: a wake may be missed, so the park needs a bounded fallback.
  */
 static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
     size_t n = 0;
@@ -189,6 +191,10 @@ static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
             if (t->thread.arms_partial)
                 *partial = true;
             for (unsigned i = 0; i < t->thread.n_arms; i++) {
+                if (!pal_chan_arm_parkable(t->thread.arms[i])) {
+                    *partial = true;
+                    continue;
+                }
                 if (n == max) {
                     *partial = true;
                     break;
@@ -250,10 +256,15 @@ static void idle_until(uint64_t deadline_us) {
          * what makes the vault resident (see park_on). If the vault has
          * no service slot the monitor refuses, and then the Sleep and
          * the spin that were here before are still what happens. */
-        uint64_t arms[PAL_SVSM_THREAD_ARMS];
+        uint64_t arms[PAL_SVSM_PARK_ARMS];
         bool partial = false;
-        size_t n = gather_arms(arms, PAL_SVSM_THREAD_ARMS, &partial);
-        if (park_on(arms, n, left)) {
+        size_t n = gather_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
+        /* Partial: a word that was left out can move unseen, so the park is
+         * bounded the way the Sleep below is. Before the gather stopped at
+         * the monitor's three, a fourth arm got the whole park refused, and
+         * this bound was never needed here. */
+        if (park_on(arms, n, partial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US
+                                                                     : left)) {
             /* RETURN, do not loop. A park can end because a watched word
              * moved, and that is a state change the waiter has to see -
              * looping here would re-park until the deadline passed and
@@ -389,9 +400,9 @@ static PAL_HANDLE pick_next(void) {
              * but a thread waiting on a ring has something that can wake
              * it, and `epoll_wait(-1)` on a channel socket is the
              * ordinary shape of a server rather than a bug. */
-            uint64_t arms[PAL_SVSM_THREAD_ARMS];
+            uint64_t arms[PAL_SVSM_PARK_ARMS];
             bool partial = false;
-            size_t n = gather_arms(arms, PAL_SVSM_THREAD_ARMS, &partial);
+            size_t n = gather_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
             if (!n && !partial)
                 return NULL;
             if (park_on(arms, n, partial ? SVSM_PARK_PARTIAL_US

@@ -53,6 +53,9 @@
 /* Which of the peer's indices a park waits on. */
 #define PAL_CHAN_ARM_TAIL 0u
 #define PAL_CHAN_ARM_HEAD 1u
+/* A word in this vault's own device window, the low 28 bits its offset (the
+ * monitor's DEVICE_ARM, channel_calls.rs). */
+#define PAL_CHAN_ARM_DEVICE 0xFu
 
 struct pal_chan_ring {
     volatile unsigned char* base;
@@ -93,6 +96,18 @@ static inline unsigned long pal_chan_window_addr(unsigned long window) {
 static inline uint64_t pal_chan_arm(unsigned long window, unsigned which, uint32_t expected) {
     return ((uint64_t)expected << 32) | ((uint64_t)(which & 0xF) << 28)
            | (uint64_t)(window & 0x0FFFFFFF);
+}
+
+/* May this arm go to a Park or a Sleep? Only the three kinds above: other
+ * values of `which` are other words to the monitor (a lineage's own, a
+ * child's), which a monitor that knows them refuses there with BAD_ARGS - and
+ * one before them read any nonzero `which` as HEAD, watching a word nobody
+ * meant. A thread may still hold another kind; the gather leaves it out and
+ * calls the park partial. */
+static inline bool pal_chan_arm_parkable(uint64_t arm) {
+    unsigned which = (unsigned)(arm >> 28) & 0xF;
+    return which == PAL_CHAN_ARM_TAIL || which == PAL_CHAN_ARM_HEAD
+           || which == PAL_CHAN_ARM_DEVICE;
 }
 
 /* Side 0 is the requester, side 1 the target. */

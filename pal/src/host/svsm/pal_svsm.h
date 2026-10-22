@@ -287,9 +287,14 @@ bool   pal_svsm_pipesrv_pending(PAL_HANDLE handle);
  *
  * Only the ones this PAL acts on are named. The two post-admission refusals
  * matter because they are the ones an application can do something about;
- * every other failure it can only report. */
+ * every other failure it can only report. A fork's refusal is told apart the
+ * same way (pal_process.c): a limit a later fork may find room under is
+ * EAGAIN, anything else EACCES. */
 #define PAL_SVSM_STATUS_BAD_ID        (-2)
 #define PAL_SVSM_STATUS_BAD_STATE     (-3)
+#define PAL_SVSM_STATUS_BAD_ARGS      (-4)
+#define PAL_SVSM_STATUS_NO_RESOURCES  (-5)
+#define PAL_SVSM_STATUS_UNSUPPORTED   (-6)
 #define PAL_SVSM_STATUS_PEER_QUOTA    (-7)
 #define PAL_SVSM_STATUS_SERVICE_FULL  (-8)
 

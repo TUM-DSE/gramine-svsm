@@ -27,20 +27,16 @@
 #include "pal_svsm.h"
 #include "pal_monitor_call.h"
 #include "pal_svsm_chan.h"
+#include "pal_svsm_pipe_ring.h"
 
-#define PIPE_RING_SIZE   4096
 /* create_pollable_event connects and accepts back to back, so one is really
  * enough; the rest are slack for LibOS's own IPC pipes at startup. */
 #define PIPE_PENDING_MAX 8
 
-struct pal_svsm_pipe_ring {
-    size_t head;                    /* next byte to read */
-    size_t used;                    /* bytes in the ring */
-    char   data[PIPE_RING_SIZE];
-};
-
 struct pal_svsm_pipe_pair {
-    /* dir[s] is what side s wrote and side !s reads. */
+    /* dir[s] is what side s wrote and side !s reads: a ring each, with a lock
+     * per end, because an arena pair's ends can be held by processes running
+     * at the same time on different processors (pal_svsm_pipe_ring.h). */
     struct pal_svsm_pipe_ring dir[2];
     /* How many HANDLES hold each end, not whether one does.
      *
@@ -121,7 +117,13 @@ struct pal_svsm_pipe_pair {
  * would commit 8 MiB to say what fresh pages already say.
  */
 #define PIPE_ARENA_PAIRS 1024
-#define PIPE_ARENA_MAGIC 0x45504950534D564DULL   /* "MVMSPIPE" */
+/* "MVMSPIP2". The layout's version as much as a marker: a process of a PAL
+ * built before the ring had head/tail and per-end locks would read `tail` as
+ * the old `used` and write without a lock, so an arena laid out by one is not
+ * one the other may touch. Whoever finds the other's magic is told there is
+ * no arena (arena()) and keeps its pipes private, as a vault that never
+ * declared [svsm.pipes] does. It was "MVMSPIPE" (0x45504950534D564D). */
+#define PIPE_ARENA_MAGIC 0x32504950534D564DULL
 
 /*
  * Where two processes find each other by NAME.
@@ -223,6 +225,16 @@ struct pipe_arena {
     struct pipe_ledger ledger[PIPE_LEDGER_ROWS];
     struct pal_svsm_pipe_pair pair[PIPE_ARENA_PAIRS];
 };
+
+/* The most a lineage region holds: the monitor's clamp in lineage_fs
+ * (ipc/mod.rs), MAX_WINDOWS_PER_REGION (256) windows of IPC_WINDOW_SIZE
+ * (2 MiB) less its header page. A bigger arena would be clamped to a region
+ * arena() then refuses, and every pipe would quietly stop crossing a fork.
+ * Mirrored by hand, like the status codes in pal_svsm.h: change the monitor
+ * and change this. */
+#define PIPE_REGION_MAX_BYTES (256UL * (2UL << 20) - 4096UL)
+_Static_assert(sizeof(struct pipe_arena) <= PIPE_REGION_MAX_BYTES,
+               "the pipe arena no longer fits a lineage region");
 
 static struct pipe_arena* g_arena;
 
@@ -945,24 +957,54 @@ void pal_svsm_pipes_child_after_fork(uint64_t from_fork) {
     }
 }
 
-static size_t ring_write(struct pal_svsm_pipe_ring* r, const char* buf, size_t len) {
-    size_t space = PIPE_RING_SIZE - r->used;
-    if (len > space)
-        len = space;
-    for (size_t i = 0; i < len; i++)
-        r->data[(r->head + r->used + i) % PIPE_RING_SIZE] = buf[i];
-    r->used += len;
-    return len;
+/* The roster answers whether a lock's holder can still let go of it
+ * (pal_pipe_lock). */
+static bool ring_holder_alive(uint64_t serial, void* arg) {
+    __UNUSED(arg);
+    return member_alive(serial);
 }
 
-static size_t ring_read(struct pal_svsm_pipe_ring* r, char* buf, size_t len) {
-    if (len > r->used)
-        len = r->used;
-    for (size_t i = 0; i < len; i++)
-        buf[i] = r->data[(r->head + i) % PIPE_RING_SIZE];
-    r->head = (r->head + len) % PIPE_RING_SIZE;
-    r->used -= len;
-    return len;
+/*
+ * Take the lock of one end of `h`'s pair - `&ring->wlock` to write,
+ * `&ring->rlock` to read - and say whether it was got. `*out_self` is what to
+ * give back to ring_unlock.
+ *
+ * Only an ARENA pair has anyone to share an end with. A heap pair is this
+ * process's alone, its threads take turns on one processor, and none of them
+ * leaves PAL text inside a copy (nothing between the lock and the unlock
+ * blocks), so it is not locked - and it could not be by serial anyway: a
+ * process that holds no region may have no directory to read one from.
+ *
+ * A pair this process never shared is locked all the same: it costs one
+ * uncontended CAS, and asking whether it is shared yet would be a race with
+ * the fork that shares it.
+ */
+static bool ring_lock(PAL_HANDLE h, uint64_t* lock, uint64_t* out_self) {
+    *out_self = 0;
+    if (!from_arena(h->pipe.pair))
+        return true;
+    uint64_t self = self_serial();
+    uint64_t from = 0;
+    enum pal_pipe_lock_result r = pal_pipe_lock(lock, self, ring_holder_alive, NULL, &from);
+    if (r == PAL_PIPE_LOCK_BUSY)
+        return false;
+    if (r == PAL_PIPE_LOCK_STOLEN)
+        log_warning("pipe: took over pair %ld's %s lock from member %lu, which the monitor "
+                    "no longer lists", (long)(h->pipe.pair - &g_arena->pair[0]),
+                    lock == &h->pipe.pair->dir[h->pipe.side].wlock ? "write" : "read", from);
+    *out_self = self;
+    return true;
+}
+
+static void ring_unlock(PAL_HANDLE h, uint64_t* lock, uint64_t self) {
+    if (!from_arena(h->pipe.pair))
+        return;
+    /* Taken over while this process was inside a copy: the monitor dropped
+     * a process that was running, which the steal rests on never happening.
+     * Said, because the stream may now be wrong and nothing else would. */
+    if (!pal_pipe_unlock(lock, self))
+        log_error("pipe: pair %ld's lock was taken over from this process while it held it",
+                  (long)(h->pipe.pair - &g_arena->pair[0]));
 }
 
 /* The ring this handle reads from, and the one it writes to. */
@@ -977,7 +1019,7 @@ size_t pal_svsm_pipe_readable(PAL_HANDLE handle) {
     /* Released is as good as detached: the pair may be someone else's now. */
     if (!handle->pipe.pair || handle->pipe.released)
         return 0;
-    return in_ring(handle)->used;
+    return pal_pipe_ring_used(in_ring(handle));
 }
 
 static bool pipe_write_refused(PAL_HANDLE handle, bool sweep);
@@ -989,7 +1031,7 @@ bool pal_svsm_pipe_writable(PAL_HANDLE handle) {
     if (!handle->pipe.pair || handle->pipe.released)
         return handle->pipe.released;
     /* Likewise an end whose write would be refused (no reader, or shut). */
-    return out_ring(handle)->used < PIPE_RING_SIZE || pipe_write_refused(handle, false);
+    return pal_pipe_ring_room(out_ring(handle)) || pipe_write_refused(handle, false);
 }
 
 /* The far end has no holder left - or, on a shared pipe, has none once the
@@ -1313,6 +1355,38 @@ static const uint64_t* shared_poll_deadline(PAL_HANDLE handle, uint64_t* store) 
     return store;
 }
 
+/*
+ * Wait for `r` to move: for bytes when `reading`, for room otherwise. Counted
+ * in the ring's waiters for that direction, and the ring tested AGAIN after
+ * the count is up (pal_pipe_wait_begin) - so a writer in another process that
+ * publishes and then looks at the count either is seen here or sees this
+ * waiter. Nothing looks yet; the cross-process wake that will is a monitor
+ * call this PAL does not make yet, and until it does a shared pair's wait is
+ * bounded by shared_poll_deadline.
+ *
+ * `busy`: the end's lock was held by a member that is still listed. That is a
+ * wait for a holder, possibly in another process, so it is bounded whatever
+ * the pair - a private one included, where it can only mean the holder was
+ * this process and something is badly wrong.
+ */
+static enum pal_svsm_wait_result ring_wait(PAL_HANDLE handle, struct pal_svsm_pipe_ring* r,
+                                           bool reading, bool busy) {
+    uint64_t dl;
+    const uint64_t* dlp = shared_poll_deadline(handle, &dl);
+    if (busy && !dlp) {
+        dl  = pal_svsm_now_usec() + PAL_SVSM_SHARED_PIPE_POLL_US;
+        dlp = &dl;
+    }
+    uint32_t* waiters = reading ? &r->rwait : &r->wwait;
+    pal_pipe_wait_begin(waiters);
+    bool ready = reading ? pal_pipe_ring_used(r) != 0 : pal_pipe_ring_room(r) != 0;
+    enum pal_svsm_wait_result wr = PAL_SVSM_WAIT_WOKEN;
+    if (busy || !ready)
+        wr = pal_svsm_poll_block(dlp);
+    pal_pipe_wait_end(waiters);
+    return wr;
+}
+
 static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void* buffer) {
     __UNUSED(offset);
     if (handle->hdr.type != PAL_TYPE_PIPE)
@@ -1322,24 +1396,42 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
     if (!len)
         return 0;
 
-    while (in_ring(handle)->used == 0) {
-        if (pal_svsm_pipe_peer_gone(handle))
-            return 0;   /* end of stream */
+    struct pal_svsm_pipe_ring* r = in_ring(handle);
+    while (1) {
+        bool busy = false;
+        if (pal_pipe_ring_used(r)) {
+            uint64_t self;
+            if (ring_lock(handle, &r->rlock, &self)) {
+                size_t n = pal_pipe_ring_read(r, buffer, len);
+                ring_unlock(handle, &r->rlock, self);
+                if (n) {
+                    /* Space freed: a writer that filled the ring may now
+                     * proceed. */
+                    pal_svsm_poll_wake();
+                    return (int64_t)n;
+                }
+                /* Another reader of this end - a process that holds it too -
+                 * took them first. Nothing to read after all. */
+            } else {
+                busy = true;
+            }
+        } else if (pal_svsm_pipe_peer_gone(handle)) {
+            /* End of stream only if the ring is STILL empty. A writer
+             * publishes its last bytes before its close gives up its hold, so
+             * once the count says gone a second look sees everything it
+             * wrote - and the first look, taken before the count, may have
+             * been before the last write. */
+            if (!pal_pipe_ring_used(r))
+                return 0;
+            continue;
+        }
         if (handle->pipe.nonblocking)
             return -PAL_ERROR_TRYAGAIN;
-        uint64_t dl;
-        enum pal_svsm_wait_result wr =
-            pal_svsm_poll_block(shared_poll_deadline(handle, &dl));
-        if (wr == PAL_SVSM_WAIT_INTERRUPTED)
+        if (ring_wait(handle, r, /*reading=*/true, busy) == PAL_SVSM_WAIT_INTERRUPTED)
             return -PAL_ERROR_INTERRUPTED;
         /* A timeout is not an answer, it is permission to look again: the
          * loop re-tests the ring and the holder count. */
     }
-
-    size_t n = ring_read(in_ring(handle), buffer, len);
-    /* Space freed: a writer that filled the ring may now proceed. */
-    pal_svsm_poll_wake();
-    return (int64_t)n;
 }
 
 static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, const void* buffer) {
@@ -1359,25 +1451,35 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
      * check refused with EPIPE. */
     if (pipe_write_refused(handle, /*sweep=*/false))
         return -PAL_ERROR_CONNFAILED_PIPE;
-    while (out_ring(handle)->used == PIPE_RING_SIZE) {
+    struct pal_svsm_pipe_ring* r = out_ring(handle);
+    while (1) {
+        bool busy = false;
+        if (pal_pipe_ring_room(r)) {
+            uint64_t self;
+            if (ring_lock(handle, &r->wlock, &self)) {
+                size_t n = pal_pipe_ring_write(r, buffer, len);
+                ring_unlock(handle, &r->wlock, self);
+                if (n) {
+                    /* This is what makes a pollable event pollable: whoever
+                     * is parked in _PalStreamsWaitEvents has to be told there
+                     * is something to see. */
+                    pal_svsm_poll_wake();
+                    return (int64_t)n;
+                }
+                /* Another writer of this end filled it first. */
+            } else {
+                busy = true;
+            }
+        }
         if (pipe_write_refused(handle, /*sweep=*/true))
             return -PAL_ERROR_CONNFAILED_PIPE;   /* EPIPE, and the LibOS sends SIGPIPE */
         if (handle->pipe.nonblocking)
             return -PAL_ERROR_TRYAGAIN;
-        uint64_t dl;
-        enum pal_svsm_wait_result wr =
-            pal_svsm_poll_block(shared_poll_deadline(handle, &dl));
-        if (wr == PAL_SVSM_WAIT_INTERRUPTED)
-            return -PAL_ERROR_INTERRUPTED;
         /* Same as the read side: a writer blocked on a full ring is waiting
          * for a reader that may be in another process. */
+        if (ring_wait(handle, r, /*reading=*/false, busy) == PAL_SVSM_WAIT_INTERRUPTED)
+            return -PAL_ERROR_INTERRUPTED;
     }
-
-    size_t n = ring_write(out_ring(handle), buffer, len);
-    /* This is what makes a pollable event pollable: whoever is parked in
-     * _PalStreamsWaitEvents has to be told there is something to see. */
-    pal_svsm_poll_wake();
-    return (int64_t)n;
 }
 
 static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {

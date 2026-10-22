@@ -59,6 +59,9 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
 /* bit 1: the fork went ahead with lock holds of other threads it could not
  * wait out (pal_events.c) - the monitor counts it, GetStat FORK_FOREIGN_HOLDS. */
 #define PAL_SVSM_FORK_FOREIGN_HOLDS 2UL
+/* bit 2 is the monitor's LINEAGE (a child run on its root's own processor),
+ * reserved: this PAL never sends it. A monitor that knows it answers bit 2
+ * alone UNSUPPORTED and bits 0 and 2 together BAD_ARGS. */
 /* `out_self` receives the CHILD's own id, and is 0 in the parent. The child
  * cannot learn it any other way: rcx must be 0 to say which side it is, so
  * the id travels in the register the flags came in on.
@@ -66,9 +69,15 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
  * `out_serial` receives the CHILD's serial on both sides - its own in the
  * child, its child's in the parent (0 if the fork failed). The parent needs
  * it to say whose record of shared-pipe holds it filled for the child
- * (pal_pipes.c, the ledger). */
+ * (pal_pipes.c, the ledger).
+ *
+ * `out_status` receives, when the fork failed, the monitor's reason: a
+ * PAL_SVSM_STATUS_* (pal_svsm.h) - NO_RESOURCES or SERVICE_FULL for a limit
+ * that a later fork may find room under, UNSUPPORTED, BAD_STATE or BAD_ARGS
+ * for one it will not - or 0 from a monitor that gives no reason. 0 when the
+ * fork did not fail. */
 uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
-                       uint32_t* out_name);
+                       uint32_t* out_name, int64_t* out_status);
 
 /* Wait (0x4FFFFFD5): how did my child end?
  *

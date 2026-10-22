@@ -16,11 +16,18 @@ struct pal_svsm_pipe_pair;
 #endif
 
 /* How many ring words one blocked thread may ask the monitor to watch.
- * The monitor's budget is `queue::PARK_ARMS` (3 today); this is the
- * PAL-side array and the gather in pick_next() clamps to whatever the
- * Park call accepts, so raising one does not require raising the other
- * in the same commit. */
+ * This is the PAL-side array; what one Park or Sleep may carry is
+ * PAL_SVSM_PARK_ARMS below, and the gather in pal_threading.c clamps to it,
+ * so raising one does not require raising the other in the same commit. */
 #define PAL_SVSM_THREAD_ARMS 4
+/* What one Park or Sleep may carry: the monitor's `queue::PARK_ARMS` (a
+ * scheduler slot watches 4 words and the first is its device watch). One
+ * more is refused whole with BAD_ARGS - and that refusal looks like every
+ * other one here, so a service vault whose threads had 4 arms between them
+ * was never parked at all: it fell back to a Sleep the monitor refused for
+ * the same reason, and spun. The gather now stops at 3 and says `partial`,
+ * which costs a bounded park instead (SVSM_PARK_PARTIAL_US). */
+#define PAL_SVSM_PARK_ARMS 3
 
 /* How many DATA frames one socket on a SHARED channel may have in flight, and
  * so how deep its inbound queue is. Must equal MVMUX_CREDIT_CAP in the

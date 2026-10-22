@@ -168,7 +168,8 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
 }
 
 /* Fork (0x4FFFFFE4): rbx = flags -> rcx = the child's id in the parent, 0 in
- * the child, UINT64_MAX on failure; rdx = the parent's serial.
+ * the child, UINT64_MAX on failure; rdx = the parent's serial, or on failure
+ * the monitor's status for it (0 from a monitor that did not say).
  *
  * Both sides return from the SAME call, which is the whole of why this is
  * fork and not spawn: the child is the parent's address space at the
@@ -176,17 +177,22 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
  * - which is exactly what gramine's own fork (checkpoint over a stream)
  * exists to work around on a PAL that cannot copy an address space. */
 uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
-                       uint32_t* out_name) {
+                       uint32_t* out_name, int64_t* out_status) {
     struct monitor_call_data data;
     data.rax = 0x4FFFFFE4;
     data.rbx = flags;
     data.rcx = 0;
+    /* 0 going in is what makes rdx readable coming out: a monitor before the
+     * failure status leaves rdx alone when it refuses, and every status it
+     * could mean is negative. */
     data.rdx = 0;
     data.r8  = 0;
     data.r9  = 0;
     /* Extended: r8 comes back - the CHILD's name in its lineage, on both
      * sides (lineage-vmid). A monitor before it leaves r8 as it was, 0. */
     extended_monitor_call(&data);
+    if (out_status)
+        *out_status = data.rcx == ~0ULL ? (int64_t)data.rdx : 0;
     bool child = data.rcx == 0;
     if (out_self)
         *out_self = child ? data.rbx : 0;           /* the child's own id */
