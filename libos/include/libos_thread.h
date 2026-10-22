@@ -354,3 +354,7 @@ void wait_after_cow_fork(void);
 void host_reap_hold(void);
 void host_reap_release(void);
 void release_clear_child_tid(int* clear_child_tid);
+/* thread_wait for a wait that only a signal ends (sigsuspend, pause, sigtimedwait): while this
+ * process has children the host reaps, waits at most 10 ms at a time and reaps them in between,
+ * so their SIGCHLD is posted (libos_wait.c). Otherwise exactly thread_wait. */
+int thread_wait_reaping(uint64_t* timeout_us, bool ignore_pending_signals);

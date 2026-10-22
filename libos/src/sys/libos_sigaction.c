@@ -188,7 +188,7 @@ long libos_syscall_rt_sigsuspend(const __sigset_t* mask_ptr, size_t setsize) {
 
     thread_prepare_wait();
     while (!have_pending_signals()) {
-        ret = thread_wait(/*timeout_us=*/NULL, /*ignore_pending_signals=*/false);
+        ret = thread_wait_reaping(/*timeout_us=*/NULL, /*ignore_pending_signals=*/false);
         if (ret < 0 && ret != -EINTR) {
             return ret;
         }
@@ -242,8 +242,8 @@ long libos_syscall_rt_sigtimedwait(const __sigset_t* unblocked_ptr, siginfo_t* i
 
     thread_prepare_wait();
     while (!have_pending_signals()) {
-        thread_wait_res = thread_wait(timeout ? &timeout_us : NULL,
-                                      /*ignore_pending_signals=*/false);
+        thread_wait_res = thread_wait_reaping(timeout ? &timeout_us : NULL,
+                                              /*ignore_pending_signals=*/false);
         if (thread_wait_res == -ETIMEDOUT) {
             break;
         }
