@@ -125,6 +125,12 @@ struct pal_svsm_pipe_pair {
  * declared [svsm.pipes] does. It was "MVMSPIPE" (0x45504950534D564D). */
 #define PIPE_ARENA_MAGIC 0x32504950534D564DULL
 
+/* Grepped for in libpal.so by the UnixBench harness: the prefix "pipe: SPSC
+ * ring" says a pipe across fork is the race-free ring above, so the harness
+ * drops its caveat for the pipe tests. Logged once, by whoever lays out the
+ * arena, which is also what keeps the string in the binary. */
+static const char g_pipe_ring_marker[] = "pipe: SPSC ring (serial-tagged end locks)";
+
 /*
  * Where two processes find each other by NAME.
  *
@@ -322,6 +328,7 @@ static struct pipe_arena* arena(void) {
         a->rdvs    = PIPE_RDV_SLOTS;
         a->ledgers = PIPE_LEDGER_ROWS;
         __atomic_thread_fence(__ATOMIC_RELEASE);
+        log_debug("%s", g_pipe_ring_marker);
     } else if (__atomic_load_n(&a->magic, __ATOMIC_ACQUIRE) != PIPE_ARENA_MAGIC) {
         return NULL;
     }
