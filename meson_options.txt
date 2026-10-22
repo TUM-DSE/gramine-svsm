@@ -13,6 +13,8 @@ option('svsm_call_insn', type: 'combo', choices: ['vmmcall', 'cpuid'],
 
 option('libc', type: 'combo', choices: ['none', 'glibc', 'musl'],
     value: 'glibc', description: 'Choose (patched) libc that is to be built into runtime directory')
+option('glibc_version', type: 'combo', choices: ['2.40', '2.44'], value: '2.40',
+    description: 'The glibc built into the runtime directory (libc=glibc): subprojects/glibc-<v>-1. 2.44 also builds the LibOS syscall-restart rewind glibc >= 2.41 needs to cancel a blocked thread')
 
 option('tests', type: 'combo', choices: ['disabled', 'enabled'],
     description: 'Build test binaries')
