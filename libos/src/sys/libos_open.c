@@ -683,3 +683,27 @@ out:
     put_handle(handle);
     return ret;
 }
+
+/*
+ * sync(2) and syncfs(2). Appended at the end of this file so that no log_*()
+ * line above moves (they carry __LINE__, and libsysdb.so is measured).
+ *
+ * Every filesystem a vault writes to lives in memory (the LibOS tmpfs and the
+ * lineage's vaultfs), so there is nothing to write back: success is the true
+ * answer, as Linux gives it for a tmpfs. Before this both were NULL in
+ * libos_table.c and answered -ENOSYS. glibc's sync() returns void, so a C
+ * caller never saw that (UnixBench's fstime), but a raw syscall or syncfs()
+ * (coreutils' `sync -f`) reported a failure the vault does not have. syncfs
+ * still validates its descriptor (EBADF), as Linux does.
+ */
+long libos_syscall_sync(void) {
+    return 0;
+}
+
+long libos_syscall_syncfs(int fd) {
+    struct libos_handle* hdl = get_fd_handle(fd, NULL, NULL);
+    if (!hdl)
+        return -EBADF;
+    put_handle(hdl);
+    return 0;
+}

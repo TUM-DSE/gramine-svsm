@@ -207,3 +207,6 @@ long libos_syscall_getrandom(char* buf, size_t count, unsigned int flags);
 long libos_syscall_mlock2(unsigned long start, size_t len, int flags);
 long libos_syscall_sysinfo(struct sysinfo* info);
 long libos_syscall_close_range(unsigned int first, unsigned int last, unsigned int flags);
+/* Appended (not next to fsync) so no line of this header moves. */
+long libos_syscall_sync(void);
+long libos_syscall_syncfs(int fd);
