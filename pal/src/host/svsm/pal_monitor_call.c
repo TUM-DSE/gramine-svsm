@@ -611,3 +611,39 @@ int pal_svsm_guest_request(pal_svsm_guest_request_type_t type, void *arg, size_t
     monitor_call(&data);
     return data.rcx;
 }
+
+
+/* ConsoleDeclare (0x4FFFFFD9): rbx = 1 to send this lineage's console to
+ * the monitor console ([svsm] console = "monitor"), 0 not to. Made once, in
+ * the zygote; the monitor seals the first answer. -> rcx = 0 accepted. */
+int pal_svsm_console_declare(uint64_t monitor) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFD9;
+    data.rbx = monitor;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return data.rcx == 0 ? 0 : -1;
+}
+
+/* ConsoleWrite (0x4FFFFFD8): up to 32 bytes a call, packed little-endian
+ * into rbx, rdx, r8, r9, rcx = how many; a newline ends a line. Answered
+ * only for a lineage that declared "monitor". */
+void pal_svsm_console_write(const void* buf, size_t size) {
+    const uint8_t* p = buf;
+    while (size) {
+        size_t n = size < 32 ? size : 32;
+        uint64_t w[4] = { 0, 0, 0, 0 };
+        memcpy(w, p, n);
+        struct monitor_call_data data;
+        data.rax = 0x4FFFFFD8;
+        data.rbx = w[0];
+        data.rcx = n;
+        data.rdx = w[1];
+        data.r8  = w[2];
+        data.r9  = w[3];
+        extended_monitor_call(&data);
+        p += n;
+        size -= n;
+    }
+}

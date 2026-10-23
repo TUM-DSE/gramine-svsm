@@ -54,7 +54,7 @@ static int64_t console_write(PAL_HANDLE handle, uint64_t offset, uint64_t size, 
     if (!(handle->flags & PAL_HANDLE_FD_WRITABLE))
         return -PAL_ERROR_DENIED;
 
-    // NOTE: we need to set log level to debug to see the output
+    if (g_pal_svsm_console_monitor) { pal_svsm_console_write(buffer, size); return size; }
     log_debug("[PAL] [Console Output]: %.*s", (int)size, (const char*)buffer);
     int ret = size; // fixme: assume all bytes are written
     return ret;
@@ -82,3 +82,12 @@ struct handle_ops g_console_ops = {
     .destroy        = &console_destroy,
     .flush          = &console_flush,
 };
+
+
+/* [svsm] console = "monitor" (docs/vault-console.md): set by pal_main.c from
+ * the measured manifest and declared to the monitor there. When set, the
+ * console's bytes go to the monitor console by ConsoleWrite, where the
+ * monitor prefixes, escapes and rate-limits them; when not, console_write
+ * logs them at debug level exactly as before (the NOTE that line replaced:
+ * log level debug is needed to see them). */
+bool g_pal_svsm_console_monitor = false;

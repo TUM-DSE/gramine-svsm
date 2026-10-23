@@ -39,6 +39,8 @@ typedef struct pal_svsm_tcb {
 } PAL_SVSM_TCB;
 
 extern bool g_pal_svsm_fork_report;
+extern bool g_pal_svsm_console_monitor;   /* [svsm] console = "monitor" */
+void pal_svsm_console_write(const void* buf, size_t size);   /* pal_monitor_call.c */
 void pal_svsm_threads_report_holds(int64_t foreign);
 
 static inline PAL_SVSM_TCB* pal_get_svsm_tcb(void) {

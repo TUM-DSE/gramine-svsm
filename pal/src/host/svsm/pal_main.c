@@ -424,6 +424,40 @@ noreturn void pal_svsm_main(void)
         if (avx512_on)
             pal_svsm_xstate_refresh();
     }
+    /* svsm.console: where this vault's console goes (docs/vault-console.md).
+     *
+     *   [svsm]
+     *   console = "monitor"      # or "none", the default
+     *
+     * The monitor console is host-readable, so a vault's stdout reaches it
+     * only when its measured manifest says so - then prefixed with the
+     * vault's id, escaped and rate-limited by the monitor, whatever
+     * log_level is. Declared ALWAYS, once, in the zygote, as svsm.avx512
+     * is: the monitor takes the first answer as the decision. Anything but
+     * "none" or "monitor" - another word, a number, a table - fails the
+     * vault rather than mean either. */
+    {
+        uint64_t console = 0;
+        char* console_v = NULL;
+        if (manifest_svsm_early && (toml_table_in(manifest_svsm_early, "console")
+                                    || toml_array_in(manifest_svsm_early, "console")))
+            pal_svsm_fail("svsm.console is not a string", 0);
+        if (manifest_svsm_early && toml_string_in(manifest_svsm_early, "console", &console_v) < 0)
+            pal_svsm_fail("svsm.console is not a string", 0);
+        if (console_v) {
+            bool is_none = !strcmp(console_v, "none");
+            bool is_monitor = !strcmp(console_v, "monitor");
+            free(console_v);
+            if (!is_none && !is_monitor)
+                pal_svsm_fail("svsm.console must be \"none\" or \"monitor\"", 0);
+            console = is_monitor ? 1 : 0;
+        }
+        if (pal_svsm_console_declare(console) < 0 && console)
+            pal_svsm_fail("svsm.console: the monitor refused the declaration", 0);
+        g_pal_svsm_console_monitor = console == 1;
+    }
+    /* end of svsm.console */
+#line 427
 
     /* What the APPS on this base image may claim in their own frames -
      * the delegate envelope (PLAN.md phase 2). One base zygote serves
