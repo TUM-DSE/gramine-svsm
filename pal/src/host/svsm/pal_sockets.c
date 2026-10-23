@@ -1922,8 +1922,20 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
              * of stream" to report, so this is an error rather than a 0. */
             return -PAL_ERROR_CONNFAILED;
         }
-        if (nonblock)
+        /* AN OWED CREDIT GOES OUT before a non-blocking reader is told
+         * there is nothing: nothing will come until it does. A credit is
+         * owed when the outbound ring was full as it fell due; the blocking
+         * waits below send it (mux_credit_settle) and so does poll's
+         * readable test, but a reader that spins on MSG_DONTWAIT without
+         * poll (nbench's udp_down/udp_rr/tcp_rr loops) never got there, and
+         * the service - which sends only within the window - stopped for
+         * good. */
+        if (nonblock) {
+            if (mux_credit_owed(handle))
+                mux_credit_maybe(handle);
             return -PAL_ERROR_TRYAGAIN;
+        }
+#line 1927
 
         /* Somebody else's frame at the head: wait at once, as the stream
          * path does (_PalSocketRecv) - the ring is readable and will stay so
@@ -2368,10 +2380,21 @@ mux_blocked:
             ret = 0;
             break;
         }
+        /* AN OWED CREDIT GOES OUT before a non-blocking reader is told
+         * there is nothing: nothing will come until it does. A credit is
+         * owed when the outbound ring was full as it fell due; the blocking
+         * waits below send it (mux_credit_settle) and so does poll's
+         * readable test, but a reader that spins on MSG_DONTWAIT without
+         * poll (nbench's udp_down/udp_rr/tcp_rr loops) never got there, and
+         * the service - which sends only within the window - stopped for
+         * good. */
         if (nonblock) {
+            if (mux_credit_owed(handle))
+                mux_credit_maybe(handle);
             ret = -PAL_ERROR_TRYAGAIN;
             break;
         }
+#line 2358
 
         /* A head that is somebody else's - their handshake reply, or a frame
          * with no pool buffer to go to - is a ring that IS readable and has
