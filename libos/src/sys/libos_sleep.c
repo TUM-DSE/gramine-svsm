@@ -16,7 +16,7 @@
 long libos_syscall_pause(void) {
     thread_prepare_wait();
     while (!have_pending_signals()) {
-        int ret = thread_wait(/*timeout_us=*/NULL, /*ignore_pending_signals=*/false);
+        int ret = thread_wait_reaping(/*timeout_us=*/NULL, /*ignore_pending_signals=*/false);
         __UNUSED(ret);
         assert(ret == 0 || ret == -EINTR);
     }

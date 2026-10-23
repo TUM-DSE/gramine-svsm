@@ -422,3 +422,106 @@ long libos_syscall_wait4(pid_t pid, int* status, int options, struct __kernel_ru
     }
     return info.si_pid;
 }
+
+/*
+ * SIGCHLD for a host-reaped child, for a thread that waits for it as a
+ * signal rather than in wait(): dash's `wait` with a live background job does
+ * wait4(-1, WNOHANG) and then rt_sigsuspend, and pause() and sigwaitinfo()
+ * are the same shape.
+ *
+ * Such a child's SIGCHLD is posted by `mark_child_exited`, which for a child
+ * the host reaps runs only from `reap_host_children` - in do_waitid's loop and
+ * in fork. Nothing reaps while a thread sits in sigsuspend, so the signal it
+ * is waiting for is never posted; and the wait has no deadline, so with every
+ * other thread blocked the PAL's scheduler has nothing to run and nothing to
+ * wake for, and ends the vault as deadlocked - which its parent then reaps as
+ * SIGKILL (UnixBench shell1, "Bad wait status: 0x9").
+ *
+ * So the same bounded wait as do_waitid: while this process has children the
+ * host reaps, never more than 10 ms at a time, with a reap after each slice
+ * that runs out. A caller's own deadline is kept - the slices are cut from
+ * it, and what is left of it is written back as thread_wait does. With no
+ * such child it is thread_wait, unchanged.
+ *
+ * A poll, not a wake, and an interim one: the host's wait is non-blocking by
+ * design (see reap_host_children), so a reap is the only way to learn of the
+ * exit. The reentrancy guard is reap_host_children's own: a thread that finds
+ * another reaping lets it, and looks again on its next slice.
+ *
+ * Each slice is charged to the caller's deadline as the time it really took -
+ * the wait and the reap after it, which is a host call per child - so a long
+ * sigtimedwait ends when it would have, not later by the reaps.
+ *
+ * Known gap, left for the real wake (M3): mark_child_exited queues SIGCHLD
+ * whatever its disposition, and have_pending_signals looks only at the mask.
+ * So with SIGCHLD at SIG_DFL or SIG_IGN and unblocked, a reap here can end a
+ * sigsuspend, or a sigtimedwait for other signals, with -EINTR where Linux
+ * would have dropped the signal and kept waiting (pause restarts, so it is
+ * unaffected). IPC children, and a reap in another thread's wait(), already
+ * do this; the fix belongs where SIGCHLD is posted (cf. Linux sig_ignored).
+ */
+#define HOST_REAP_POLL_US 10000
+
+/* Grepped for in libsysdb.so by the UnixBench harness: the prefix "signal: SIGCHLD on host reap"
+ * says this build posts SIGCHLD for host-reaped children to a waiter in sigsuspend. */
+static const char g_sigchld_host_reap_marker[] = "signal: SIGCHLD on host reap (10 ms poll)";
+
+static bool have_host_children(void) {
+    /* A process that has never forked (or whose children are all gone) has an empty list: say
+     * so without the lock, so its waits are thread_wait and nothing more. A child added after
+     * this load is seen on the next call - the same as one added after the unlock below. */
+    if (!__atomic_load_n(&g_process.children.first, __ATOMIC_ACQUIRE))
+        return false;
+
+    bool any = false;
+    lock(&g_process.children_lock);
+    struct libos_child_process* child;
+    LISTP_FOR_EACH_ENTRY(child, &g_process.children, list) {
+        if (child->by_host) {
+            any = true;
+            break;
+        }
+    }
+    unlock(&g_process.children_lock);
+    return any;
+}
+
+int thread_wait_reaping(uint64_t* timeout_us, bool ignore_pending_signals) {
+    if (!have_host_children())
+        return thread_wait(timeout_us, ignore_pending_signals);
+
+    static bool said = false;
+    if (!__atomic_exchange_n(&said, true, __ATOMIC_RELAXED))
+        log_debug("%s", g_sigchld_host_reap_marker);
+
+    int ret;
+    if (timeout_us && *timeout_us <= HOST_REAP_POLL_US) {
+        /* The caller's deadline comes first: one wait to it, and a reap if it ran out, so a
+         * SIGCHLD already due is there for the caller to find. */
+        ret = thread_wait(timeout_us, ignore_pending_signals);
+        if (ret == -ETIMEDOUT)
+            reap_host_children();
+        return ret;
+    }
+
+    uint64_t start_us = 0;
+    bool timed = timeout_us && PalSystemTimeQuery(&start_us) == 0;
+
+    uint64_t slice_us = HOST_REAP_POLL_US;
+    ret = thread_wait(&slice_us, ignore_pending_signals);
+    uint64_t spent_us = HOST_REAP_POLL_US - slice_us;   /* in the wait alone */
+    if (ret == -ETIMEDOUT) {
+        reap_host_children();
+        ret = 0;                                        /* the caller looks, and comes back */
+    }
+
+    if (timeout_us) {
+        uint64_t end_us;
+        if (timed && PalSystemTimeQuery(&end_us) == 0 && end_us > start_us)
+            spent_us = end_us - start_us;               /* the wait and the reap */
+        /* What is left, never 0: a deadline that ran out here still ends in the short path
+         * above, with its -ETIMEDOUT (and a last reap). */
+        *timeout_us = spent_us < *timeout_us ? *timeout_us - spent_us : 1;
+    }
+    return ret;
+}
