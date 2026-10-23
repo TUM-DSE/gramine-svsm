@@ -86,13 +86,20 @@ void pal_svsm_net_ctr_report(void) {
                                              __ATOMIC_RELAXED);
     c.fin_lost      = __atomic_load_n(&g_pal_svsm_net_ctr.fin_lost, __ATOMIC_RELAXED);
     c.fin_resent    = __atomic_load_n(&g_pal_svsm_net_ctr.fin_resent, __ATOMIC_RELAXED);
+    c.dgrams        = __atomic_load_n(&g_pal_svsm_net_ctr.dgrams, __ATOMIC_RELAXED);
+    c.dgram_frames  = __atomic_load_n(&g_pal_svsm_net_ctr.dgram_frames, __ATOMIC_RELAXED);
+    c.udp_q_drop    = __atomic_load_n(&g_pal_svsm_net_ctr.udp_q_drop, __ATOMIC_RELAXED);
+#line 89
     if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready
-          | c.credit_lost | c.fin_lost))
+          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop))
         return;
     log_always("pal_net: sends %lu eagain_credit %lu eagain_ring %lu idle_rounds %lu "
                "pollers_ready %lu credit_lost %lu credits_owed_retried %lu fin_lost %lu "
-               "fin_resent %lu", c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
-               c.pollers_ready, c.credit_lost, c.credits_owed_retried, c.fin_lost, c.fin_resent);
+               "fin_resent %lu dgrams %lu dgram_frames %lu udp_q_drop %lu",
+               c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
+               c.pollers_ready, c.credit_lost, c.credits_owed_retried, c.fin_lost, c.fin_resent,
+               c.dgrams, c.dgram_frames, c.udp_q_drop);
+#line 96
 }
 
 /* A forked child has the parent's counts in its copy of this page; start
@@ -125,6 +132,12 @@ void pal_svsm_net_ctr_reset(void) {
 #define PAL_MVMUX_OP_RST      3
 #define PAL_MVMUX_OP_CREDIT   4
 #define PAL_MVMUX_FIN_HALF    0x01  /* FIN's flags: shutdown(SHUT_WR), still reading */
+/* DATA's flags on a datagram socket that asked for PAL_MVNET_REQ_DGRAM_BATCH:
+ * the body is [pal_mvnet_dgram][payload] records back to back, none split.
+ * The frame is ONE frame for credit; udp_recv returns one record per call and
+ * counts the frame done after its last. */
+#define PAL_MVMUX_DATA_DGRAMS 0x02
+#line 128
 #define PAL_MVMUX_HDR_BYTES   8
 
 /* Does a second socket SHARE the vault's channel, or get one of its own?
@@ -164,6 +177,13 @@ static inline uint64_t mux_room(uint64_t slot, bool muxed) {
 #define PAL_MVNET_OP_CONNECT 1
 #define PAL_MVNET_PROTO_TCP  6
 #define PAL_MVNET_PROTO_UDP  17
+/* The request's flags. DGRAM_BATCH: this PAL reads PAL_MVMUX_DATA_DGRAMS
+ * frames, so the service may pack several datagrams into one. A service that
+ * predates it ignores it (it never checked flags) and sends one a frame. Why
+ * it matters: each frame is a channel send and a Notify monitor call in the
+ * service, and one datagram a frame held a host flood to ~61k datagrams/s. */
+#define PAL_MVNET_REQ_DGRAM_BATCH 0x1u
+#line 167
 
 struct pal_mvnet_req {
     uint32_t magic;
@@ -927,7 +947,19 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
              * than lied to. Unreachable while the advertised window holds -
              * which it did not, until mux_sink_buf refilled a spent `rx`. */
             mux_pool_put_ptr(into);
-            target->sock.broken = true;
+            if (target->hdr.type == PAL_TYPE_SOCKET && target->sock.type == PAL_SOCKET_UDP) {
+                /* A DATAGRAM socket loses the datagram, not the socket: that
+                 * is what a full receive queue means for UDP. A service that
+                 * does not pace datagram frames by credit (one older than
+                 * DGRAM_BATCH) can reach this simply by sending to a socket
+                 * the application is not reading while it reads another.
+                 * Counted done, so the window it was sent against moves on. */
+                target->sock.rx_done++;
+                PAL_SVSM_NET_CTR_INC(udp_q_drop);
+            } else {
+                target->sock.broken = true;
+            }
+#line 931
         }
         return MUX_HEAD_MOVED;
     }
@@ -1211,6 +1243,10 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
         memcpy(req.addr, &addr->ipv4.addr, 4);
     } else {
         req.port = local_port;
+        /* Only framed: a batch is read through the mux header's flags. */
+        if (handle->sock.muxed)
+            req.flags |= PAL_MVNET_REQ_DGRAM_BATCH;
+#line 1214
     }
 
     struct pal_chan_ring in, out;
@@ -1902,13 +1938,30 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
             /* What did not fit is GONE, and that is not a bug: a datagram
              * read into too small a buffer is truncated, and the remainder
              * is not the next datagram's business. The stream path keeps a
-             * residue here; this must not. */
-            handle->sock.rx_len = handle->sock.rx_off = 0;
-            if (handle->sock.muxed) {
-                /* One frame finished, which is what earns the service more
-                 * window - the same accounting as _PalSocketRecv. */
-                handle->sock.rx_done++;
-                mux_credit_maybe(handle);
+             * residue here; this must not.
+             *
+             * Except the rest of a BATCH: the next datagram in the same frame
+             * is a datagram of its own, so `rx_off` moves to it and the frame
+             * stays parked in `rx` - readable, and FIONREAD sees the next
+             * record's length - until its last record is read. */
+            uint64_t next = handle->sock.rx_off + sizeof(hdr) + hdr.len;
+            bool batch = handle->sock.muxed && handle->sock.rx_len >= PAL_MVMUX_HDR_BYTES
+                         && (((const struct pal_mvmux_hdr*)handle->sock.rx)->flags
+                             & PAL_MVMUX_DATA_DGRAMS);
+            if (handle->sock.muxed)
+                PAL_SVSM_NET_CTR_INC(dgrams);
+            if (batch && next + sizeof(hdr) <= handle->sock.rx_len) {
+                handle->sock.rx_off = next;
+            } else {
+                handle->sock.rx_len = handle->sock.rx_off = 0;
+                if (handle->sock.muxed) {
+                    /* One frame finished, which is what earns the service more
+                     * window - the same accounting as _PalSocketRecv. */
+                    PAL_SVSM_NET_CTR_INC(dgram_frames);
+                    handle->sock.rx_done++;
+                    mux_credit_maybe(handle);
+                }
+#line 1912
             }
             *out_total_size = off;
             return 0;
