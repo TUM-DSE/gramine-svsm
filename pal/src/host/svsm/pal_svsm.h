@@ -233,6 +233,10 @@ struct pal_svsm_net_ctr {
     uint64_t credits_owed_retried; /* ... and a later attempt got it through */
     uint64_t fin_lost;             /* a close's FIN found the ring full */
     uint64_t fin_resent;           /* ... and was sent later */
+    uint64_t dgrams;               /* datagrams a recv returned (UDP, shared channel) */
+    uint64_t dgram_frames;         /* ... and the channel frames they came in */
+    uint64_t udp_q_drop;           /* a datagram frame for a socket whose queue was full */
+#line 234
 };
 extern struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
 #define PAL_SVSM_NET_CTR_INC(field) \
