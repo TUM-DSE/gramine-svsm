@@ -2074,10 +2074,27 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 ret = -PAL_ERROR_CONNFAILED;
                 break;
             }
+            /* COLLECT CREDIT THAT HAS ALREADY ARRIVED before answering
+             * EAGAIN, as udp_send does. The floor is ONE frame and the
+             * service's CREDIT comes back as a message on the inbound ring,
+             * counted only once somebody routes it - and a non-blocking
+             * writer that sends twice before it reads (a client's header,
+             * then its request) never does: its second send said EAGAIN for
+             * ever with the credit sitting unread. nbench's tcp_rr and
+             * tcp_up from a vault (jamie, 2026-10-23: 0 transactions, ~48M
+             * EAGAIN, 0 bytes acked). A blocking send routes after its wait
+             * below, and poll's writability test (sock_no_credit) routes
+             * first, so neither was affected. */
             if (nonblock) {
+                struct pal_chan_ring cin;
+                ring_for(handle, &cin, NULL);
+                mux_poll_route(handle, &cin);
+                if ((int32_t)(handle->sock.tx_limit - handle->sock.tx_sent) > 0)
+                    continue;                /* it had arrived: send */
                 PAL_SVSM_NET_CTR_INC(eagain_credit);
                 break;
             }
+#line 2081
             /* Room is a CREDIT frame arriving, which arrives as a message like
              * any other - so wait on the peer's tail, and let the read path
              * route it. */
