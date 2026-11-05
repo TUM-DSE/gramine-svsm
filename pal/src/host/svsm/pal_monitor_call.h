@@ -88,6 +88,18 @@ uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
  * slot has been reissued - and must not be read as "still running". */
 #define PAL_SVSM_EXIT_LIVE 0
 int64_t pal_svsm_wait(uint64_t child_id, uint64_t child_serial, uint64_t* out_value);
+/* Wait with rbx = UINT64_MAX: this process's child generation (r8) - alone
+ * (`hold` false), or held in the monitor until it is no longer `past`, for
+ * at most `usec` (`hold` true: rcx = 1, rdx = past, r8 = usec). Returns the
+ * answer's rcx: 1 held (`*out_why` = rdx: 0 the generation moved, 1 the time
+ * ran out, 2 interrupted), 0 answered without holding (a monitor without the
+ * held form, or one that does not hold this caller), negative a monitor from
+ * before the generation (BAD_ID). */
+#define PAL_SVSM_WAIT_HOLD_MOVED       0
+#define PAL_SVSM_WAIT_HOLD_TIMEOUT     1
+#define PAL_SVSM_WAIT_HOLD_INTERRUPTED 2
+int64_t pal_svsm_wait_gen(bool hold, uint64_t past, uint64_t usec, uint64_t* out_gen,
+                          uint64_t* out_why);
 int64_t pal_svsm_kill_child(uint64_t child_id, uint64_t child_serial);
 void pal_svsm_device_window(uint64_t pages, void** out_base, size_t* out_size);
 /* DeviceMmio: a device's registers. `id` is vendor | device << 16, 0 only

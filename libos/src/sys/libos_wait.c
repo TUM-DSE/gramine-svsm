@@ -248,8 +248,20 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
         return -EINVAL;
 
     long ret = 0;
+    /* The host's child generation (PalProcessWaitChange), for a wait the
+     * host holds until a child changes - read BEFORE each look at the
+     * children, so a child that ends after the look has moved it and the
+     * hold returns at once. Not for WNOHANG, which never waits; and off for
+     * good when the host keeps none (every PAL but svsm's). */
+    bool hold = !(options & WNOHANG);
+    uint64_t gen = UINT64_MAX;
 
     do {
+        if (hold) {
+            gen = UINT64_MAX;
+            if (PalProcessWaitChange(&gen, 0) < 0)
+                hold = false;
+        }
         /* Before looking, ask the host: a child it ended has no other way
          * of telling us. */
         reap_host_children();
@@ -302,7 +314,29 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
             goto out;
         }
 
-        /* Ok, let's wait. */
+        /* Ok, let's wait. With the host's generation, the host holds the
+         * wait until a child changes (its death moves the generation): the
+         * parent hears of the death at once. It used to hear of it only at
+         * the end of the bounded wait below - 10 ms, which a vault inside a
+         * host invoke spins out (no Park, no Sleep there) - 8.7 ms of a
+         * 21.8 ms fork + exit + waitpid (forkbreak, 2026-11-05). */
+        uint64_t wait_us = 10000;
+        if (hold) {
+            unlock(&g_process.children_lock);
+            int hr = PalProcessWaitChange(&gen, 10000);
+            if (hr == 0 || hr == -PAL_ERROR_TRYAGAIN) {
+                /* A child changed, or 10 ms passed: look again. */
+                ret = -ERESTARTSYS;
+                continue;
+            }
+            /* DENIED: another context of this process could run, or the host
+             * does not hold this caller; INTERRUPTED: a signal or a resume
+             * for this thread. Either way the ordinary wait below, briefly -
+             * it runs the others, and its thread_wait is what consumes a
+             * resume (looping here would see the same one again). */
+            wait_us = 1000;
+            lock(&g_process.children_lock);
+        }
         struct libos_thread* self = get_cur_thread();
         struct libos_thread_queue qnode = {
             .thread = self,
@@ -329,8 +363,9 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
          * untimed wait here is a parent that never returns from wait() even
          * though its child is long gone. 10 ms is below the cost of the
          * fork it is waiting on and far above the cost of one monitor call.
-         */
-        uint64_t wait_us = 10000;
+         *
+         * 1 ms when the host could not hold the wait (above): the fallback
+         * polls more often, since nothing else will tell it. */
         ret = thread_wait(&wait_us, /*ignore_pending_signals=*/false);
         if (ret == -ETIMEDOUT)
             ret = 0;                        /* go round and poll again */

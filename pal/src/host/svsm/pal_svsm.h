@@ -168,6 +168,13 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
  * place a thread that never blocks can find out; a blocking call consumes
  * the flag itself, in pal_svsm_thread_block. */
 bool pal_svsm_current_interrupted(void);
+
+/* Could a context other than the running one use the processor now? A
+ * runnable one, a poller whose handles are ready, a deadline that has
+ * passed. `*next_us` is lowered to the earliest deadline still ahead among
+ * them. For a wait the monitor holds (_PalProcessWaitChange): the processor
+ * may be held only while nothing else in this vault could run. */
+bool pal_svsm_others_runnable(uint64_t now_us, uint64_t* next_us);
 void pal_svsm_current_clear_interrupted(void);
 
 /* Make every thread parked on `waiting_on` runnable. Safe to call with no

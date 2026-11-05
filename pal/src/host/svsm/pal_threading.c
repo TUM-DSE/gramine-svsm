@@ -930,6 +930,26 @@ void pal_svsm_thread_watch(size_t count, PAL_HANDLE* handles, pal_wait_flags_t* 
     g_current->thread.n_watch       = handles && events ? count : 0;
 }
 
+bool pal_svsm_others_runnable(uint64_t now_us, uint64_t* next_us) {
+    if (!g_current)
+        return false;
+    for (PAL_HANDLE t = g_current->thread.next; t != g_current; t = t->thread.next) {
+        if (t->thread.state == PAL_SVSM_THREAD_RUNNABLE)
+            return true;
+        if (t->thread.state != PAL_SVSM_THREAD_BLOCKED)
+            continue;
+        if (t->thread.n_watch && pal_svsm_poller_ready(t))
+            return true;
+        if (t->thread.has_deadline) {
+            if (now_us >= t->thread.deadline_us)
+                return true;
+            if (t->thread.deadline_us < *next_us)
+                *next_us = t->thread.deadline_us;
+        }
+    }
+    return false;
+}
+
 void pal_svsm_poll_wake(void) {
     pal_svsm_thread_wake_all(POLL_TOKEN);
 }

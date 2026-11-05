@@ -35,6 +35,12 @@ int PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
     return _PalProcessWait(child, child_serial, out_reason, out_value);
 }
 
+int PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us) {
+    if (!gen)
+        return -PAL_ERROR_INVAL;
+    return _PalProcessWaitChange(gen, timeout_us);
+}
+
 int PalProcessKill(uint64_t child, uint64_t child_serial) {
     if (!child || !child_serial)
         return -PAL_ERROR_INVAL;

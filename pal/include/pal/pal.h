@@ -497,6 +497,24 @@ int PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                    uint64_t* out_value);
 
 /*!
+ * \brief Wait for any child of this process to change - exit, be killed, be deleted.
+ *
+ * \param[in,out] gen  the host's child generation. `UINT64_MAX` only reads it (no wait). Else
+ *                     wait while it is still `*gen`, and on return it is the generation now.
+ * \param timeout_us   the longest the wait lasts.
+ *
+ * Read the generation BEFORE asking about the children (#PalProcessWait), then wait with it: a
+ * child that ends in between has moved it, and the wait returns at once - nothing is missed.
+ *
+ * \returns 0 the generation moved; -PAL_ERROR_TRYAGAIN the time ran out; -PAL_ERROR_INTERRUPTED
+ * something else wants this thread (a signal, the vault being deleted); -PAL_ERROR_DENIED this
+ * thread cannot be held now - another context of this process could run, or the host does not
+ * hold this caller - so wait the ordinary way, briefly, and look again; -PAL_ERROR_NOTIMPLEMENTED
+ * no host generation at all (every PAL but svsm's).
+ */
+int PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us);
+
+/*!
  * \brief SIGKILL one of my children - by the host, not by asking it.
  *
  * \param child         the child's id, as #PalProcessFork reported it.

@@ -47,6 +47,12 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     return -PAL_ERROR_NOTIMPLEMENTED;   /* not implemented */
 }
 
+int _PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us) {
+    __UNUSED(gen);
+    __UNUSED(timeout_us);
+    return -PAL_ERROR_NOTIMPLEMENTED;   /* no host child generation */
+}
+
 int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                     uint64_t* out_value) {
     __UNUSED(child);

@@ -203,6 +203,27 @@ uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
     return data.rcx;
 }
 
+/* Wait (0x4FFFFFD5), the generation form: rbx = UINT64_MAX, rcx = 1 to be
+ * held (rdx = the generation to wait past, r8 = microseconds) -> rcx (1 held,
+ * 0 not), rdx = why, r8 = the generation. Extended: r8 goes in and comes
+ * back. */
+int64_t pal_svsm_wait_gen(bool hold, uint64_t past, uint64_t usec, uint64_t* out_gen,
+                          uint64_t* out_why) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFD5;
+    data.rbx = ~0ULL;
+    data.rcx = hold ? 1 : 0;
+    data.rdx = hold ? past : 0;
+    data.r8  = hold ? usec : 0;
+    data.r9  = 0;
+    extended_monitor_call(&data);
+    if (out_gen)
+        *out_gen = data.r8;
+    if (out_why)
+        *out_why = data.rdx;
+    return (int64_t)data.rcx;
+}
+
 /* KillChild (0x4FFFFFD3): rbx = my child's id, rcx = its serial -> rcx 0 or
  * a negative status. */
 int64_t pal_svsm_kill_child(uint64_t child_id, uint64_t child_serial) {

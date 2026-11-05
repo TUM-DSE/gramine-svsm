@@ -226,6 +226,7 @@ int _PalLineageFsAttach(uint64_t pages, void** base, size_t* size);
 int _PalLineageSelf(uint64_t* out);
 int _PalLineageMemberAlive(uint64_t serial, bool* out);
 int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out);
+int _PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us);
 int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                     uint64_t* out_value);
 int _PalProcessKill(uint64_t child, uint64_t child_serial);

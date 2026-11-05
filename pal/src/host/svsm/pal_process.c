@@ -117,6 +117,56 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     return 0;
 }
 
+/* The longest one held Wait lasts (the monitor caps it there too,
+ * fork.rs WAIT_HOLD_MAX_US): between two, this looks again at the vault's
+ * other contexts, so one whose deadline comes or whose handles get ready
+ * waits at most this long for the processor. */
+#define SVSM_WAIT_HOLD_US 1000
+
+/*
+ * Wait for a child to change, in the monitor (fork.rs wait_held): it holds
+ * this call until the child generation moves - the child's death moves it -
+ * so the parent hears of the death at once instead of at the end of the
+ * LibOS's 10 ms bounded wait, which inside a host invoke (no Park, no Sleep)
+ * this PAL could only spin out. Held in slices of SVSM_WAIT_HOLD_US, and only
+ * while nothing else of this vault could run: else -DENIED, and the LibOS
+ * waits the ordinary way (briefly) so the scheduler runs it.
+ */
+int _PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us) {
+    uint64_t g = 0, why = 0;
+    if (*gen == UINT64_MAX) {
+        if (pal_svsm_wait_gen(false, 0, 0, &g, &why) < 0)
+            return -PAL_ERROR_NOTIMPLEMENTED;   /* a monitor before the generation */
+        *gen = g;
+        return 0;
+    }
+    uint64_t now = pal_svsm_now_usec();
+    uint64_t deadline = now + timeout_us;
+    while (1) {
+        /* A _PalThreadResume (the LibOS has a signal for this thread): left
+         * set, for the LibOS's own look - thread_block consumes it. */
+        if (pal_svsm_current_interrupted())
+            return -PAL_ERROR_INTERRUPTED;
+        if (now >= deadline)
+            return -PAL_ERROR_TRYAGAIN;
+        uint64_t next = deadline;
+        if (pal_svsm_others_runnable(now, &next) || next <= now)
+            return -PAL_ERROR_DENIED;
+        uint64_t slice = next - now;
+        if (slice > SVSM_WAIT_HOLD_US)
+            slice = SVSM_WAIT_HOLD_US;
+        if (pal_svsm_wait_gen(true, *gen, slice, &g, &why) != 1)
+            return -PAL_ERROR_DENIED;           /* not held: wait in the vault */
+        if ((uint32_t)g != (uint32_t)*gen) {
+            *gen = g;
+            return 0;
+        }
+        if (why == PAL_SVSM_WAIT_HOLD_INTERRUPTED)
+            return -PAL_ERROR_INTERRUPTED;
+        now = pal_svsm_now_usec();
+    }
+}
+
 int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                     uint64_t* out_value) {
     uint64_t value = 0;
