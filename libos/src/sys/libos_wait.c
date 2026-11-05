@@ -248,6 +248,7 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
         return -EINVAL;
 
     long ret = 0;
+    PAL_FORK_MARK(L_WAIT_ENTER);
 
     do {
         /* Before looking, ask the host: a child it ended has no other way
@@ -331,7 +332,9 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
          * fork it is waiting on and far above the cost of one monitor call.
          */
         uint64_t wait_us = 10000;
+        PAL_FORK_MARK(L_WAIT_SLEEP);
         ret = thread_wait(&wait_us, /*ignore_pending_signals=*/false);
+        PAL_FORK_MARK(L_WAIT_WAKE);
         if (ret == -ETIMEDOUT)
             ret = 0;                        /* go round and poll again */
         if (ret < 0 && ret != -EINTR) {
@@ -348,6 +351,7 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
 
 out:
     unlock(&g_process.children_lock);
+    PAL_FORK_MARK(L_WAIT_RET);
     return ret;
 }
 

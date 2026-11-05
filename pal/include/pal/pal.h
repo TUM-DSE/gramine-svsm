@@ -476,6 +476,40 @@ struct pal_fork_ids {
 int PalProcessFork(uint64_t flags, struct pal_fork_ids* out);
 
 /*!
+ * \brief A timestamp for the fork-breakdown benchmark: one step of a fork, an exit or a wait.
+ *
+ * Only in a pair built with `-Dfork_marks=enabled` (GRAMINE_FORK_MARKS): PAL_FORK_MARK compiles
+ * to nothing otherwise, and PalForkMark itself does nothing on every PAL but svsm's. There it is
+ * a Nop monitor call carrying the step and the TSC, which an mvperf monitor that the host armed
+ * (HOST_OP_MVPERF sub-op 11) files in the fork's record (kernel mvperf_fork.rs) - and which every
+ * other monitor ignores, as it ignores any Nop. The ids are the benchmark's; the monitor stores
+ * them as numbers.
+ */
+void PalForkMark(uint32_t id);
+
+enum {
+    PAL_FORK_MARK_L_FORK_ENTER = 1, /* LibOS: the copy-on-write fork begins (opens a record) */
+    PAL_FORK_MARK_L_FORK_PAL   = 2, /* LibOS: lineage fs attached, reaps held; PalProcessFork */
+    PAL_FORK_MARK_P_QUIESCED   = 3, /* PAL: other contexts' lock holds drained */
+    PAL_FORK_MARK_P_CALL       = 4, /* PAL: pipe holds counted; the Fork monitor call */
+    PAL_FORK_MARK_P_RET        = 5, /* PAL: back from the Fork call (parent and child) */
+    PAL_FORK_MARK_P_DONE       = 6, /* PAL: _PalProcessFork returns (parent and child) */
+    PAL_FORK_MARK_L_FORK_RET   = 7, /* LibOS: fork() returns (child: its state rebuilt) */
+    PAL_FORK_MARK_L_WAIT_ENTER = 8, /* LibOS: wait4/waitid entered */
+    PAL_FORK_MARK_L_WAIT_SLEEP = 9, /* LibOS: no exited child yet - the bounded thread_wait */
+    PAL_FORK_MARK_L_WAIT_WAKE  = 10, /* LibOS: back from that thread_wait */
+    PAL_FORK_MARK_L_WAIT_RET   = 11, /* LibOS: wait returns */
+    PAL_FORK_MARK_L_EXIT       = 12, /* LibOS: exit_group entered */
+    PAL_FORK_MARK_P_EXIT       = 13, /* PAL: _PalProcessExit, before the Exit call */
+};
+
+#ifdef GRAMINE_FORK_MARKS
+#define PAL_FORK_MARK(step) PalForkMark(PAL_FORK_MARK_##step)
+#else
+#define PAL_FORK_MARK(step) do {} while (0)
+#endif
+
+/*!
  * \brief How did my child end?
  *
  * \param      child       the child's id, as #PalProcessFork reported it.

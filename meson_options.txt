@@ -11,6 +11,10 @@ option('svsm_call_insn', type: 'combo', choices: ['vmmcall', 'cpuid'],
     value: 'vmmcall',
     description: 'Instruction the svsm PAL issues monitor calls with (cpuid only for a monitor before VMMCALL calls)')
 
+option('fork_marks', type: 'combo', choices: ['disabled', 'enabled'],
+    value: 'disabled',
+    description: 'fork-breakdown benchmark only: the svsm PAL and the LibOS stamp the steps of a fork, exit and wait as monitor marks (PalForkMark; an mvperf monitor armed with HOST_OP_MVPERF sub-op 11 records them). Never for a shipped pair')
+
 option('libc', type: 'combo', choices: ['none', 'glibc', 'musl'],
     value: 'glibc', description: 'Choose (patched) libc that is to be built into runtime directory')
 option('glibc_version', type: 'combo', choices: ['2.40', '2.44'], value: '2.40',

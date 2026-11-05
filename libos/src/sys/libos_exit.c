@@ -216,6 +216,7 @@ long libos_syscall_exit_group(int error_code) {
     assert(!is_internal(get_cur_thread()));
 
     error_code &= 0xFF;
+    PAL_FORK_MARK(L_EXIT);
 
     log_debug("---- exit_group (returning %d)", error_code);
 

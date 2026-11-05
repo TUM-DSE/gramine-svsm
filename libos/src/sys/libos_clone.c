@@ -170,6 +170,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
     uint64_t self_id = 0;
     struct pal_fork_ids ids;
 
+    PAL_FORK_MARK(L_FORK_ENTER);
     /*
      * Root the lineage filesystem BEFORE the fork, if this manifest asked for
      * one. Not in the parent's branch afterwards: the monitor maps the region
@@ -199,6 +200,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
      * between the slot being taken and both entries being right. The child
      * clears its copy (wait_after_cow_fork). */
     host_reap_hold();
+    PAL_FORK_MARK(L_FORK_PAL);
     int pret = PalProcessFork(PAL_PROCESS_FORK_RESIDENT, &ids);
     if (pret < 0) {
         host_reap_release();
@@ -265,6 +267,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
             lo = hi = 0;                /* no block: ipc_ids_after_cow_fork says so */
         id_ranges_after_cow_fork(self_pid, lo, hi);
         get_cur_thread()->tid = self_pid;
+        PAL_FORK_MARK(L_FORK_RET);
         return 0;
     }
 
@@ -308,6 +311,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
 
     if (set_parent_tid)
         *set_parent_tid = child_pid;
+    PAL_FORK_MARK(L_FORK_RET);
     return (long)child_pid;
 }
 

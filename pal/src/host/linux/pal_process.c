@@ -404,6 +404,10 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     return -PAL_ERROR_NOTIMPLEMENTED;   /* no monitor to copy an address space */
 }
 
+void _PalForkMark(uint32_t id) {
+    __UNUSED(id);   /* the fork-breakdown marks are the svsm PAL's */
+}
+
 int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                     uint64_t* out_value) {
     __UNUSED(child);

@@ -42,6 +42,7 @@ PalStreamAttributesQueryByHandle
 PalStreamAttributesQuery
 PalProcessCreate
 PalProcessFork
+PalForkMark
 PalProcessWait
 PalProcessKill
 PalProcessExit
