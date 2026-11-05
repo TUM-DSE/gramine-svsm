@@ -53,6 +53,10 @@ int _PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us) {
     return -PAL_ERROR_NOTIMPLEMENTED;   /* no host child generation */
 }
 
+void _PalForkMark(uint32_t id) {
+    __UNUSED(id);   /* the fork-breakdown marks are the svsm PAL's */
+}
+
 int _PalProcessWait(uint64_t child, uint64_t child_serial, int64_t* out_reason,
                     uint64_t* out_value) {
     __UNUSED(child);

@@ -100,6 +100,11 @@ add_project_arguments(
 
     language: 'c')
 
+# The fork-breakdown marks (PAL_FORK_MARK, pal.h): compiled out unless asked for.
+if get_option('fork_marks') == 'enabled'
+    add_project_arguments('-DGRAMINE_FORK_MARKS', language: 'c')
+endif
+
 debug = get_option('buildtype') == 'debug' or get_option('buildtype') == 'debugoptimized'
 if debug
     add_project_arguments('-DDEBUG', language: 'c')

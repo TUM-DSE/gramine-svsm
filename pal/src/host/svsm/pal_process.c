@@ -52,6 +52,44 @@ static int fork_refused(int64_t status) {
     }
 }
 
+/*
+ * The fork-breakdown marks (pal.h PalForkMark): a Nop (0x4FFFFFF5) with
+ * rbx = FORK_MARK_MAGIC, rcx = the step, rdx = the TSC read just before the
+ * call. An mvperf monitor the host armed (HOST_OP_MVPERF sub-op 11, kernel
+ * mvperf_fork.rs) files it in the fork's record and answers rcx =
+ * FORK_MARK_MAGIC; any other monitor leaves the registers alone, as for
+ * every Nop. Asked at every fork's first step, so a fork costs one Nop more
+ * on such a monitor and nothing more; the other steps are only made while
+ * the answer said armed. The child inherits the answer with the copy.
+ * Compiled to nothing without -Dfork_marks=enabled.
+ */
+#ifdef GRAMINE_FORK_MARKS
+#define FORK_MARK_MAGIC 0x464F524B4D41524BULL   /* "FORKMARK" */
+static bool g_fork_marks_armed;
+
+void _PalForkMark(uint32_t id) {
+    if (id != PAL_FORK_MARK_L_FORK_ENTER && !g_fork_marks_armed)
+        return;
+    uint32_t lo, hi;
+    __asm__ volatile ("lfence; rdtsc" : "=a"(lo), "=d"(hi) :: "memory");
+    struct monitor_call_data data = {
+        .rax = 0x4FFFFFF5,
+        .rbx = FORK_MARK_MAGIC,
+        .rcx = id,
+        .rdx = ((uint64_t)hi << 32) | lo,
+        .r8  = 0,
+        .r9  = 0,
+    };
+    monitor_call(&data);
+    if (id == PAL_FORK_MARK_L_FORK_ENTER)
+        g_fork_marks_armed = data.rcx == FORK_MARK_MAGIC;
+}
+#else
+void _PalForkMark(uint32_t id) {
+    __UNUSED(id);
+}
+#endif
+
 int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint64_t self = 0;
     /* No other context may hold a LibOS lock at the instant the address
@@ -76,6 +114,7 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     if (foreign > 0)
         log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - forking "
                     "anyway; the child may block on them", foreign);
+    PAL_FORK_MARK(P_QUIESCED);
     uint64_t fflags = (flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0)
                       | (foreign > 0 ? PAL_SVSM_FORK_FOREIGN_HOLDS : 0);
     /* The child's holds on every shared pipe, counted - and written down in
@@ -86,7 +125,9 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint64_t serial = 0;
     uint32_t name = 0;
     int64_t status = 0;
+    PAL_FORK_MARK(P_CALL);
     uint64_t rc = pal_svsm_fork(fflags, &self, &serial, &name, &status);
+    PAL_FORK_MARK(P_RET);
     pal_svsm_fork_done();
     /* UINT64_MAX is the one answer that is neither a parent nor a child.
      * It has to be checked here: a failed fork returns ONCE, and a caller
@@ -114,6 +155,7 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
         pal_svsm_pipes_child_after_fork(serial);
         pal_svsm_net_ctr_reset();
     }
+    PAL_FORK_MARK(P_DONE);
     return 0;
 }
 
@@ -187,6 +229,7 @@ noreturn void _PalProcessExit(int exitcode) {
     /* Forward the real exit code: for binary-entrypoint trustlets it
        is the result the guest receives (monitor pal_svsm_exit ->
        rdx -> guest generic.values[1]). Was hardcoded -1. */
+    PAL_FORK_MARK(P_EXIT);
     pal_svsm_net_ctr_report();
     pal_svsm_pipes_exit();
     pal_svsm_exit(exitcode);

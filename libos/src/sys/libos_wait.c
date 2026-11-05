@@ -255,6 +255,7 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
      * good when the host keeps none (every PAL but svsm's). */
     bool hold = !(options & WNOHANG);
     uint64_t gen = UINT64_MAX;
+    PAL_FORK_MARK(L_WAIT_ENTER);
 
     do {
         if (hold) {
@@ -323,7 +324,9 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
         uint64_t wait_us = 10000;
         if (hold) {
             unlock(&g_process.children_lock);
+            PAL_FORK_MARK(L_WAIT_SLEEP);
             int hr = PalProcessWaitChange(&gen, 10000);
+            PAL_FORK_MARK(L_WAIT_WAKE);
             if (hr == 0 || hr == -PAL_ERROR_TRYAGAIN) {
                 /* A child changed, or 10 ms passed: look again. */
                 ret = -ERESTARTSYS;
@@ -366,7 +369,9 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
          *
          * 1 ms when the host could not hold the wait (above): the fallback
          * polls more often, since nothing else will tell it. */
+        PAL_FORK_MARK(L_WAIT_SLEEP);
         ret = thread_wait(&wait_us, /*ignore_pending_signals=*/false);
+        PAL_FORK_MARK(L_WAIT_WAKE);
         if (ret == -ETIMEDOUT)
             ret = 0;                        /* go round and poll again */
         if (ret < 0 && ret != -EINTR) {
@@ -383,6 +388,7 @@ static long do_waitid(int which, pid_t id, siginfo_t* infop, int options) {
 
 out:
     unlock(&g_process.children_lock);
+    PAL_FORK_MARK(L_WAIT_RET);
     return ret;
 }
 

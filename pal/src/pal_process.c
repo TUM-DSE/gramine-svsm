@@ -47,6 +47,10 @@ int PalProcessKill(uint64_t child, uint64_t child_serial) {
     return _PalProcessKill(child, child_serial);
 }
 
+void PalForkMark(uint32_t id) {
+    _PalForkMark(id);
+}
+
 noreturn void PalProcessExit(int exitcode) {
     _PalProcessExit(exitcode);
 }
