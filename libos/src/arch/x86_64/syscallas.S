@@ -27,6 +27,9 @@
 
 .global libos_syscall_entry
 .type libos_syscall_entry, @function
+#ifdef GRAMINE_ALIGN64
+    .p2align 6   # option align64: a 64-byte start, as -falign-functions=64 gives the C code
+#endif
 libos_syscall_entry:
     # On entry to this function rcx contains the return value (next instruction after syscall),
     # all other registers can have arbitrary values.
@@ -212,6 +215,9 @@ Lmorestack_for_gdb_bt:
 
 .global _return_from_syscall
 .type _return_from_syscall, @function
+#ifdef GRAMINE_ALIGN64
+    .p2align 6   # option align64: a 64-byte start, as -falign-functions=64 gives the C code
+#endif
 _return_from_syscall:
     # expects one argument (in `rdi`) - pointer to PAL_CONTEXT
     .cfi_startproc

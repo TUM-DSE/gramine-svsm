@@ -100,6 +100,13 @@ add_project_arguments(
 
     language: 'c')
 
+# The layout experiment (option align64): 64-byte function starts, so the
+# hot path's placement within cache lines no longer depends on the size of
+# whatever is linked before it. Off by default; then nothing here changes.
+if get_option('align64') == 'enabled'
+    add_project_arguments('-falign-functions=64', '-DGRAMINE_ALIGN64', language: 'c')
+endif
+
 debug = get_option('buildtype') == 'debug' or get_option('buildtype') == 'debugoptimized'
 if debug
     add_project_arguments('-DDEBUG', language: 'c')

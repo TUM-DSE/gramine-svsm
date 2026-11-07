@@ -44,3 +44,6 @@ option('vtune', type: 'combo', choices: ['disabled', 'enabled'],
 option('vtune_sdk_path', type: 'string',
     value: '/opt/intel/oneapi/vtune/latest/sdk',
     description: 'Path to the VTune SDK installation')
+option('align64', type: 'combo', choices: ['disabled', 'enabled'],
+    value: 'disabled',
+    description: 'layout experiment only (UnixBench syscall A/B): every C function and the LibOS syscall entry/return start on a 64-byte boundary (-falign-functions=64, .p2align 6), so a code-size change elsewhere cannot move the hot path within its cache lines. Off: byte-identical to a build without the option')
