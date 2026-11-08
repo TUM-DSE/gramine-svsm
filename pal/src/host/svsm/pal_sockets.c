@@ -998,14 +998,12 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
     if (__atomic_load_n(in->head, __ATOMIC_ACQUIRE) != peeked_at) {
         /* Somebody routed the head while the buffer was being taken: what is
          * there now is another message, decided about by nobody. Leave it. */
-        if (pooled)
-            mux_pool_put_ptr(into);
         PAL_SVSM_NET_CTR_INC(head_moved);
-        /* The hunt's evidence (not for merge): one line each time. */
-        log_error("tagck PAL HEAD-MOVED: conn %08x op %u pooled %d: the head was routed while a "
-                  "buffer was taken (head %u -> %u)", ph.conn, (unsigned)ph.op, (int)pooled,
+        /* DETECTION ONLY (the hunt's control build): say it, and go on as
+         * before the fix - reading the next message into this target. */
+        log_error("tagck PAL HEAD-MOVED (detect only, not fixed): conn %08x op %u pooled %d "
+                  "(head %u -> %u)", ph.conn, (unsigned)ph.op, (int)pooled,
                   peeked_at, __atomic_load_n(in->head, __ATOMIC_ACQUIRE));
-        return MUX_HEAD_MOVED;
     }
     uint32_t got = 0;
     if (pal_chan_recv(in, into, in->slot, &got) != 0) {
