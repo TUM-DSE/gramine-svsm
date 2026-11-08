@@ -539,6 +539,24 @@ static uint32_t tr_crc32(uint32_t crc, const unsigned char* p, uint64_t n) {
 
 static bool mux_sink_buf_inner(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off);
 
+/* A FIN's body, from a service with the wrong-data trace: the CRC-32 and the
+ * byte count of every DATA body it framed for this connection. Compared with
+ * what ARRIVED here; said only when they differ - then the frames were changed
+ * between the service and this socket (the ring, or this PAL's demux), where a
+ * stream that is wrong with matching sums was wrong when the service framed it. */
+static void tr_fin_check(PAL_HANDLE h, const unsigned char* body, uint32_t blen) {
+    if (blen < 12)
+        return;
+    uint32_t crc;
+    uint64_t bytes;
+    memcpy(&crc, body, 4);
+    memcpy(&bytes, body + 4, 8);
+    if (crc != h->sock.tr_in_crc || bytes != h->sock.tr_in)
+        log_error("pal-trace MISMATCH: conn %08x service framed %lu crc %08x, arrived %lu crc %08x "
+                  "(delivered %lu crc %08x)", h->sock.conn_id, bytes, crc, h->sock.tr_in,
+                  h->sock.tr_in_crc, h->sock.tr_app, h->sock.tr_app_crc);
+}
+
 /* The trace's arrival hook, then the real sink. */
 static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
     bool ok = mux_sink_buf_inner(h, buf, len, off);
@@ -1013,6 +1031,7 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
         /* A FIN costs no queue room, so a stream can always be ended - even one
          * whose reader has stopped and whose queue is full. */
         target->sock.fin_seen = true;
+        tr_fin_check(target, (const unsigned char*)scratch + PAL_MVMUX_HDR_BYTES, got - PAL_MVMUX_HDR_BYTES);
     } else if (ph.op == PAL_MVMUX_OP_RST) {
         target->sock.broken = true;
     } else if (ph.op == PAL_MVMUX_OP_CREDIT) {
@@ -2421,6 +2440,9 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 struct pal_mvmux_hdr oh;
                 memcpy(&oh, handle->sock.rx, PAL_MVMUX_HDR_BYTES);
                 if (oh.op == PAL_MVMUX_OP_FIN || oh.op == PAL_MVMUX_OP_RST) {
+                    if (oh.op == PAL_MVMUX_OP_FIN)
+                        tr_fin_check(handle, (const unsigned char*)handle->sock.rx + PAL_MVMUX_HDR_BYTES,
+                                     got - PAL_MVMUX_HDR_BYTES);
                     handle->sock.rx_len = handle->sock.rx_off = 0;
                     if (oh.op == PAL_MVMUX_OP_FIN) {
                         handle->sock.fin_seen = true;
@@ -2881,10 +2903,6 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
-    if (handle->sock.tr_in || handle->sock.tr_app)
-        log_error("pal-trace: conn %08x in %lu crc %08x app %lu crc %08x",
-                  handle->sock.tr_conn, handle->sock.tr_in, handle->sock.tr_in_crc,
-                  handle->sock.tr_app, handle->sock.tr_app_crc);
     mux_queue_release(handle);      /* the pool is the vault's, not this socket's */
     if (handle->sock.win)
         sock_unclaim((unsigned)handle->sock.widx);
