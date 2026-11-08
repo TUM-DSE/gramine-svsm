@@ -522,7 +522,36 @@ static int mux_rx_own(PAL_HANDLE h, uint32_t slot) {
 
 static bool mux_rx_refill(PAL_HANDLE h);
 
+static uint32_t tr_crc32(uint32_t crc, const unsigned char* p, uint64_t n) {
+    static uint32_t t[256];
+    if (!t[1])
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++)
+                c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[i] = c;
+        }
+    crc = ~crc;
+    while (n--)
+        crc = t[(crc ^ *p++) & 0xff] ^ (crc >> 8);
+    return ~crc;
+}
+
+static bool mux_sink_buf_inner(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off);
+
+/* The trace's arrival hook, then the real sink. */
 static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
+    bool ok = mux_sink_buf_inner(h, buf, len, off);
+    if (ok && len > off) {
+        h->sock.tr_in_crc = tr_crc32(h->sock.tr_in_crc, (const unsigned char*)buf + off, len - off);
+        h->sock.tr_in += len - off;
+        if (!h->sock.tr_conn)
+            h->sock.tr_conn = h->sock.conn_id;
+    }
+    return ok;
+}
+
+static bool mux_sink_buf_inner(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
     /* `rx` spent AND nothing queued behind it - not just `rx` spent.
      *
      * A read drains `rx` and returns, and only the NEXT read refills it from
@@ -2299,6 +2328,9 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 memcpy(iov[i].iov_base, handle->sock.rx + handle->sock.rx_off + off, take);
                 off += take;
             }
+            handle->sock.tr_app_crc = tr_crc32(handle->sock.tr_app_crc,
+                                               (const unsigned char*)handle->sock.rx + handle->sock.rx_off, off);
+            handle->sock.tr_app += off;
             handle->sock.rx_off += (uint32_t)off;
             if (handle->sock.rx_off >= handle->sock.rx_len) {
                 handle->sock.rx_len = handle->sock.rx_off = 0;
@@ -2399,6 +2431,13 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                     return -PAL_ERROR_CONNFAILED;
                 }
                 handle->sock.rx_off = PAL_MVMUX_HDR_BYTES;
+                if (got > PAL_MVMUX_HDR_BYTES) {
+                    handle->sock.tr_in_crc = tr_crc32(handle->sock.tr_in_crc,
+                        (const unsigned char*)handle->sock.rx + PAL_MVMUX_HDR_BYTES, got - PAL_MVMUX_HDR_BYTES);
+                    handle->sock.tr_in += got - PAL_MVMUX_HDR_BYTES;
+                    if (!handle->sock.tr_conn)
+                        handle->sock.tr_conn = handle->sock.conn_id;
+                }
                 if (handle->sock.rx_off >= handle->sock.rx_len) {
                     /* A DATA frame with no body. Nothing for this caller;
                      * go round for the next message. */
@@ -2842,6 +2881,10 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
+    if (handle->sock.tr_in || handle->sock.tr_app)
+        log_error("pal-trace: conn %08x in %lu crc %08x app %lu crc %08x",
+                  handle->sock.tr_conn, handle->sock.tr_in, handle->sock.tr_in_crc,
+                  handle->sock.tr_app, handle->sock.tr_app_crc);
     mux_queue_release(handle);      /* the pool is the vault's, not this socket's */
     if (handle->sock.win)
         sock_unclaim((unsigned)handle->sock.widx);

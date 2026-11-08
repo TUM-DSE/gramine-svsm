@@ -246,6 +246,12 @@ struct pal_handle_inner {
              * the one copy it always had: into the buffer it will be read
              * from, straight out of the ring. */
             bool     rx_pooled;
+            /* The wrong-data trace (net_client_tagged, 2026-11-08): CRC-32
+             * and bytes of the DATA bodies as they ARRIVE for this socket
+             * (routed or read directly), and as they are COPIED to the
+             * caller; printed at destroy. */
+            uint32_t tr_in_crc, tr_app_crc, tr_conn;
+            uint64_t tr_in, tr_app;
             void*    q[PAL_MUX_QUEUE];
             uint32_t q_len[PAL_MUX_QUEUE];
             uint32_t q_off[PAL_MUX_QUEUE];
