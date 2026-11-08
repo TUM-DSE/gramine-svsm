@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "tagck.h"
 #include <stdint.h>
 #include "spinlock.h"
 
@@ -251,6 +252,7 @@ struct pal_handle_inner {
              * (routed or read directly), and as they are COPIED to the
              * caller; printed at destroy. */
             uint32_t tr_in_crc, tr_app_crc, tr_conn;
+            struct tagck tr_ck_in, tr_ck_app;
             uint64_t tr_in, tr_app;
             void*    q[PAL_MUX_QUEUE];
             uint32_t q_len[PAL_MUX_QUEUE];

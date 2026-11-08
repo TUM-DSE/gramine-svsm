@@ -539,6 +539,11 @@ static uint32_t tr_crc32(uint32_t crc, const unsigned char* p, uint64_t n) {
 
 static bool mux_sink_buf_inner(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off);
 
+static void tr_ck_say(const char* where, PAL_HANDLE h, const struct tagck* t) {
+    log_error("tagck PAL %s: conn %08x body %lu: word sid %u off %lu magic %08x (stream sid %u)",
+              where, h->sock.conn_id, t->bad_pos, t->bad_sid, t->bad_off, t->bad_magic, t->sid);
+}
+
 /* A FIN's body, from a service with the wrong-data trace: the CRC-32 and the
  * byte count of every DATA body it framed for this connection. Compared with
  * what ARRIVED here; said only when they differ - then the frames were changed
@@ -561,6 +566,8 @@ static void tr_fin_check(PAL_HANDLE h, const unsigned char* body, uint32_t blen)
 static bool mux_sink_buf(PAL_HANDLE h, void* buf, uint32_t len, uint32_t off) {
     bool ok = mux_sink_buf_inner(h, buf, len, off);
     if (ok && len > off) {
+        if (tagck_feed(&h->sock.tr_ck_in, (const uint8_t*)buf + off, len - off))
+            tr_ck_say("ARRIVED(routed)", h, &h->sock.tr_ck_in);
         h->sock.tr_in_crc = tr_crc32(h->sock.tr_in_crc, (const unsigned char*)buf + off, len - off);
         h->sock.tr_in += len - off;
         if (!h->sock.tr_conn)
@@ -2347,6 +2354,8 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 memcpy(iov[i].iov_base, handle->sock.rx + handle->sock.rx_off + off, take);
                 off += take;
             }
+            if (tagck_feed(&handle->sock.tr_ck_app, (const uint8_t*)handle->sock.rx + handle->sock.rx_off, off))
+                tr_ck_say("DELIVERED", handle, &handle->sock.tr_ck_app);
             handle->sock.tr_app_crc = tr_crc32(handle->sock.tr_app_crc,
                                                (const unsigned char*)handle->sock.rx + handle->sock.rx_off, off);
             handle->sock.tr_app += off;
@@ -2454,6 +2463,9 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                 }
                 handle->sock.rx_off = PAL_MVMUX_HDR_BYTES;
                 if (got > PAL_MVMUX_HDR_BYTES) {
+                    if (tagck_feed(&handle->sock.tr_ck_in, (const uint8_t*)handle->sock.rx + PAL_MVMUX_HDR_BYTES,
+                                   got - PAL_MVMUX_HDR_BYTES))
+                        tr_ck_say("ARRIVED(direct)", handle, &handle->sock.tr_ck_in);
                     handle->sock.tr_in_crc = tr_crc32(handle->sock.tr_in_crc,
                         (const unsigned char*)handle->sock.rx + PAL_MVMUX_HDR_BYTES, got - PAL_MVMUX_HDR_BYTES);
                     handle->sock.tr_in += got - PAL_MVMUX_HDR_BYTES;
