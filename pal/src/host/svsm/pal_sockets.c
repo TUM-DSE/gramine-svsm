@@ -89,16 +89,17 @@ void pal_svsm_net_ctr_report(void) {
     c.dgrams        = __atomic_load_n(&g_pal_svsm_net_ctr.dgrams, __ATOMIC_RELAXED);
     c.dgram_frames  = __atomic_load_n(&g_pal_svsm_net_ctr.dgram_frames, __ATOMIC_RELAXED);
     c.udp_q_drop    = __atomic_load_n(&g_pal_svsm_net_ctr.udp_q_drop, __ATOMIC_RELAXED);
+    c.head_moved    = __atomic_load_n(&g_pal_svsm_net_ctr.head_moved, __ATOMIC_RELAXED);
 #line 89
     if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready
-          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop))
+          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop | c.head_moved))
         return;
     log_always("pal_net: sends %lu eagain_credit %lu eagain_ring %lu idle_rounds %lu "
                "pollers_ready %lu credit_lost %lu credits_owed_retried %lu fin_lost %lu "
-               "fin_resent %lu dgrams %lu dgram_frames %lu udp_q_drop %lu",
+               "fin_resent %lu dgrams %lu dgram_frames %lu udp_q_drop %lu head_moved %lu",
                c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
                c.pollers_ready, c.credit_lost, c.credits_owed_retried, c.fin_lost, c.fin_resent,
-               c.dgrams, c.dgram_frames, c.udp_q_drop);
+               c.dgrams, c.dgram_frames, c.udp_q_drop, c.head_moved);
 #line 96
 }
 
@@ -830,7 +831,9 @@ static void mux_fin_flush(void) {
  *   MUX_HEAD_MINE     the head is this handle's. NOT consumed - read it.
  *   MUX_HEAD_MOVED    it was someone else's and has been dealt with: parked in
  *                     that handle's buffer, or dropped because its connection
- *                     is gone. Go round.
+ *                     is gone - or somebody else routed it while this step was
+ *                     taking a buffer for it, and nothing was consumed here.
+ *                     Go round.
  *   MUX_HEAD_BLOCKED  it belongs to another socket whose buffer is still full.
  *                     Nothing can move until that socket reads - head-of-line
  *                     blocking at the vault, which is what sharing costs.
@@ -876,6 +879,18 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
     if (pal_chan_peek(in, &ph, PAL_MVMUX_HDR_BYTES, &mlen) != 0
         || mlen < PAL_MVMUX_HDR_BYTES)
         return MUX_HEAD_EMPTY;
+    /* WHICH message was peeked: the consumer's own head index. Everything
+     * below decides about THAT message - its target, its buffer - and taking
+     * the buffer can be a malloc (the pool and the scratch are allocated on
+     * first use), which is LibOS bookkeeping and can be preempted. Whatever
+     * runs meanwhile may route the channel and consume this very message; the
+     * recv below would then read the NEXT one into the socket chosen for this
+     * one. That was net_client_tagged's wrong data (ryan, 2026-11-08): another
+     * connection's whole DATA frame in a socket's stream while its own reader
+     * starved, or a CREDIT's four bytes read as data - only in a vault's first
+     * downloads, while the pool was filling. So the head is looked at again
+     * once the buffer is in hand. */
+    uint32_t peeked_at = __atomic_load_n(in->head, __ATOMIC_ACQUIRE);
 
     PAL_HANDLE target = pal_svsm_mux_conn_of(ph.conn);
 
@@ -930,6 +945,15 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
         into = mux_scratch(in->slot);
         if (!into)
             return MUX_HEAD_NOMEM;
+    }
+    if (__atomic_load_n(in->head, __ATOMIC_ACQUIRE) != peeked_at) {
+        /* Somebody routed the head while the buffer was being taken: what is
+         * there now is another message, which nothing here has decided about.
+         * Leave it to the caller's next look. */
+        if (pooled)
+            mux_pool_put_ptr(into);
+        PAL_SVSM_NET_CTR_INC(head_moved);
+        return MUX_HEAD_MOVED;
     }
     uint32_t got = 0;
     if (pal_chan_recv(in, into, in->slot, &got) != 0) {
