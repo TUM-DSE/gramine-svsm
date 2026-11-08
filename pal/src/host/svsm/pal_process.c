@@ -13,6 +13,7 @@
 #include "pal.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "pal_host.h"
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
 
@@ -187,8 +188,19 @@ int _PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us) {
         uint64_t next = deadline;
         if (pal_svsm_others_runnable(now, &next) || next <= now)
             return -PAL_ERROR_DENIED;
-        uint64_t arm = PAL_SVSM_LW_ARM(*gen, PAL_SVSM_LW_ARM_CHILD, 0);
-        int64_t c = pal_svsm_lineage_wait(&arm, 1, PAL_SVSM_LW_WAIT_CHILD, next - now, &g);
+        /* The child arm, and the words the vault's other contexts wait on
+         * (its IPC and pipes): a child whose exit needs this process - an
+         * IPC answer, a pipe drained - must not wait out the slice. Sliced
+         * as the held Wait is, so a context whose deadline comes waits at
+         * most SVSM_WAIT_HOLD_US for the processor. */
+        uint64_t arms[1 + PAL_SVSM_PARK_ARMS];
+        bool partial = false;
+        arms[0] = PAL_SVSM_LW_ARM(*gen, PAL_SVSM_LW_ARM_CHILD, 0);
+        size_t n = 1 + pal_svsm_gather_arms(arms + 1, PAL_SVSM_PARK_ARMS, &partial);
+        uint64_t slice = next - now;
+        if (slice > SVSM_WAIT_HOLD_US)
+            slice = SVSM_WAIT_HOLD_US;
+        int64_t c = pal_svsm_lineage_wait(arms, n, PAL_SVSM_LW_WAIT_CHILD, slice, &g);
         if (c == PAL_SVSM_STATUS_UNSUPPORTED)
             break;
         if (c < 0)
@@ -196,6 +208,11 @@ int _PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us) {
         if ((uint32_t)g != (uint32_t)*gen) {
             *gen = g;
             return 0;
+        }
+        if ((uint64_t)c & ~(PAL_SVSM_LW_CAUSE_CHILD | PAL_SVSM_LW_CAUSE_TIMEOUT)) {
+            /* A watched word moved: the context waiting on it runs first. */
+            pal_svsm_poll_wake();
+            return -PAL_ERROR_DENIED;
         }
         now = pal_svsm_now_usec();
     }

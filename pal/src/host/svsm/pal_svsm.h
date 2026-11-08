@@ -233,6 +233,9 @@ extern char     g_pal_svsm_net_name[32];
 extern int      g_pal_svsm_net_protocol;
 extern uint64_t g_pal_svsm_net_endpoint;
 void pal_svsm_poll_wake(void);
+/* The Park arms of every blocked context (at most `max`); *partial if some
+ * were left out. */
+size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial);
 
 /* What a socket client spent its sends on (NET-0c): whether a send went in,
  * or came back EAGAIN at the service's credit window or at a full ring, and

@@ -236,6 +236,12 @@ static bool park_on(const uint64_t* arms, size_t n, uint64_t usec) {
     return pal_svsm_park(n ? arms : NULL, n, usec) >= 0;
 }
 
+/* The words the vault's blocked contexts wait on, for a wait elsewhere that
+ * must also wake on them (the lineage wait for a child, pal_process.c). */
+size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial) {
+    return gather_arms(arms, max, partial);
+}
+
 /* Give the vCPU back until `deadline_us`, in slices, so that the monitor and
  * the host both still get a turn while this vault has nothing to run. */
 static void idle_until(uint64_t deadline_us) {
