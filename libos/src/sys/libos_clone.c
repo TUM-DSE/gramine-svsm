@@ -165,6 +165,39 @@ static IDTYPE cow_pid(uint32_t name, uint64_t monitor_id) {
     return name ? (IDTYPE)name << ID_BLOCK_SHIFT : (IDTYPE)monitor_id;
 }
 
+/*
+ * Who runs a forked child (fork fix 3, owner 2026-11-07).
+ *
+ * By default the child is a member of this process's LINEAGE: the monitor
+ * runs it on the root's own processor, inside the root's invokes, and a
+ * parent waiting for it lends it the processor at once (the PAL's wait
+ * blocks in the lineage). That is what fork + exec + waitpid within one
+ * request wants, and it is what the monitor offers whenever it can
+ * (PAL_CAP_LINEAGE); where it cannot, the PAL falls back to RESIDENT.
+ *
+ * The cost: at seat cap 1 a lineage child does not run BETWEEN its root's
+ * invokes - it is frozen after the root answers and goes on at the next
+ * invoke (at seat cap 2 it may linger on a co-driver). A child that must
+ * keep running on its own - a daemon, a pre-fork server's worker that
+ * outlives the request, a helper the vault expects to make progress while
+ * nobody invokes it - wants RESIDENT instead: the host scheduler's service
+ * queue runs it. `libos.fork.resident = true` in the manifest asks for that
+ * for every fork of the vault.
+ */
+static uint64_t fork_mode_flags(void) {
+    static int resident = -1;   /* the manifest's answer, read once */
+    if (resident < 0) {
+        bool r = false;
+        if (toml_bool_in(g_manifest_root, "libos.fork.resident", /*defaultval=*/false, &r) < 0) {
+            log_warning("Cannot parse 'libos.fork.resident' (the value must be `true` or "
+                        "`false`) - forking LINEAGE");
+            r = false;
+        }
+        resident = r ? 1 : 0;
+    }
+    return resident ? PAL_PROCESS_FORK_RESIDENT : PAL_PROCESS_FORK_LINEAGE;
+}
+
 static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
     uint64_t child_id = 0;
     uint64_t self_id = 0;
@@ -199,7 +232,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
      * between the slot being taken and both entries being right. The child
      * clears its copy (wait_after_cow_fork). */
     host_reap_hold();
-    int pret = PalProcessFork(PAL_PROCESS_FORK_RESIDENT, &ids);
+    int pret = PalProcessFork(fork_mode_flags(), &ids);
     if (pret < 0) {
         host_reap_release();
         return pal_to_unix_errno(pret);

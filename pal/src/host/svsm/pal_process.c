@@ -52,6 +52,14 @@ static int fork_refused(int64_t status) {
     }
 }
 
+/* This process is in a lineage run set: it forked LINEAGE, or it is a
+ * LINEAGE child (fork fix 3). Its waits for children are then LineageWaits
+ * (below), which the drive answers at once when a child ends. Inherited by
+ * a fork's child, which is right: a LINEAGE child is a member, and a
+ * RESIDENT child of a member is refused by the monitor (its mode is the
+ * run set's). */
+static uint8_t g_svsm_in_run_set = 0;
+
 int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint64_t self = 0;
     /* No other context may hold a LibOS lock at the instant the address
@@ -76,7 +84,15 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     if (foreign > 0)
         log_warning("fork: %ld lock hold(s) of other threads did not drain in 100 ms - forking "
                     "anyway; the child may block on them", foreign);
-    uint64_t fflags = (flags & PAL_PROCESS_FORK_RESIDENT ? PAL_SVSM_FORK_RESIDENT : 0)
+    /* The mode (fork fix 3, owner 2026-11-07): LINEAGE when the caller asks
+     * for it and the monitor offered it; RESIDENT when the caller asks for
+     * that (the opt-out: a child that must run between its parent's
+     * invokes) or LINEAGE is not on offer. Never both. */
+    bool lineage = (flags & PAL_PROCESS_FORK_LINEAGE) && !(flags & PAL_PROCESS_FORK_RESIDENT)
+                   && g_pal_svsm_cap_lineage;
+    bool resident = !lineage && (flags & (PAL_PROCESS_FORK_RESIDENT | PAL_PROCESS_FORK_LINEAGE));
+    uint64_t fflags = (lineage ? PAL_SVSM_FORK_LINEAGE : 0)
+                      | (resident ? PAL_SVSM_FORK_RESIDENT : 0)
                       | (foreign > 0 ? PAL_SVSM_FORK_FOREIGN_HOLDS : 0);
     /* The child's holds on every shared pipe, counted - and written down in
      * a ledger row for it - BEFORE the copy: the parent may close its own
@@ -87,7 +103,22 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint32_t name = 0;
     int64_t status = 0;
     uint64_t rc = pal_svsm_fork(fflags, &self, &serial, &name, &status);
+    if (rc == ~0ULL && lineage && status == PAL_SVSM_STATUS_UNSUPPORTED) {
+        /* Nothing can drive a run set from here (a service's dispatch, a
+         * domain processor): the RESIDENT fallback, as before fix 3. The
+         * holds are counted again for the second try; nothing between the
+         * two calls can yield. */
+        pal_svsm_pipes_fork_failed();
+        pal_svsm_pipes_fork_prepare();
+        lineage = false;
+        fflags = (fflags & ~PAL_SVSM_FORK_LINEAGE) | PAL_SVSM_FORK_RESIDENT;
+        status = 0;
+        rc = pal_svsm_fork(fflags, &self, &serial, &name, &status);
+        log_debug("fork: no run set here - RESIDENT instead");
+    }
     pal_svsm_fork_done();
+    if (rc != ~0ULL && lineage)
+        g_svsm_in_run_set = 1;          /* both sides: parent and member */
     /* UINT64_MAX is the one answer that is neither a parent nor a child.
      * It has to be checked here: a failed fork returns ONCE, and a caller
      * that only looks for zero would carry on as the parent of a child that
@@ -142,6 +173,32 @@ int _PalProcessWaitChange(uint64_t* gen, uint64_t timeout_us) {
     }
     uint64_t now = pal_svsm_now_usec();
     uint64_t deadline = now + timeout_us;
+    /* In a run set (fork fix 3): block in the lineage on a CHILD arm, as the
+     * held Wait does outside one - which the monitor refuses under a drive.
+     * The drive runs the lineage meanwhile, the child included, on this
+     * processor, and answers at the child's end. The same rule as below:
+     * only while nothing else of this vault could run. UNSUPPORTED (nobody
+     * runs the lineage here: no drive) falls through to the held Wait. */
+    while (g_svsm_in_run_set) {
+        if (pal_svsm_current_interrupted())
+            return -PAL_ERROR_INTERRUPTED;
+        if (now >= deadline)
+            return -PAL_ERROR_TRYAGAIN;
+        uint64_t next = deadline;
+        if (pal_svsm_others_runnable(now, &next) || next <= now)
+            return -PAL_ERROR_DENIED;
+        uint64_t arm = PAL_SVSM_LW_ARM(*gen, PAL_SVSM_LW_ARM_CHILD, 0);
+        int64_t c = pal_svsm_lineage_wait(&arm, 1, PAL_SVSM_LW_WAIT_CHILD, next - now, &g);
+        if (c == PAL_SVSM_STATUS_UNSUPPORTED)
+            break;
+        if (c < 0)
+            return -PAL_ERROR_DENIED;           /* wait in the vault */
+        if ((uint32_t)g != (uint32_t)*gen) {
+            *gen = g;
+            return 0;
+        }
+        now = pal_svsm_now_usec();
+    }
     while (1) {
         /* A _PalThreadResume (the LibOS has a signal for this thread): left
          * set, for the LibOS's own look - thread_block consumes it. */

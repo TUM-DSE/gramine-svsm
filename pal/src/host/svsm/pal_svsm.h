@@ -124,11 +124,17 @@ extern struct pal_svsm_preempt_ctl g_pal_svsm_preempt;
  * because it traps into the SVSM's own IDT where that gate does not exist.
  */
 #define PAL_SVSM_CAP_RET_GATE 1
+/* LINEAGE: this vault may fork into a lineage run set (fork rbx bit 2,
+ * LineageWait/LineageWake, Wait's child generation) - monitor signals.rs
+ * PAL_CAP_LINEAGE. Never for a hosted vault. */
+#define PAL_SVSM_CAP_LINEAGE 2
 
 /* Set once at startup from the capability word. A byte rather than the whole
  * word because the only reader is three instructions of assembly on the
  * fault-return path (arch/x86_64/pal_switch.S). */
 extern uint8_t g_pal_svsm_ret_gate;
+/* PAL_SVSM_CAP_LINEAGE was offered (set once, with g_pal_svsm_ret_gate). */
+extern uint8_t g_pal_svsm_cap_lineage;
 /* Keep `wanted` in step with the ready queue. Called by the scheduler. */
 void pal_svsm_preempt_update(bool others_runnable);
 

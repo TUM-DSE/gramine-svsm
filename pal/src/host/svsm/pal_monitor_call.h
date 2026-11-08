@@ -59,9 +59,14 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
 /* bit 1: the fork went ahead with lock holds of other threads it could not
  * wait out (pal_events.c) - the monitor counts it, GetStat FORK_FOREIGN_HOLDS. */
 #define PAL_SVSM_FORK_FOREIGN_HOLDS 2UL
-/* bit 2 is the monitor's LINEAGE (a child run on its root's own processor),
- * reserved: this PAL never sends it. A monitor that knows it answers bit 2
- * alone UNSUPPORTED and bits 0 and 2 together BAD_ARGS. */
+/* bit 2, LINEAGE (fork fix 3, owner 2026-11-07): the child joins the
+ * forker's lineage run set and runs on its root's own processor, inside the
+ * root's invokes (fork-own-vCPU). Sent only when SetExceptionEntry offered
+ * PAL_SVSM_CAP_LINEAGE. The monitor answers UNSUPPORTED when this forker
+ * cannot have a run set here (nothing could drive it: a hosted vault, a
+ * service's dispatch, a domain processor) - the one answer to fall back
+ * from, to RESIDENT - and bits 0 and 2 together BAD_ARGS. */
+#define PAL_SVSM_FORK_LINEAGE 4UL
 /* `out_self` receives the CHILD's own id, and is 0 in the parent. The child
  * cannot learn it any other way: rcx must be 0 to say which side it is, so
  * the id travels in the register the flags came in on.
@@ -78,6 +83,22 @@ void pal_svsm_lineage_fs(uint64_t pages, uint64_t purpose, void** out_base, size
  * fork did not fail. */
 uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
                        uint32_t* out_name, int64_t* out_status);
+
+/* LineageWait (0x4FFFFFC0): rbx = up to 4 arms (expected << 32 | which << 28
+ * | x), rcx = how many | flags, rdx = timeout in us (UINT64_MAX: none).
+ * -> the causes (PAL_SVSM_LW_CAUSE_*), or a negative status:
+ * PAL_SVSM_STATUS_UNSUPPORTED when nobody runs the lineage here (no drive:
+ * the caller must wait some other way). `out_gen`: this vault's child
+ * generation at the answer. */
+#define PAL_SVSM_LW_ARM_CHILD   0xCUL
+#define PAL_SVSM_LW_ARM(expected, which, x) \
+    (((uint64_t)(uint32_t)(expected) << 32) | (((uint64_t)(which) & 0xF) << 28) \
+     | ((uint64_t)(x) & 0x0FFFFFFFULL))
+#define PAL_SVSM_LW_WAIT_CHILD  0x100UL
+#define PAL_SVSM_LW_CAUSE_TIMEOUT 4UL
+#define PAL_SVSM_LW_CAUSE_CHILD   32UL
+int64_t pal_svsm_lineage_wait(const uint64_t* arms, uint64_t n, uint64_t flags,
+                              uint64_t timeout_us, uint64_t* out_gen);
 
 /* Wait (0x4FFFFFD5): how did my child end?
  *

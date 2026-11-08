@@ -66,6 +66,7 @@ struct pal_svsm_preempt_ctl g_pal_svsm_preempt = {
 
 /* Whether the fault-return gate exists; see PAL_SVSM_CAP_RET_GATE. */
 uint8_t g_pal_svsm_ret_gate = 0;
+uint8_t g_pal_svsm_cap_lineage = 0;
 
 /*
  * The extended-state area the trampoline fills, described the way Linux
@@ -315,6 +316,7 @@ void pal_svsm_exception_init(void) {
      * was not given - `int $0x81` in a hosted vault is a #GP on the first
      * fault return - so the flag is set from the answer and nowhere else. */
     g_pal_svsm_ret_gate = (caps & PAL_SVSM_CAP_RET_GATE) ? 1 : 0;
+    g_pal_svsm_cap_lineage = (caps & PAL_SVSM_CAP_LINEAGE) ? 1 : 0;
 
     tick_xstate_init();
 }

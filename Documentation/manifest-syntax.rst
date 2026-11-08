@@ -297,6 +297,29 @@ may improve performance for certain workloads but may also generate
 ``SIGSEGV/SIGBUS`` exceptions for some applications that specifically use
 invalid pointers (though this is not expected for most real-world applications).
 
+Resident forks (MicroVault)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    libos.fork.resident = [true|false]
+    (Default: false)
+
+Who runs a child made by ``fork()`` on the SVSM PAL. By default (``false``) the
+child is a member of the vault's lineage: the monitor runs it on the root
+vault's own processor, inside the root's invokes, and a parent blocked in
+``waitpid()`` gives it the processor at once. This is the fast path for a
+request that forks, runs and reaps a child (``subprocess``, a shell
+pipeline). Where the monitor cannot give the vault a lineage run set, the
+child is resident instead.
+
+A lineage child does **not** run between the root's invokes (at one seat; with
+two seats it may linger on a second processor). Set ``true`` when a vault's
+children must make progress while nobody invokes it: a daemon, a pre-fork
+server's workers that outlive the request, a helper the vault expects to keep
+running. Every fork of the vault then hands its child to the host's scheduler,
+as before this option existed.
+
 .. _stack-size:
 
 Stack size

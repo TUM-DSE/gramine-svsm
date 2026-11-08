@@ -434,7 +434,7 @@ int PalLineageMemberAlive(uint64_t serial, bool* out);
 /*!
  * \brief Copy this process, copy-on-write, and run the copy.
  *
- * \param      flags      0, or PAL_PROCESS_FORK_RESIDENT.
+ * \param      flags      0, PAL_PROCESS_FORK_RESIDENT or PAL_PROCESS_FORK_LINEAGE.
  * \param[out] out_child  The child's id in the parent, and 0 in the child.
  * \param[out] out_self   The CHILD's own id, in the child only. It cannot
  *                        learn this any other way: \p out_child must be 0
@@ -453,13 +453,24 @@ int PalLineageMemberAlive(uint64_t serial, bool* out);
  * value - and a FAILED fork returns once and looks like the parent, so the
  * error must be checked.
  *
+ * With PAL_PROCESS_FORK_LINEAGE the child joins this process's lineage run
+ * set where the host offers one: it runs on its root's processor, inside the
+ * root's invokes, and a wait for it (#PalProcessWaitChange) gives it the
+ * processor at once. Where the host has no run set for this process, the
+ * child is RESIDENT instead. The LibOS's default (fork fix 3).
+ *
  * With PAL_PROCESS_FORK_RESIDENT the child is handed to the host's
- * scheduler and runs on its own. Without it the child exists but is parked,
- * which is what a host-driven worker pool wants and NOT what fork(2) means:
- * a child nobody dispatches never reaches its execve and its parent waits
- * for ever.
+ * scheduler and runs on its own, between its parent's invokes too: the
+ * opt-out for a child that must keep running when nobody invokes the vault
+ * (a daemon; manifest `libos.fork.resident`).
+ *
+ * With neither the child exists but is parked, which is what a host-driven
+ * worker pool wants and NOT what fork(2) means: a child nobody dispatches
+ * never reaches its execve and its parent waits for ever. Both together:
+ * RESIDENT.
  */
 #define PAL_PROCESS_FORK_RESIDENT 1UL
+#define PAL_PROCESS_FORK_LINEAGE  2UL
 /* What a fork tells each side (lineage-vmid, 2026-10-20). `child` is set in
  * the parent and 0 in the child, which is how each knows which it is; `self`
  * is the child's own monitor id, in the child. `serial` and `name` are the

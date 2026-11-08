@@ -224,6 +224,21 @@ int64_t pal_svsm_wait_gen(bool hold, uint64_t past, uint64_t usec, uint64_t* out
     return (int64_t)data.rcx;
 }
 
+int64_t pal_svsm_lineage_wait(const uint64_t* arms, uint64_t n, uint64_t flags,
+                              uint64_t timeout_us, uint64_t* out_gen) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFC0;
+    data.rbx = (uint64_t)arms;
+    data.rcx = n | flags;
+    data.rdx = timeout_us;
+    data.r8  = 0;
+    data.r9  = 0;
+    extended_monitor_call(&data);
+    if (out_gen)
+        *out_gen = data.rdx;
+    return (int64_t)data.rcx;
+}
+
 /* KillChild (0x4FFFFFD3): rbx = my child's id, rcx = its serial -> rcx 0 or
  * a negative status. */
 int64_t pal_svsm_kill_child(uint64_t child_id, uint64_t child_serial) {
