@@ -263,6 +263,20 @@ static void idle_until(uint64_t deadline_us) {
          * bounded the way the Sleep below is. Before the gather stopped at
          * the monitor's three, a fourth arm got the whole park refused, and
          * this bound was never needed here. */
+        /* In a lineage run set (fork fix 3): block IN THE LINEAGE, on the
+         * same words. That is what hands the processor to the rest of the
+         * lineage - inside a host invoke Park and Sleep are refused, and the
+         * spin below would keep a parent's own child from ever running (at
+         * seat cap 1 the child runs only when the root blocks). LineageWait
+         * takes Park's channel arms; one it cannot take (a device word) or
+         * no drive here refuses it, and the paths below run as before. */
+        if (g_svsm_in_run_set) {
+            uint64_t lw = partial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US : left;
+            if (pal_svsm_lineage_wait(n ? arms : NULL, n, 0, lw, NULL) >= 0) {
+                pal_svsm_poll_wake();
+                return;
+            }
+        }
         if (park_on(arms, n, partial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US
                                                                      : left)) {
             /* RETURN, do not loop. A park can end because a watched word

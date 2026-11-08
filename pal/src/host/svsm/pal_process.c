@@ -58,7 +58,7 @@ static int fork_refused(int64_t status) {
  * a fork's child, which is right: a LINEAGE child is a member, and a
  * RESIDENT child of a member is refused by the monitor (its mode is the
  * run set's). */
-static uint8_t g_svsm_in_run_set = 0;
+uint8_t g_svsm_in_run_set = 0;
 
 int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint64_t self = 0;

@@ -135,6 +135,10 @@ extern struct pal_svsm_preempt_ctl g_pal_svsm_preempt;
 extern uint8_t g_pal_svsm_ret_gate;
 /* PAL_SVSM_CAP_LINEAGE was offered (set once, with g_pal_svsm_ret_gate). */
 extern uint8_t g_pal_svsm_cap_lineage;
+/* This process is in a lineage run set (it forked LINEAGE, or is a LINEAGE
+ * child): its idle and its waits for children block in the lineage
+ * (LineageWait), which is what gives the processor to the rest of it. */
+extern uint8_t g_svsm_in_run_set;
 /* Keep `wanted` in step with the ready queue. Called by the scheduler. */
 void pal_svsm_preempt_update(bool others_runnable);
 
