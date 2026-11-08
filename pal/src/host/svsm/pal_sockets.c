@@ -89,16 +89,17 @@ void pal_svsm_net_ctr_report(void) {
     c.dgrams        = __atomic_load_n(&g_pal_svsm_net_ctr.dgrams, __ATOMIC_RELAXED);
     c.dgram_frames  = __atomic_load_n(&g_pal_svsm_net_ctr.dgram_frames, __ATOMIC_RELAXED);
     c.udp_q_drop    = __atomic_load_n(&g_pal_svsm_net_ctr.udp_q_drop, __ATOMIC_RELAXED);
+    c.head_moved    = __atomic_load_n(&g_pal_svsm_net_ctr.head_moved, __ATOMIC_RELAXED);
 #line 89
     if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready
-          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop))
+          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop | c.head_moved))
         return;
     log_always("pal_net: sends %lu eagain_credit %lu eagain_ring %lu idle_rounds %lu "
                "pollers_ready %lu credit_lost %lu credits_owed_retried %lu fin_lost %lu "
-               "fin_resent %lu dgrams %lu dgram_frames %lu udp_q_drop %lu",
+               "fin_resent %lu dgrams %lu dgram_frames %lu udp_q_drop %lu head_moved %lu",
                c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
                c.pollers_ready, c.credit_lost, c.credits_owed_retried, c.fin_lost, c.fin_resent,
-               c.dgrams, c.dgram_frames, c.udp_q_drop);
+               c.dgrams, c.dgram_frames, c.udp_q_drop, c.head_moved);
 #line 96
 }
 
@@ -930,6 +931,15 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
     if (pal_chan_peek(in, &ph, PAL_MVMUX_HDR_BYTES, &mlen) != 0
         || mlen < PAL_MVMUX_HDR_BYTES)
         return MUX_HEAD_EMPTY;
+    /* WHICH message was peeked: the consumer's own head index. Everything
+     * below decides about THAT message, and taking a buffer for it can be a
+     * malloc - LibOS bookkeeping, which can be preempted, and the thread that
+     * runs meanwhile may route the channel and consume this very message. The
+     * recv after it would then read the NEXT one (another connection's DATA, a
+     * CREDIT's four bytes) into the socket chosen for this one: the
+     * net_client_tagged wrong data (2026-11-08). So the head is checked again
+     * once the buffer is in hand. */
+    uint32_t peeked_at = __atomic_load_n(in->head, __ATOMIC_ACQUIRE);
 
     PAL_HANDLE target = pal_svsm_mux_conn_of(ph.conn);
 
@@ -984,6 +994,18 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
         into = mux_scratch(in->slot);
         if (!into)
             return MUX_HEAD_NOMEM;
+    }
+    if (__atomic_load_n(in->head, __ATOMIC_ACQUIRE) != peeked_at) {
+        /* Somebody routed the head while the buffer was being taken: what is
+         * there now is another message, decided about by nobody. Leave it. */
+        if (pooled)
+            mux_pool_put_ptr(into);
+        PAL_SVSM_NET_CTR_INC(head_moved);
+        /* The hunt's evidence (not for merge): one line each time. */
+        log_error("tagck PAL HEAD-MOVED: conn %08x op %u pooled %d: the head was routed while a "
+                  "buffer was taken (head %u -> %u)", ph.conn, (unsigned)ph.op, (int)pooled,
+                  peeked_at, __atomic_load_n(in->head, __ATOMIC_ACQUIRE));
+        return MUX_HEAD_MOVED;
     }
     uint32_t got = 0;
     if (pal_chan_recv(in, into, in->slot, &got) != 0) {

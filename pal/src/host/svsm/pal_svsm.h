@@ -256,6 +256,7 @@ struct pal_svsm_net_ctr {
     uint64_t dgrams;               /* datagrams a recv returned (UDP, shared channel) */
     uint64_t dgram_frames;         /* ... and the channel frames they came in */
     uint64_t udp_q_drop;           /* a datagram frame for a socket whose queue was full */
+    uint64_t head_moved;           /* the head was routed while a buffer was taken for it */
 #line 234
 };
 extern struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
