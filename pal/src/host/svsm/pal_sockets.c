@@ -245,19 +245,20 @@ extern struct handle_ops g_sock_ops;
 #define PAL_CHAN_WINDOWS     (PAL_CHAN_LIVE_WORDS * 64)
 
 static uint64_t g_sock_claimed[PAL_CHAN_LIVE_WORDS];
+/* At a claimed channel's first window: how many windows its region has. */
+static uint16_t g_sock_run[PAL_CHAN_WINDOWS];
+_Static_assert(PAL_CHAN_WINDOWS == PAL_CHAN_SLOT_WINDOWS, "one bit per IPC window");
 
-static inline bool sock_claimed(unsigned w) {
-    return w < PAL_CHAN_WINDOWS && (g_sock_claimed[w / 64] & (1UL << (w % 64)));
-}
-
-static inline void sock_claim(unsigned w) {
-    if (w < PAL_CHAN_WINDOWS)
-        g_sock_claimed[w / 64] |= 1UL << (w % 64);
+/* A channel is claimed with EVERY window of its region, not just the first
+ * (SHM-1): the later windows start with ring pages, bytes the peer writes,
+ * and an unclaimed one was a window `accept_find` would look at. `n` comes
+ * from the header at `w`, checked by pal_chan_hdr_check. */
+static inline void sock_claim(unsigned w, unsigned n) {
+    pal_chan_hold_run(g_sock_claimed, g_sock_run, w, n);
 }
 
 static inline void sock_unclaim(unsigned w) {
-    if (w < PAL_CHAN_WINDOWS)
-        g_sock_claimed[w / 64] &= ~(1UL << (w % 64));
+    pal_chan_release_run(g_sock_claimed, g_sock_run, w);
 }
 
 /* A muxed handle does not own a channel - it owns a connection ID on the one
@@ -1089,21 +1090,40 @@ int _PalSocketListen(PAL_HANDLE handle, unsigned int backlog) {
  * 50 ms poll into a wake (PLAN.md's receive loop, M2). While other threads
  * run, the scheduler makes the look for it (pal_svsm_sock_wait_ready).
  */
-/* The first window that is a channel nobody here has taken, or 0. Loads only:
- * the scheduler asks it for a blocked accept. */
-static unsigned accept_find(void) {
-    /* All eight published words, not just the first. Window 0 is the
-       directory page itself, so the scan starts at 1. */
-    for (unsigned w = 1; w < PAL_CHAN_WINDOWS; w++) {
-        uint64_t live = pal_chan_u64(PAL_CHAN_DIR_VADDR,
-                                     PAL_CHAN_DIR_LIVE + (w / 64) * 8);
-        if (!(live & (1UL << (w % 64))) || sock_claimed(w))
-            continue;
-        if (pal_chan_u64(pal_chan_window_addr(w), 0) != PAL_CHAN_HDR_MAGIC)
-            continue;
-        return w;
-    }
-    return 0;
+/* A header this vault refused, said once per refusal and not once per look:
+ * a blocked accept looks again on every wake and every 50 ms, and a console
+ * line costs milliseconds. Each window remembers the region-id/epoch
+ * word it was refused with (the monitor's epoch never repeats, so a new region
+ * there is a new refusal), and the line itself is printed for the 1st, 2nd,
+ * 4th, 8th... refusal only. A refused window is ignored, not closed: closing
+ * by window index acts on whatever region the monitor booked there, and what
+ * a window that fails this check belongs to is exactly what is unknown. */
+static uint64_t g_sock_refused_tag[PAL_CHAN_WINDOWS];
+static uint64_t g_sock_refused[PAL_CHAN_LIVE_WORDS];
+static uint64_t g_sock_refusals;
+
+static void sock_refuse(unsigned w, int why, uint64_t tag) {
+    if (w >= PAL_CHAN_WINDOWS)
+        return;
+    if (pal_chan_bit(g_sock_refused, w) && g_sock_refused_tag[w] == tag)
+        return;
+    g_sock_refused[w / 64] |= 1UL << (w % 64);
+    g_sock_refused_tag[w] = tag;
+    uint64_t n = ++g_sock_refusals;
+    if ((n & (n - 1)) == 0)
+        log_error("pal_chan: refused the channel header at window %u (%s); %lu refused so far",
+                  w, pal_chan_hdr_why(why), n);
+}
+
+/* The first window that is a channel nobody here has taken, or 0, with its
+ * region's window count in *out_windows (may be NULL). Loads only: the
+ * scheduler asks it for a blocked accept, and passes no `refuse` - a refusal
+ * is told from accept's own look, not from inside a scheduler pass. Region
+ * starts are told from the middles of regions as pal_chan_accept_scan
+ * describes - never by the magic alone, which a peer can write at the start
+ * of any later window (SHM-1). */
+static unsigned accept_find(uint32_t* out_windows, pal_chan_reject_fn refuse) {
+    return pal_chan_accept_scan(PAL_CHAN_START_VADDR, g_sock_claimed, out_windows, refuse);
 }
 
 int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE* out_client,
@@ -1117,7 +1137,20 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
     bool nonblock = handle->sock.is_nonblocking || (options & PAL_OPTION_NONBLOCK);
 
     for (;;) {
-        unsigned w = accept_find();
+        uint32_t nwin = 0;
+        unsigned w = accept_find(&nwin, sock_refuse);
+        if (w) {
+            /* Checked again here, whatever found the window: nothing below
+             * may form a ring pointer from a header that is not good. A
+             * refusal here waits like an empty backlog, so that a header that
+             * changes under the look cannot keep this loop spinning. */
+            unsigned long hwin = pal_chan_window_addr(w);
+            int why = pal_chan_hdr_check(hwin, w, &nwin);
+            if (why != PAL_CHAN_HDR_OK) {
+                sock_refuse(w, why, pal_chan_u64(hwin, PAL_CHAN_HDR_REGION));
+                w = 0;
+            }
+        }
         if (w) {
             unsigned long win = pal_chan_window_addr(w);
             PAL_HANDLE cli = calloc(1, HANDLE_SIZE(sock));
@@ -1132,7 +1165,7 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
             cli->sock.win            = win;
             cli->sock.widx           = w;
             cli->sock.side           = 1;   /* they asked, we were asked */
-            sock_claim(w);
+            sock_claim(w, nwin);
 
             if (out_client_addr)
                 memset(out_client_addr, 0, sizeof(*out_client_addr));
@@ -1523,8 +1556,20 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
         return -PAL_ERROR_CONNFAILED;
     }
 
-    /* Ours, not an arrival: `accept` must not hand this back to us. */
-    sock_claim((unsigned)win);
+    /* Ours, not an arrival: `accept` must not hand this back to us - nor any
+     * later window of it, which starts with ring bytes the far end writes
+     * (SHM-1). The run's length is the monitor's header, checked like an
+     * accepted one before anything is built on it. */
+    {
+        uint32_t nwin = 0;
+        int why = pal_chan_hdr_check(addr_out, (unsigned)win, &nwin);
+        if (why != PAL_CHAN_HDR_OK) {
+            sock_refuse((unsigned)win, why, pal_chan_u64(addr_out, PAL_CHAN_HDR_REGION));
+            pal_svsm_channel_close((uint64_t)win);
+            return -PAL_ERROR_CONNFAILED;
+        }
+        sock_claim((unsigned)win, nwin);
+    }
 
     /* EVERY socket through a service is framed and carries a connection id.
      *
@@ -2709,7 +2754,7 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle) {
  * on every pass for as long as its ring stays full. */
 pal_wait_flags_t pal_svsm_sock_wait_ready(PAL_HANDLE handle, pal_wait_flags_t want) {
     if (handle->sock.listening)
-        return (want & PAL_WAIT_READ) && (handle->sock.closed || accept_find())
+        return (want & PAL_WAIT_READ) && (handle->sock.closed || accept_find(NULL, NULL))
                ? PAL_WAIT_READ : 0;
     /* Another thread's shutdown or close: the waits it ends are over before
      * anything is asked of the rings - which may be gone. */
