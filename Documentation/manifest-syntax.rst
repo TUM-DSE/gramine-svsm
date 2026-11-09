@@ -320,6 +320,24 @@ server's workers that outlive the request, a helper the vault expects to keep
 running. Every fork of the vault then hands its child to the host's scheduler,
 as before this option existed.
 
+Zeroing read-only ELF segment tails (MicroVault)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    libos.elf.zero_readonly_tail = [true|false]
+    (Default: false)
+
+What the LibOS's ELF loader (the executable and its interpreter) leaves in a
+read-only segment's last file page past ``p_filesz``. By default (``false``)
+it does what Linux and glibc's ``ld.so`` do: a read-only segment without a bss
+(``p_memsz == p_filesz``) keeps the file's bytes there, and one with a bss is
+zeroed from ``p_filesz`` to the end of that page. Gramine used to zero the
+tail of every read-only segment; that took two memory protection changes and,
+on the SVSM PAL, a private copy of a page that is otherwise shared with the
+runtime image, per segment and exec. Set ``true`` to zero them as before.
+Writable segments are zeroed past ``p_filesz`` either way.
+
 .. _stack-size:
 
 Stack size
