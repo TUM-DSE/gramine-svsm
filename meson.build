@@ -299,7 +299,9 @@ subdir('python')
 subdir('tools')
 
 if get_option('libc') == 'glibc'
-    subproject('glibc-' + get_option('glibc_version') + '-1')
+    # -2 since gramine-cpuid.patch: a tree that still holds subprojects/glibc-<v>-1 (extracted with
+    # the old packagefiles copied in) would otherwise keep building glibc without it.
+    subproject('glibc-' + get_option('glibc_version') + '-2')
 elif get_option('libc') == 'musl'
     subproject('musl-1.2.5')
 endif

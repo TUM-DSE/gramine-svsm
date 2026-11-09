@@ -73,6 +73,12 @@ enum {
     GRAMINE_CALL_RWLOCK_READ_UNLOCK,
     GRAMINE_CALL_RWLOCK_WRITE_LOCK,
     GRAMINE_CALL_RWLOCK_WRITE_UNLOCK,
+    /* CPUID from the LibOS's table instead of the instruction (libos_cpuid.c). arg1 is
+     * `leaf | (uint64_t)subleaf << 32`, arg2 a `uint32_t[4]` for EAX, EBX, ECX, EDX. Returns 0 with
+     * the words written, or a negative errno with nothing written: -ENOSYS when the manifest turned
+     * the table off (libos.cpuid_table = false), and -EINVAL from a LibOS that predates the call;
+     * the caller then runs the instruction itself. Added last, so the numbers above keep theirs. */
+    GRAMINE_CALL_CPUID,
 };
 
 static inline int gramine_register_library(const char* name, unsigned long load_address) {
@@ -105,6 +111,13 @@ static inline void gramine_rwlock_write_lock(void* lock) {
 
 static inline void gramine_rwlock_write_unlock(void* lock){
     gramine_call(GRAMINE_CALL_RWLOCK_WRITE_UNLOCK, (unsigned long)lock, 0);
+}
+
+/* No fallback in here: the caller decides what a refusal means (the patched glibc's rtld then runs
+ * the instruction itself, subprojects/packagefiles/glibc-<v>/gramine-cpuid.patch). */
+static inline int gramine_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t regs[4]) {
+    return gramine_call(GRAMINE_CALL_CPUID, (unsigned long)leaf | ((unsigned long)subleaf << 32),
+                        (unsigned long)regs);
 }
 
 #endif /* __ASSEMBLER__ */

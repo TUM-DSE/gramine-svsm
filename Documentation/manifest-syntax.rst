@@ -320,6 +320,23 @@ server's workers that outlive the request, a helper the vault expects to keep
 running. Every fork of the vault then hands its child to the host's scheduler,
 as before this option existed.
 
+CPUID table (MicroVault)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    libos.cpuid_table = [true|false]
+    (Default: true)
+
+Gramine's glibc asks the LibOS for the CPUID results its dynamic loader reads
+at every program start (``GRAMINE_CALL_CPUID``) instead of executing the
+instruction, which on the SVSM PAL leaves the vault for the monitor every time.
+The LibOS answers from a per-process table that it fills with the instruction
+itself on first use, so the values are the instruction's; the table survives
+``execve()`` and, on the SVSM PAL, is inherited by ``fork()``. With ``false`` the
+LibOS refuses the call and glibc executes CPUID as it did before this option
+existed.
+
 .. _stack-size:
 
 Stack size

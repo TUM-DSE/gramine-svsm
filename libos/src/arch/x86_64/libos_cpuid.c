@@ -4,8 +4,11 @@
 
 #include "cpu.h"
 #include "libos_cpuid.h"
+#include "libos_cpuid_table.h"
 #include "libos_internal.h"
 #include "libos_utils.h"
+#include "linux_abi/errors.h"
+#include "toml_utils.h"
 
 /*
  *  List of x86 CPU feature flags. This list is based on Linux v5.19-rc7, see below for details:
@@ -355,4 +358,56 @@ int libos_get_cpu_flags(char** out_cpu_flags) {
 out_err:
     free(flags);
     return ret;
+}
+
+/*
+ * GRAMINE_CALL_CPUID: the patched glibc's rtld asks here instead of executing CPUID (see
+ * libos_cpuid_table.h for why, and why the answer is the instruction's). The table is the LibOS's
+ * own data: one per process, kept across execve (the same LibOS instance loads the new ld.so,
+ * libos_exec.c), inherited by a child of the SVSM PAL's copy-on-write fork and by every instance
+ * cloned from a zygote that filled it (one XCR0 for all of them, pal_main.c svsm.avx512); a child
+ * made by a checkpoint fork starts empty and fills it again.
+ *
+ *   libos.cpuid_table = [true|false]   (default true)
+ *
+ * `false` refuses the call with -ENOSYS, and glibc then executes CPUID as before this call
+ * existed: the switch for an A/B, and for a vault that wants every CPUID re-asked (one restored on
+ * another host, say - the cpu_features ld.so already computed would be stale there too).
+ */
+static struct cpuid_table g_cpuid_table;
+
+static int cpuid_table_retrieve(uint32_t leaf, uint32_t subleaf, uint32_t regs[4]) {
+    int ret = PalCpuIdRetrieve(leaf, subleaf, regs);
+    return ret < 0 ? (int)pal_to_unix_errno(ret) : 0;
+}
+
+static bool cpuid_table_enabled(void) {
+    static int enabled = -1;    /* the manifest's answer, read once */
+    int e = __atomic_load_n(&enabled, __ATOMIC_RELAXED);
+    if (e < 0) {
+        bool on = true;
+        if (toml_bool_in(g_manifest_root, "libos.cpuid_table", /*defaultval=*/true, &on) < 0) {
+            log_warning("Cannot parse 'libos.cpuid_table' (the value must be `true` or `false`) - "
+                        "answering CPUID from the table");
+            on = true;
+        }
+        e = on ? 1 : 0;
+        __atomic_store_n(&enabled, e, __ATOMIC_RELAXED);
+    }
+    return e == 1;
+}
+
+long libos_cpuid_call(unsigned long leaf_subleaf, uint32_t* user_regs) {
+    if (!cpuid_table_enabled())
+        return -ENOSYS;
+    if (!is_user_memory_writable(user_regs, 4 * sizeof(uint32_t)))
+        return -EFAULT;
+    uint32_t regs[4];
+    int ret = cpuid_table_get(&g_cpuid_table, (uint32_t)leaf_subleaf,
+                              (uint32_t)(leaf_subleaf >> 32), regs, cpuid_table_retrieve);
+    if (ret < 0)
+        return ret;
+    for (int r = 0; r < 4; r++)
+        user_regs[r] = regs[r];
+    return 0;
 }

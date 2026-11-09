@@ -1,0 +1,94 @@
+Gramine: answer rtld's CPUIDs with a LibOS call (GRAMINE_CALL_CPUID).
+
+Under Gramine's SVSM PAL every CPUID instruction exits the vault to the monitor
+and back (a reflected #VC, ~9.2 us); rtld executes about 40 at every program
+start (init_cpu_features, update_active, dl_init_cacheinfo/handle_amd), and an
+execve is a program start. sysdeps/x86/gramine-cpuid.h redefines __cpuid and
+__cpuid_count after <cpuid.h> for cpu-features.c's translation unit, which
+holds all of them (dl-cacheinfo.h and dl-minsigstacksize.h are included there),
+as a call the LibOS answers from a per-process table filled by the instruction
+itself (libos/include/arch/x86_64/libos_cpuid_table.h). A refused call runs the
+instruction as before.
+
+diff --git a/sysdeps/x86/cpu-features.c b/sysdeps/x86/cpu-features.c
+--- a/sysdeps/x86/cpu-features.c
++++ b/sysdeps/x86/cpu-features.c
+@@ -21,6 +21,9 @@
+ #include <isa-level.h>
+ #include <get-isa-level.h>
+ #include <cacheinfo.h>
++/* Gramine: every CPUID below, and in the two headers that follow, is a
++   LibOS call (gramine-cpuid.h).  */
++#include <gramine-cpuid.h>
+ #include <dl-cacheinfo.h>
+ #include <dl-minsigstacksize.h>
+ #include <dl-hwcap2.h>
+diff --git a/sysdeps/x86/gramine-cpuid.h b/sysdeps/x86/gramine-cpuid.h
+new file mode 100644
+--- /dev/null
++++ b/sysdeps/x86/gramine-cpuid.h
+@@ -0,0 +1,64 @@
++/* Gramine: rtld's CPUIDs answered by the LibOS instead of the instruction.
++   Not part of the GNU C Library; added by Gramine's gramine-cpuid.patch.
++
++   Under Gramine on the SVSM PAL every CPUID instruction leaves the vault
++   for the monitor and comes back (a reflected #VC, ~9.2 us), and rtld's
++   init_cpu_features, update_active and dl_init_cacheinfo execute about 40
++   of them at every program start, exec included.  This header, included
++   by cpu-features.c right after <cacheinfo.h> (which brings <cpuid.h>),
++   redefines __cpuid and __cpuid_count for the rest of that translation
++   unit - cpu-features.c itself and the dl-cacheinfo.h and
++   dl-minsigstacksize.h it includes, which is every CPUID rtld executes
++   apart from ld.so --list-diagnostics - as a GRAMINE_CALL_CPUID custom
++   call (libos/include/arch/x86_64/gramine_entry_api.h).  The LibOS
++   answers from a per-process table that it fills with the very same
++   instruction, so the values are the instruction's
++   (libos/include/arch/x86_64/libos_cpuid_table.h).
++
++   __cpuid (no ECX input) asks for subleaf 0: its leaves ignore ECX, and
++   a fixed subleaf keeps the instruction's garbage ECX out of the LibOS's
++   key.  When the LibOS refuses (libos.cpuid_table = false, or a LibOS
++   without the call) the instruction runs here, exactly as before.
++
++   This code runs from the __x86_cpu_features IFUNC resolver while rtld
++   relocates itself (dl-get-cpu-features.c), before its GOT is usable:
++   everything here is a static function or a stack variable, reached
++   PC-relative, and gramine_call jumps through %gs, which the LibOS sets
++   up before it starts ld.so.  */
++
++#ifndef _GRAMINE_CPUID_H
++#define _GRAMINE_CPUID_H 1
++
++#include <cpuid.h>
++#include "gramine_entry_api.h"
++
++static void __attribute__ ((noinline, unused))
++gramine_cpuid_regs (unsigned int leaf, unsigned int subleaf,
++		    unsigned int regs[4])
++{
++  if (gramine_cpuid (leaf, subleaf, regs) == 0)
++    return;
++  __asm__ __volatile__ ("cpuid"
++			: "=a" (regs[0]), "=b" (regs[1]), "=c" (regs[2]),
++			  "=d" (regs[3])
++			: "0" (leaf), "2" (subleaf));
++}
++
++#undef __cpuid
++#undef __cpuid_count
++#define __cpuid(level, a, b, c, d) __cpuid_count (level, 0, a, b, c, d)
++/* The words reach the caller's variables as asm outputs, as from the
++   instruction: a plain assignment would make every variable the caller
++   sets but never reads a -Werror=unused-but-set-variable.  */
++#define __cpuid_count(level, count, a, b, c, d)			\
++  do								\
++    {								\
++      unsigned int __gramine_regs[4];				\
++      gramine_cpuid_regs ((level), (count), __gramine_regs);	\
++      __asm__ ("" : "=r" (a), "=r" (b), "=r" (c), "=r" (d)	\
++	       : "0" (__gramine_regs[0]), "1" (__gramine_regs[1]),	\
++		 "2" (__gramine_regs[2]), "3" (__gramine_regs[3]));	\
++    }								\
++  while (0)
++
++#endif /* _GRAMINE_CPUID_H */
