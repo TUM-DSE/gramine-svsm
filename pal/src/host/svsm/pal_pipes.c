@@ -1411,14 +1411,20 @@ static enum pal_svsm_wait_result ring_wait(PAL_HANDLE handle, struct pal_svsm_pi
          * is the moment the other end blocks, and on an idle seat every
          * IDLE_POLL_US - not at the next 200 us look. No wake call from the
          * other end: measured, LineageWake's extra exit per half-round made
-         * context1 11.4k/s against 16.4k/s without it (PROGRESS). The bound
-         * stays, long, for a move that is never seen. A busy lock is no
-         * word to wait on: it keeps the short poll. */
+         * context1 11.4k/s against 16.4k/s without it (PROGRESS). A busy
+         * lock is no word to wait on: it keeps the short poll.
+         *
+         * The bound stays the short one (PAL_SVSM_SHARED_PIPE_POLL_US). Being
+         * in a run set does not mean the other END is: a RESIDENT child
+         * (libos.fork.resident) writes from the service core, outside the
+         * run set, and its moves are seen at no pick - with a 10 ms bound
+         * here pipe_spsc_race fell to 0.2 MiB/s (ub2-full1, 2026-11-09). A
+         * member at the other end wakes this one at its own turn's end,
+         * well inside the bound. */
         if (!busy && dlp && g_svsm_in_run_set) {
             uint64_t arm = PAL_SVSM_LW_ARM(seen, PAL_SVSM_LW_ARM_LWORD_PIPES,
                                            ring_word(word) & 0x0FFFFFFFULL);
             pal_svsm_thread_arm(&arm, 1, /*partial=*/false);
-            dl = pal_svsm_now_usec() + PAL_SVSM_SHARED_PIPE_LINEAGE_POLL_US;
         }
         wr = pal_svsm_poll_block(dlp);
     }
