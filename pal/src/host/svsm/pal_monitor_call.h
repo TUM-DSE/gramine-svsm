@@ -91,6 +91,9 @@ uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
  * the caller must wait some other way). `out_gen`: this vault's child
  * generation at the answer. */
 #define PAL_SVSM_LW_ARM_CHILD   0xCUL
+#define PAL_SVSM_LW_ARM_LWORD_PIPES 0xDUL   /* x = a u32's byte offset in the PIPES region */
+#define PAL_SVSM_LW_ARM_LWORD_FS    0xEUL
+#define PAL_SVSM_LINEAGE_ARMS   4
 #define PAL_SVSM_LW_ARM(expected, which, x) \
     (((uint64_t)(uint32_t)(expected) << 32) | (((uint64_t)(which) & 0xF) << 28) \
      | ((uint64_t)(x) & 0x0FFFFFFFULL))
@@ -99,6 +102,13 @@ uint64_t pal_svsm_fork(uint64_t flags, uint64_t* out_self, uint64_t* out_serial,
 #define PAL_SVSM_LW_CAUSE_CHILD   32UL
 int64_t pal_svsm_lineage_wait(const uint64_t* arms, uint64_t n, uint64_t flags,
                               uint64_t timeout_us, uint64_t* out_gen);
+
+/* LineageWake (0x4FFFFFC1): rbx = the word (which << 28 | offset, an arm
+ * with no `expected` half), rcx = at most this many (0: all), rdx = 1 to
+ * run the first one next on this processor. -> how many were woken, or a
+ * negative status. Only ever a hint: a member whose word moved is found by
+ * the monitor's re-check anyway, a quantum later. */
+int64_t pal_svsm_lineage_wake(uint64_t word, uint64_t max, bool handoff);
 
 /* Wait (0x4FFFFFD5): how did my child end?
  *

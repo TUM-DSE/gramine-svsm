@@ -130,6 +130,10 @@ struct pal_svsm_pipe_pair {
  * drops its caveat for the pipe tests. Logged once, by whoever lays out the
  * arena, which is also what keeps the string in the binary. */
 static const char g_pipe_ring_marker[] = "pipe: SPSC ring (serial-tagged end locks)";
+/* Capability markers, found by the bench arms in the library's .rodata
+ * (UnixBench-baselines arms/microvault.sh MV_CAP_TABLE) - never printed: a
+ * console line costs milliseconds. `used` keeps them in a release build. */
+__attribute__((used)) static const char g_pipe_doorbell_marker[] = "pipe: cross-process doorbell";
 
 /*
  * Where two processes find each other by NAME.
@@ -1376,6 +1380,28 @@ static const uint64_t* shared_poll_deadline(PAL_HANDLE handle, uint64_t* store) 
  * the pair - a private one included, where it can only mean the holder was
  * this process and something is badly wrong.
  */
+/* The LWORD of a ring word for LineageWait and LineageWake: its byte offset
+ * in the PIPES region's data, as the monitor resolves it (ipc/mod.rs
+ * lineage_word_pa; the arena is that data's start). */
+static uint64_t ring_word(const uint32_t* w) {
+    return ((uint64_t)PAL_SVSM_LW_ARM_LWORD_PIPES << 28)
+           | (((uintptr_t)w - (uintptr_t)g_arena) & 0x0FFFFFFFULL);
+}
+
+/* The other end may be waiting for what this one just did: in a lineage run
+ * set, wake it (UnixBench fix 2, the cross-process doorbell). HANDOFF, so a
+ * ping-pong runs the peer next on this processor. `waiters` is the ring's
+ * count of them, which the waiter raises before its last look at the ring
+ * (pal_pipe_wait_begin): published first, then this load, so a waiter is
+ * either seen here or sees the ring change. */
+static void ring_doorbell(PAL_HANDLE handle, const uint32_t* waiters, const uint32_t* word) {
+    if (!g_svsm_in_run_set || !from_arena(handle->pipe.pair) || !pair_crossed(handle->pipe.pair))
+        return;
+    if (!__atomic_load_n(waiters, __ATOMIC_ACQUIRE))
+        return;
+    (void)pal_svsm_lineage_wake(ring_word(word), 1, /*handoff=*/true);
+}
+
 static enum pal_svsm_wait_result ring_wait(PAL_HANDLE handle, struct pal_svsm_pipe_ring* r,
                                            bool reading, bool busy) {
     uint64_t dl;
@@ -1386,10 +1412,26 @@ static enum pal_svsm_wait_result ring_wait(PAL_HANDLE handle, struct pal_svsm_pi
     }
     uint32_t* waiters = reading ? &r->rwait : &r->wwait;
     pal_pipe_wait_begin(waiters);
+    /* The word this wait is for - the producer's tail when reading, the
+     * consumer's head when writing - as it is NOW, before the last look. */
+    const uint32_t* word = reading ? &r->tail : &r->head;
+    uint32_t seen = __atomic_load_n(word, __ATOMIC_ACQUIRE);
     bool ready = reading ? pal_pipe_ring_used(r) != 0 : pal_pipe_ring_room(r) != 0;
     enum pal_svsm_wait_result wr = PAL_SVSM_WAIT_WOKEN;
-    if (busy || !ready)
+    if (busy || !ready) {
+        /* In a lineage run set the wait is ARMED on that word, so the
+         * lineage runs this thread again the moment the other end moves it
+         * (or wakes it, ring_doorbell) - not at the next 200 us look. The
+         * bound stays, long, for a wake that never comes. A busy lock is
+         * no word to wait on: it keeps the short poll. */
+        if (!busy && dlp && g_svsm_in_run_set) {
+            uint64_t arm = PAL_SVSM_LW_ARM(seen, PAL_SVSM_LW_ARM_LWORD_PIPES,
+                                           ring_word(word) & 0x0FFFFFFFULL);
+            pal_svsm_thread_arm(&arm, 1, /*partial=*/false);
+            dl = pal_svsm_now_usec() + PAL_SVSM_SHARED_PIPE_LINEAGE_POLL_US;
+        }
         wr = pal_svsm_poll_block(dlp);
+    }
     pal_pipe_wait_end(waiters);
     return wr;
 }
@@ -1413,8 +1455,9 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
                 ring_unlock(handle, &r->rlock, self);
                 if (n) {
                     /* Space freed: a writer that filled the ring may now
-                     * proceed. */
+                     * proceed - in this process, and in another. */
                     pal_svsm_poll_wake();
+                    ring_doorbell(handle, &r->wwait, &r->head);
                     return (int64_t)n;
                 }
                 /* Another reader of this end - a process that holds it too -
@@ -1469,8 +1512,10 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
                 if (n) {
                     /* This is what makes a pollable event pollable: whoever
                      * is parked in _PalStreamsWaitEvents has to be told there
-                     * is something to see. */
+                     * is something to see - and a reader in another process
+                     * of the lineage, its doorbell. */
                     pal_svsm_poll_wake();
+                    ring_doorbell(handle, &r->rwait, &r->tail);
                     return (int64_t)n;
                 }
                 /* Another writer of this end filled it first. */

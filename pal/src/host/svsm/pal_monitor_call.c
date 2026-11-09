@@ -239,6 +239,18 @@ int64_t pal_svsm_lineage_wait(const uint64_t* arms, uint64_t n, uint64_t flags,
     return (int64_t)data.rcx;
 }
 
+int64_t pal_svsm_lineage_wake(uint64_t word, uint64_t max, bool handoff) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFC1;
+    data.rbx = word;
+    data.rcx = max;
+    data.rdx = handoff ? 1 : 0;
+    data.r8  = 0;
+    data.r9  = 0;
+    extended_monitor_call(&data);
+    return (int64_t)data.rcx;
+}
+
 /* KillChild (0x4FFFFFD3): rbx = my child's id, rcx = its serial -> rcx 0 or
  * a negative status. */
 int64_t pal_svsm_kill_child(uint64_t child_id, uint64_t child_serial) {

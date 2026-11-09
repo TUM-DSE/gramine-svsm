@@ -61,6 +61,13 @@ static int fork_refused(int64_t status) {
  * run set's). */
 uint8_t g_svsm_in_run_set = 0;
 
+/* Capability markers, found by the bench arms in the library's .rodata
+ * (UnixBench-baselines arms/microvault.sh MV_CAP_TABLE) - never printed. Both
+ * are true since fork fix 3: a LINEAGE child runs on its root's own vCPU, and
+ * a wait for it blocks in the lineage on a CHILD arm, woken by the exit. */
+__attribute__((used)) static const char g_marker_ownvcpu[]  = "lineage: fork on own vCPU";
+__attribute__((used)) static const char g_marker_waitwake[] = "wait: woken on child exit";
+
 int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
     uint64_t self = 0;
     /* No other context may hold a LibOS lock at the instant the address

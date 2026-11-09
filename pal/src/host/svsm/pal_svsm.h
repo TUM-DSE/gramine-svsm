@@ -274,6 +274,10 @@ void pal_svsm_net_ctr_reset(void);
  * pair's writer can be another process, and this process's wake never
  * reaches it. */
 #define PAL_SVSM_SHARED_PIPE_POLL_US 200
+/* The same bound inside a lineage run set, where the wait is ARMED on the
+ * ring's word and woken by the other end (pal_pipes.c ring_wait, UnixBench
+ * fix 2): only a fallback for a wake that never comes. */
+#define PAL_SVSM_SHARED_PIPE_LINEAGE_POLL_US 10000
 bool pal_svsm_pipe_is_shared(PAL_HANDLE handle);
 
 /*

@@ -182,7 +182,16 @@ static bool any_watch_ready(void) {
  * an arm left out for its kind, because all three mean the same thing
  * downstream: a wake may be missed, so the park needs a bounded fallback.
  */
-static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
+/* `lineage`: for a LineageWait (the run-set idle, fork fix 3), which also
+ * takes a lineage word (LWORD) and a child arm - a fork-shared pipe's ring
+ * word is one (pal_pipes.c ring_wait). A Park or a Sleep takes neither. */
+static bool arm_lineage_kind(uint64_t arm) {
+    unsigned which = (unsigned)(arm >> 28) & 0xF;
+    return which == PAL_SVSM_LW_ARM_CHILD || which == PAL_SVSM_LW_ARM_LWORD_PIPES
+           || which == PAL_SVSM_LW_ARM_LWORD_FS;
+}
+
+static size_t gather_arms_for(uint64_t* arms, size_t max, bool* partial, bool lineage) {
     size_t n = 0;
     *partial = false;
     PAL_HANDLE t = g_current;
@@ -191,7 +200,8 @@ static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
             if (t->thread.arms_partial)
                 *partial = true;
             for (unsigned i = 0; i < t->thread.n_arms; i++) {
-                if (!pal_chan_arm_parkable(t->thread.arms[i])) {
+                if (!pal_chan_arm_parkable(t->thread.arms[i])
+                        && !(lineage && arm_lineage_kind(t->thread.arms[i]))) {
                     *partial = true;
                     continue;
                 }
@@ -238,6 +248,10 @@ static bool park_on(const uint64_t* arms, size_t n, uint64_t usec) {
 
 /* The words the vault's blocked contexts wait on, for a wait elsewhere that
  * must also wake on them (the lineage wait for a child, pal_process.c). */
+static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
+    return gather_arms_for(arms, max, partial, /*lineage=*/false);
+}
+
 size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial) {
     return gather_arms(arms, max, partial);
 }
@@ -277,8 +291,14 @@ static void idle_until(uint64_t deadline_us) {
          * takes Park's channel arms; one it cannot take (a device word) or
          * no drive here refuses it, and the paths below run as before. */
         if (g_svsm_in_run_set) {
-            uint64_t lw = partial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US : left;
-            if (pal_svsm_lineage_wait(n ? arms : NULL, n, 0, lw, NULL) >= 0) {
+            /* Gathered again for the lineage: its own kinds as well - a
+             * fork-shared pipe's ring word (UnixBench fix 2) - and its four
+             * arms rather than Park's three. */
+            uint64_t larms[PAL_SVSM_LINEAGE_ARMS];
+            bool lpartial = false;
+            size_t ln = gather_arms_for(larms, PAL_SVSM_LINEAGE_ARMS, &lpartial, /*lineage=*/true);
+            uint64_t lw = lpartial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US : left;
+            if (pal_svsm_lineage_wait(ln ? larms : NULL, ln, 0, lw, NULL) >= 0) {
                 pal_svsm_poll_wake();
                 return;
             }
