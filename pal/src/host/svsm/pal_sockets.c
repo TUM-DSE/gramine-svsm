@@ -90,16 +90,27 @@ void pal_svsm_net_ctr_report(void) {
     c.dgram_frames  = __atomic_load_n(&g_pal_svsm_net_ctr.dgram_frames, __ATOMIC_RELAXED);
     c.udp_q_drop    = __atomic_load_n(&g_pal_svsm_net_ctr.udp_q_drop, __ATOMIC_RELAXED);
     c.head_moved    = __atomic_load_n(&g_pal_svsm_net_ctr.head_moved, __ATOMIC_RELAXED);
+    uint64_t refused = 0;
+    for (int i = 0; i < 8; i++) {
+        c.connect_refused[i] = __atomic_load_n(&g_pal_svsm_net_ctr.connect_refused[i],
+                                               __ATOMIC_RELAXED);
+        refused |= c.connect_refused[i];
+    }
 #line 89
     if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready
-          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop | c.head_moved))
+          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop | c.head_moved | refused))
         return;
     log_always("pal_net: sends %lu eagain_credit %lu eagain_ring %lu idle_rounds %lu "
                "pollers_ready %lu credit_lost %lu credits_owed_retried %lu fin_lost %lu "
-               "fin_resent %lu dgrams %lu dgram_frames %lu udp_q_drop %lu head_moved %lu",
+               "fin_resent %lu dgrams %lu dgram_frames %lu udp_q_drop %lu head_moved %lu "
+               "refused unsaid %lu malformed %lu udp_slot %lu session_slot %lu stack_slot %lu "
+               "pcb %lu connect_err %lu connect_failed %lu",
                c.sends, c.eagain_credit, c.eagain_ring, c.idle_rounds,
                c.pollers_ready, c.credit_lost, c.credits_owed_retried, c.fin_lost, c.fin_resent,
-               c.dgrams, c.dgram_frames, c.udp_q_drop, c.head_moved);
+               c.dgrams, c.dgram_frames, c.udp_q_drop, c.head_moved,
+               c.connect_refused[0], c.connect_refused[1], c.connect_refused[2],
+               c.connect_refused[3], c.connect_refused[4], c.connect_refused[5],
+               c.connect_refused[6], c.connect_refused[7]);
 #line 96
 }
 
@@ -1359,9 +1370,28 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
                 return -PAL_ERROR_CONNFAILED;
             /* The service's own codes are negative; it has already said
                which kind of failure it was, and the application only gets
-               to know that the connection did not happen. */
-            if (rep.status != 0)
+               to know that the connection did not happen. Which limit or
+               failure it was (the reply's detail: netsvc mvnet.h
+               MVNET_REF_*, the low byte; lwIP's err_t negated, the high) is
+               counted here and said on the 1st, 2nd, 4th... of each, so a
+               refusal is diagnosed from this end too (netsvc-5500). */
+            if (rep.status != 0) {
+                unsigned why = rep.pad & 0xff;
+                if (why >= 8)
+                    why = 0;
+                uint64_t n = __atomic_add_fetch(&g_pal_svsm_net_ctr.connect_refused[why], 1,
+                                                __ATOMIC_RELAXED);
+                if ((n & (n - 1)) == 0) {
+                    static const char* const names[8] = {
+                        "unsaid", "malformed", "udp_slot", "session_slot", "stack_slot",
+                        "pcb", "connect_err", "connect_failed",
+                    };
+                    log_error("connect refused by the network service: %s (status %d, lwIP "
+                                "err %d) - %lu so far", names[why], rep.status,
+                                -(int)(int8_t)(rep.pad >> 8), n);
+                }
                 return -PAL_ERROR_CONNFAILED;
+            }
             if (out_rep)
                 *out_rep = rep;
             return 0;
