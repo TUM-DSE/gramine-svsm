@@ -5,6 +5,7 @@
  * Implementation of system call "execve".
  */
 
+#include "libos_exec_free.h"
 #include "libos_internal.h"
 #include "libos_lock.h"
 #include "libos_process.h"
@@ -13,6 +14,18 @@
 #include "libos_vma.h"
 #include "linux_abi/errors.h"
 #include "pal.h"
+
+static int exec_bkeep_unmap(void* addr, size_t length, void** tmp_vma) {
+    /* `dump_all_vmas` leaves out VMA_INTERNAL ones (vma_filter_all), so every VMA freed here is a
+     * user one. */
+    return bkeep_munmap(addr, length, /*is_internal=*/false, tmp_vma);
+}
+
+static const struct exec_free_ops g_exec_free_ops = {
+    .bkeep_unmap = exec_bkeep_unmap,
+    .pal_free    = PalVirtualMemoryFree,
+    .remove_tmp  = bkeep_remove_tmp_vma,
+};
 
 /* new_argp: pointer to beginning of first stack frame (argc, argv[0], ...)
  * new_auxv: pointer inside first stack frame (auxv[0], auxv[1], ...) */
@@ -35,22 +48,26 @@ noreturn static void __libos_syscall_execve_rtld(void* new_argp, elf_auxv_t* new
         goto error;
     }
 
+    /* One PalVirtualMemoryFree (one monitor call on svsm) per run of exactly adjacent VMAs instead
+     * of one per VMA; the same pages, each run's placeholders kept until its free has been issued
+     * (libos_exec_free.h). The dump is in address order. */
     struct libos_thread* cur_thread = get_cur_thread();
+    struct exec_free_run run;
+    exec_free_init(&run, &g_exec_free_ops);
     for (struct libos_vma_info* vma = vmas; vma < vmas + count; vma++) {
+        assert(!(vma->flags & VMA_INTERNAL));
+        enum exec_free_kind kind = EXEC_FREE_MAPPED;
         /* Don't free the current stack */
         if (vma->addr == cur_thread->stack || vma->addr == cur_thread->stack_red)
-            continue;
-
-        void* tmp_vma = NULL;
-        if (bkeep_munmap(vma->addr, vma->length, !!(vma->flags & VMA_INTERNAL), &tmp_vma) < 0) {
+            kind = EXEC_FREE_KEEP;
+        else if (vma->flags & VMA_UNMAPPED)
+            kind = EXEC_FREE_UNMAPPED;
+        if (exec_free_vma(&run, vma->addr, vma->length, kind) < 0) {
             BUG();
         }
-        if (!(vma->flags & VMA_UNMAPPED)) {
-            if (PalVirtualMemoryFree(vma->addr, vma->length) < 0) {
-                BUG();
-            }
-        }
-        bkeep_remove_tmp_vma(tmp_vma);
+    }
+    if (exec_free_finish(&run) < 0) {
+        BUG();
     }
 
     free_vma_info_array(vmas, count);
