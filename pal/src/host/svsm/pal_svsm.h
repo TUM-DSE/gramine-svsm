@@ -254,6 +254,9 @@ extern unsigned g_pal_svsm_npeers;
  * peer connection (all zero when not given). */
 extern uint8_t g_pal_svsm_self_addr[4];
 int pal_svsm_parse_addr(const char* s, bool with_port, uint8_t ip[4], uint16_t* port);
+/* The in-process eventfd's readiness (pal_eventfd.c), for poll_one. */
+bool pal_svsm_eventfd_readable(PAL_HANDLE handle);
+bool pal_svsm_eventfd_writable(PAL_HANDLE handle);
 void pal_svsm_poll_wake(void);
 /* The Park arms of every blocked context (at most `max`); *partial if some
  * were left out. */

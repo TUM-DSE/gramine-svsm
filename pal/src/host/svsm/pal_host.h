@@ -74,6 +74,16 @@ struct pal_handle_inner {
             bool auto_clear;
         } event;
 
+        /* An in-process eventfd (pal_eventfd.c): the counter itself. A
+         * vault's eventfd never crosses a process - the LibOS emulation
+         * marks one inherited by a child as broken - so this is all there
+         * is to it. */
+        struct {
+            uint64_t val;            /* atomic */
+            bool     nonblocking;
+            bool     semaphore;
+        } eventfd;
+
         /* A cooperative context, not a vCPU: the monitor runs one VMSA per
          * vault and refuses a second entrant into it, so everything here is
          * scheduled by the PAL itself inside that one thread of execution.
