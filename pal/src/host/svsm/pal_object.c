@@ -35,6 +35,14 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
                 got |= PAL_WAIT_HANG_UP;
             break;
 
+        case PAL_TYPE_EVENTFD:
+            /* An in-process counter (pal_eventfd.c): two loads. */
+            if ((want & PAL_WAIT_READ) && pal_svsm_eventfd_readable(handle))
+                got |= PAL_WAIT_READ;
+            if ((want & PAL_WAIT_WRITE) && pal_svsm_eventfd_writable(handle))
+                got |= PAL_WAIT_WRITE;
+            break;
+
         case PAL_TYPE_SOCKET:
             /* A blocking send or recv waiting in the scheduler: its own test,
              * and nothing it did not ask for (pal_svsm.h). */
