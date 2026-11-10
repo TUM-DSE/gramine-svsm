@@ -2824,6 +2824,16 @@ bool pal_svsm_sock_peer_gone(PAL_HANDLE handle) {
 }
 
 bool pal_svsm_sock_readable(PAL_HANDLE handle) {
+    /* A LISTENING socket is readable when an accept would find a channel -
+     * what poll(2)/epoll(2) say of a listener with a pending connection. It
+     * has no channel of its own, so the test below said "never", and every
+     * server that waits for connections in an event loop (mongod's asio,
+     * Go's netpoll - every gRPC server in DeathStarBench) slept through its
+     * clients: 6 channels granted to mongod and one accept() call, at
+     * startup (DSB bring-up, 2026-11-10). The blocking accept never needed
+     * this; sock_wait_ready makes the same test for it. Loads only. */
+    if (handle->sock.listening)
+        return handle->sock.closed || accept_find(NULL, NULL) != 0;
     if (!sock_has_chan(handle))
         return false;
     /* What a previous read could not take is readable too, or a poll
