@@ -277,4 +277,224 @@ static inline int pal_chan_recv(struct pal_chan_ring* r, void* msg, uint32_t max
     return 0;
 }
 
+/*
+ * WHICH WINDOWS ARE A NEW CHANNEL (SHM-1, notes/shm/SHM-REVIEW.md).
+ *
+ * The directory's live bits say which windows are booked, one bit per
+ * window, and a region of several windows sets them all. Only the region's
+ * FIRST window starts with the monitor's header; window w+1 of a region
+ * starts with region page 512, which for a netsvc-sized channel (65536 x 32
+ * each way, 1027 pages, three windows) is in RING0 - bytes the requester
+ * writes. Taking every live, unclaimed window that starts with "MVCHAN01"
+ * therefore let a client, or an unlucky payload, plant a header with a
+ * geometry of its choosing: the server then faulted on a "control page" that
+ * was the client's ring, or wrote its replies at offsets the client chose.
+ *
+ * The directory does not mark region starts (SHM-4 would add a bitmap), so a
+ * start is inferred the way tools/dpdksvc/rings/mvring_dir.h does it, never
+ * from the bytes of a window alone:
+ *   - a window this vault holds is held with its whole run (pal_chan_hold_run),
+ *     so the later windows of a held channel are never candidates;
+ *   - a live, unheld window whose predecessor is live and unheld is not a
+ *     candidate either: in ascending order a region's first window is looked
+ *     at before its middle, so such a window is the middle of a region not
+ *     taken (or not takeable) yet;
+ *   - a candidate's header must be the monitor's (magic, abi 1, KIND_CHANNEL)
+ *     with a geometry inside the region and a window count that agrees with
+ *     the page count and with the live bits.
+ * The predecessor's bit is read AFTER the candidate's: a grant writes the
+ * live words in ascending order, so a reader that sees the candidate's bit
+ * set also sees its predecessor's.
+ *
+ * Loads only; nothing is consumed by looking. Takes the slot's base (window
+ * 0, the directory) so that test/chan_accept_test.c runs the same code on an
+ * imitation of the slot.
+ */
+#define PAL_CHAN_SLOT_WINDOWS    512u   /* IPC_WINDOWS */
+#define PAL_CHAN_REGION_WINDOWS  256u   /* MAX_WINDOWS_PER_REGION (monitor ipc/mod.rs) */
+#define PAL_CHAN_PAGE            4096u
+#define PAL_CHAN_HDR_ABI         0x008
+#define PAL_CHAN_HDR_REGION      0x010  /* region id u32, then epoch u32 */
+#define PAL_CHAN_HDR_NPAGES      0x018
+#define PAL_CHAN_HDR_WINDOWS     0x01C
+#define PAL_CHAN_HDR_KIND        0x048
+#define PAL_CHAN_KIND_CHANNEL    0u
+#define PAL_CHAN_HDR_FIXED_PAGES 3u     /* HDR, CTL0, CTL1 */
+/* The monitor's ok_ring (ipc/mod.rs, the endpoint policy check). */
+#define PAL_CHAN_SLOT_MIN        64u
+#define PAL_CHAN_SLOT_MAX        65536u
+#define PAL_CHAN_DEPTH_MAX       4096u
+
+/* Why a header was refused; 0 is a good one. */
+enum {
+    PAL_CHAN_HDR_OK = 0,
+    PAL_CHAN_HDR_BAD_MAGIC,
+    PAL_CHAN_HDR_BAD_ABI,
+    PAL_CHAN_HDR_BAD_KIND,
+    PAL_CHAN_HDR_BAD_WINDOWS,
+    PAL_CHAN_HDR_BAD_NPAGES,
+    PAL_CHAN_HDR_BAD_RING0,
+    PAL_CHAN_HDR_BAD_RING1,
+    PAL_CHAN_HDR_NO_RING,
+    PAL_CHAN_HDR_OVERLAP,
+};
+
+static inline const char* pal_chan_hdr_why(int why) {
+    switch (why) {
+        case PAL_CHAN_HDR_OK:          return "ok";
+        case PAL_CHAN_HDR_BAD_MAGIC:   return "no header";
+        case PAL_CHAN_HDR_BAD_ABI:     return "abi";
+        case PAL_CHAN_HDR_BAD_KIND:    return "kind";
+        case PAL_CHAN_HDR_BAD_WINDOWS: return "window count";
+        case PAL_CHAN_HDR_BAD_NPAGES:  return "page count";
+        case PAL_CHAN_HDR_BAD_RING0:   return "ring 0 geometry";
+        case PAL_CHAN_HDR_BAD_RING1:   return "ring 1 geometry";
+        case PAL_CHAN_HDR_NO_RING:     return "no ring";
+        case PAL_CHAN_HDR_OVERLAP:     return "rings overlap";
+    }
+    return "?";
+}
+
+static inline bool pal_chan_pow2(uint32_t v) {
+    return v != 0 && (v & (v - 1)) == 0;
+}
+
+/* One ring's geometry against the region's page count. An absent direction
+ * is all zeros but its offset (the monitor still sets off_pages). */
+static inline bool pal_chan_ring_geom_ok(uint32_t slot, uint32_t depth, uint32_t off,
+                                         uint32_t pages, uint32_t npages, bool* present) {
+    *present = false;
+    if (slot == 0 && depth == 0)
+        return pages == 0;
+    if (slot < PAL_CHAN_SLOT_MIN || slot > PAL_CHAN_SLOT_MAX || !pal_chan_pow2(slot)
+        || depth > PAL_CHAN_DEPTH_MAX || !pal_chan_pow2(depth))
+        return false;
+    uint64_t need = ((uint64_t)slot * depth + PAL_CHAN_PAGE - 1) / PAL_CHAN_PAGE;
+    if ((uint64_t)pages < need)
+        return false;
+    if (off < PAL_CHAN_HDR_FIXED_PAGES || (uint64_t)off + pages > npages)
+        return false;
+    *present = true;
+    return true;
+}
+
+/*
+ * Is the page at `hdr`, the first page of window `w`, a channel header this
+ * vault may build rings from? Reads that page only, each field once, and
+ * forms no pointer: every offset pal_chan_ring_init will add to the window
+ * is checked to stay inside the region. Returns PAL_CHAN_HDR_OK and the
+ * region's window count, or the reason.
+ *
+ * Only meaningful at a region's first window, whose header page the monitor
+ * maps read-only to both sides; at any other window these are a peer's
+ * bytes, which is why pal_chan_accept_scan never asks about one.
+ */
+static inline int pal_chan_hdr_check(unsigned long hdr, unsigned w, uint32_t* out_windows) {
+    if (pal_chan_u64(hdr, 0) != PAL_CHAN_HDR_MAGIC)
+        return PAL_CHAN_HDR_BAD_MAGIC;
+    if (pal_chan_u32(hdr, PAL_CHAN_HDR_ABI) != 1)
+        return PAL_CHAN_HDR_BAD_ABI;
+    if (pal_chan_u32(hdr, PAL_CHAN_HDR_KIND) != PAL_CHAN_KIND_CHANNEL)
+        return PAL_CHAN_HDR_BAD_KIND;
+    uint32_t n  = pal_chan_u32(hdr, PAL_CHAN_HDR_WINDOWS);
+    uint32_t np = pal_chan_u32(hdr, PAL_CHAN_HDR_NPAGES);
+    if (n == 0 || n > PAL_CHAN_REGION_WINDOWS || w == 0
+        || (uint64_t)w + n > PAL_CHAN_SLOT_WINDOWS)
+        return PAL_CHAN_HDR_BAD_WINDOWS;
+    uint64_t bytes = (uint64_t)np * PAL_CHAN_PAGE;
+    if (np < PAL_CHAN_HDR_FIXED_PAGES || bytes > ((uint64_t)n << PAL_CHAN_WINDOW_SHIFT)
+        || bytes <= ((uint64_t)(n - 1) << PAL_CHAN_WINDOW_SHIFT))
+        return PAL_CHAN_HDR_BAD_NPAGES;
+    uint32_t g[2][4];
+    for (int s = 0; s < 2; s++)
+        for (int i = 0; i < 4; i++)
+            g[s][i] = pal_chan_u32(hdr, PAL_CHAN_HDR_RING(s) + 4 * i);
+    bool p0, p1;
+    if (!pal_chan_ring_geom_ok(g[0][0], g[0][1], g[0][2], g[0][3], np, &p0))
+        return PAL_CHAN_HDR_BAD_RING0;
+    if (!pal_chan_ring_geom_ok(g[1][0], g[1][1], g[1][2], g[1][3], np, &p1))
+        return PAL_CHAN_HDR_BAD_RING1;
+    if (!p0 && !p1)
+        return PAL_CHAN_HDR_NO_RING;
+    if (p0 && p1 && g[0][2] < g[1][2] + g[1][3] && g[1][2] < g[0][2] + g[0][3])
+        return PAL_CHAN_HDR_OVERLAP;
+    if (out_windows)
+        *out_windows = n;
+    return PAL_CHAN_HDR_OK;
+}
+
+static inline bool pal_chan_bit(const uint64_t* bm, unsigned w) {
+    return w < PAL_CHAN_SLOT_WINDOWS && ((bm[w / 64] >> (w % 64)) & 1);
+}
+
+static inline bool pal_chan_dir_live(unsigned long slot_base, unsigned w) {
+    if (w == 0 || w >= PAL_CHAN_SLOT_WINDOWS)
+        return false;
+    return (pal_chan_u64(slot_base, PAL_CHAN_DIR_LIVE + (w / 64) * 8) >> (w % 64)) & 1;
+}
+
+/* Hold a channel's whole run of windows in `held` (one bit per window), and
+ * remember the run's length at its first window so the release frees the
+ * same run. */
+static inline void pal_chan_hold_run(uint64_t* held, uint16_t* run_len, unsigned w, unsigned n) {
+    if (w == 0 || w >= PAL_CHAN_SLOT_WINDOWS)
+        return;
+    if (n == 0)
+        n = 1;
+    if (w + n > PAL_CHAN_SLOT_WINDOWS)
+        n = PAL_CHAN_SLOT_WINDOWS - w;
+    for (unsigned i = 0; i < n; i++)
+        held[(w + i) / 64] |= 1UL << ((w + i) % 64);
+    run_len[w] = (uint16_t)n;
+}
+
+static inline void pal_chan_release_run(uint64_t* held, uint16_t* run_len, unsigned w) {
+    if (w == 0 || w >= PAL_CHAN_SLOT_WINDOWS)
+        return;
+    unsigned n = run_len[w] ? run_len[w] : 1;
+    if (w + n > PAL_CHAN_SLOT_WINDOWS)
+        n = PAL_CHAN_SLOT_WINDOWS - w;
+    for (unsigned i = 0; i < n; i++)
+        held[(w + i) / 64] &= ~(1UL << ((w + i) % 64));
+    run_len[w] = 0;
+}
+
+/* Told about a candidate whose header was refused: the window, the reason,
+ * and the header's region-id/epoch word (to tell one refusal from the next). */
+typedef void (*pal_chan_reject_fn)(unsigned w, int why, uint64_t tag);
+
+/*
+ * The first window of a channel granted to this vault that it does not hold
+ * yet, or 0; its window count in *out_windows. `held` is this vault's own
+ * record (PAL_CHAN_SLOT_WINDOWS bits) of the windows it holds, either side.
+ * A run that is not yet wholly live is skipped silently (a grant publishes
+ * the live words one at a time); a refused header goes to `reject`.
+ */
+static inline unsigned pal_chan_accept_scan(unsigned long slot_base, const uint64_t* held,
+                                            uint32_t* out_windows, pal_chan_reject_fn reject) {
+    for (unsigned w = 1; w < PAL_CHAN_SLOT_WINDOWS; w++) {
+        if (pal_chan_bit(held, w) || !pal_chan_dir_live(slot_base, w))
+            continue;
+        if (w > 1 && pal_chan_dir_live(slot_base, w - 1) && !pal_chan_bit(held, w - 1))
+            continue;                    /* the middle of a region not taken */
+        unsigned long hdr = slot_base + ((unsigned long)w << PAL_CHAN_WINDOW_SHIFT);
+        uint32_t n = 0;
+        int why = pal_chan_hdr_check(hdr, w, &n);
+        if (why != PAL_CHAN_HDR_OK) {
+            if (reject)
+                reject(w, why, pal_chan_u64(hdr, PAL_CHAN_HDR_REGION));
+            continue;
+        }
+        bool whole = true;
+        for (unsigned i = 1; i < n && whole; i++)
+            whole = !pal_chan_bit(held, w + i) && pal_chan_dir_live(slot_base, w + i);
+        if (!whole)
+            continue;
+        if (out_windows)
+            *out_windows = n;
+        return w;
+    }
+    return 0;
+}
+
 #endif /* PAL_SVSM_CHAN_H */
