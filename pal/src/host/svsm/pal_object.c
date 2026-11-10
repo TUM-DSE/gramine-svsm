@@ -213,6 +213,25 @@ int _PalStreamsWaitEvents(size_t count, PAL_HANDLE* handle_array, pal_wait_flags
             if (!dl || eff_deadline < *dl)
                 dl = &eff_deadline;
         }
+        /* A LISTENING socket has no word to arm either: a new connection is
+         * a window the monitor publishes, and the cause it posts for that
+         * wakes a parked vault - but a poll whose only handle is a listener,
+         * with no timeout, had no arm and no deadline, and the PAL called it
+         * a deadlock and killed the server ("every thread is blocked",
+         * peer_listener_poll). Bounded the way a blocked accept is
+         * (_PalSocketAccept: 50 ms), so the re-test after a wake - or at the
+         * bound - sees the window (pal_svsm_sock_readable). */
+        for (size_t i = 0; i < count; i++) {
+            if (handle_array[i] && handle_array[i]->hdr.type == PAL_TYPE_SOCKET
+                    && handle_array[i]->sock.listening && (events[i] & PAL_WAIT_READ)) {
+                uint64_t ldl = pal_svsm_now_usec() + PAL_SVSM_ACCEPT_POLL_US;
+                if (!dl || ldl < *dl) {
+                    eff_deadline = ldl;
+                    dl = &eff_deadline;
+                }
+                break;
+            }
+        }
 
         enum pal_svsm_wait_result wr = pal_svsm_poll_block(dl);
         if (wr == PAL_SVSM_WAIT_TIMEOUT) {

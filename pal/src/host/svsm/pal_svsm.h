@@ -299,6 +299,10 @@ void pal_svsm_net_ctr_reset(void);
  * pair's writer can be another process, and this process's wake never
  * reaches it. */
 #define PAL_SVSM_SHARED_PIPE_POLL_US 200
+/* How long a poll over a LISTENING socket may sleep before looking again:
+ * the blocked accept's bound (pal_sockets.c), a backstop for the monitor's
+ * new-window cause. */
+#define PAL_SVSM_ACCEPT_POLL_US 50000
 bool pal_svsm_pipe_is_shared(PAL_HANDLE handle);
 
 /*
