@@ -105,20 +105,27 @@ static int dev_tty_flush(struct libos_handle* hdl) {
 
 /*
  * /dev/mvlease - svsm auto-peering's lease (notes/net/AUTO-PEER.md; the PAL's
- * pal_svsm_ipam.c). WRITTEN once by the runtime's finalize wrapper, as a
- * clone's first code after Finalize (services/common/include/mv_first_entry.h):
- * the PAL then JOINs and takes this instance's lease, bounded, before any app
- * code ([svsm.auto] join = "immediate", the default; "lazy" defers it to the
- * first use), and the LibOS follows its names (hostname, the emulated
- * /etc/resolv.conf). READ: the lease as one line, as held now - reading never
- * joins. ENODEV on a PAL without auto-peering.
+ * pal_svsm_ipam.c). WRITTEN by the runtime's finalize wrapper
+ * (services/common/include/mv_first_entry.h): "hook" in the zygote just before
+ * Finalize, and "member" as a deployment member's first code after it (the
+ * monitor's answer to Finalize says which clone is one; a non-member writes
+ * nothing). The PAL then JOINs and takes this instance's lease, bounded,
+ * before any app code ([svsm.auto] join = "immediate", the default; "lazy"
+ * defers it to the first use), and the LibOS follows its names (hostname, the
+ * emulated /etc/resolv.conf). READ: the lease as one line, as held now -
+ * reading never joins. ENODEV on a PAL without auto-peering.
  */
 static ssize_t dev_mvlease_write(struct libos_handle* hdl, const void* buf, size_t count) {
     __UNUSED(hdl);
-    __UNUSED(buf);
     if (!g_pal_public_state->auto_first_entry)
         return -ENODEV;
-    libos_refresh_names(/*first_entry=*/true);
+    /* "hook": the zygote, before Finalize; "member": a member clone's first entry. */
+    if (count >= 4 && !memcmp(buf, "hook", 4))
+        g_pal_public_state->auto_first_entry(PAL_AUTO_HOOK);
+    else if (count >= 6 && !memcmp(buf, "member", 6))
+        libos_refresh_names(PAL_AUTO_MEMBER);
+    else
+        return -EINVAL;
     return count;
 }
 

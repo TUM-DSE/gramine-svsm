@@ -280,13 +280,18 @@ struct pal_public_state {
      * (pal_svsm_ipam.c). NULL on every other host. */
     void (*refresh_dns_host)(void);
     /* svsm auto-peering (AUTO-PEER, pal_svsm_ipam.c); NULL on every other host.
-     * auto_first_entry: the first code of a clone after Finalize (the runtime's
-     * finalize wrapper writes /dev/mvlease): with [svsm.auto] join = "immediate",
-     * the default, this instance JOINs and takes its lease here, bounded, before
-     * any app code. auto_lease_text: the lease as one line, never joining.
+     * auto_first_entry(what): /dev/mvlease written by the runtime's finalize
+     * wrapper - PAL_AUTO_HOOK in the zygote just before Finalize (its clones are
+     * told at first entry, so the PAL never asks the monitor on its own for one
+     * that was not: a vault in no deployment pays nothing), PAL_AUTO_MEMBER as a
+     * MEMBER clone's first code after Finalize: with [svsm.auto] join =
+     * "immediate", the default, it JOINs and takes its lease here, bounded,
+     * before any app code. auto_lease_text: the lease as one line, never joining.
      * dns_host_leased: dns_host holds a lease (the LibOS then mounts the emulated
      * /etc/resolv.conf, if [svsm.dns] did not already). */
-    void (*auto_first_entry)(void);
+#define PAL_AUTO_HOOK   1
+#define PAL_AUTO_MEMBER 2
+    void (*auto_first_entry)(int what);
     size_t (*auto_lease_text)(char* buf, size_t cap);
     bool dns_host_leased;
 };

@@ -38,7 +38,7 @@ void pal_svsm_auto_after_fork(void);
  * (a clone's first code after Finalize: joins unless join = "lazy") and
  * auto_lease_text (never joins). */
 void pal_svsm_auto_refresh(void);
-void pal_svsm_auto_first_entry(void);
+void pal_svsm_auto_first_entry(int what);   /* PAL_AUTO_HOOK / PAL_AUTO_MEMBER */
 size_t pal_svsm_auto_lease_text(char* buf, size_t cap);
 
 /* The lease, after pal_svsm_auto_ensure() said true. */

@@ -39,7 +39,7 @@ long libos_syscall_uname(struct linux_new_utsname* buf) {
     if (!is_user_memory_writable(buf, sizeof(*buf)))
         return -EFAULT;
 
-    libos_refresh_names(/*first_entry=*/false);
+    libos_refresh_names(/*first_entry=*/0);
 
     memcpy(buf, &g_current_uname, sizeof(g_current_uname));
     return 0;
@@ -48,15 +48,20 @@ long libos_syscall_uname(struct linux_new_utsname* buf) {
 /* A PAL that learns its names after init (svsm auto-peering's lease, in the
  * clone that runs the app) is followed: the hostname until the app names
  * itself, and the emulated /etc/resolv.conf mounted once a lease filled it.
- * first_entry: the clone's first code after Finalize (/dev/mvlease written by
- * the runtime's finalize wrapper) - the PAL leases there unless the manifest
- * says join = "lazy"; otherwise any use (uname) leases if not yet. */
-void libos_refresh_names(bool first_entry) {
-    void (*f)(void) = first_entry ? g_pal_public_state->auto_first_entry
-                                  : g_pal_public_state->refresh_dns_host;
-    if (!f)
-        return;
-    f();
+ * first_entry (PAL_AUTO_MEMBER): a member clone's first code after Finalize
+ * (/dev/mvlease written by the runtime's finalize wrapper) - the PAL leases
+ * there unless the manifest says join = "lazy"; 0: any use (uname), which
+ * leases if not yet and if this instance may. */
+void libos_refresh_names(int first_entry) {
+    if (first_entry) {
+        if (!g_pal_public_state->auto_first_entry)
+            return;
+        g_pal_public_state->auto_first_entry(first_entry);
+    } else {
+        if (!g_pal_public_state->refresh_dns_host)
+            return;
+        g_pal_public_state->refresh_dns_host();
+    }
     if (!g_hostname_by_app) {
         const char* h = g_pal_public_state->dns_host.hostname;
         size_t n = strnlen(h, sizeof(g_pal_public_state->dns_host.hostname));

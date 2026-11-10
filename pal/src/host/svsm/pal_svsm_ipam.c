@@ -7,13 +7,20 @@
  * (§3.3). It is trusted for nothing the monitor does not check again - and
  * in phase 1 nothing is granted on its word at all.
  *
- * WHEN (owner, 2026-11-10): IMMEDIATELY by default. Every clone, on its first
- * entry after Finalize and before any app code, JOINs and holds its lease:
- * the runtime's finalize wrapper writes /dev/mvlease (services/common/include/
- * mv_first_entry.h), the LibOS calls auto_first_entry, and ensure() runs with
- * the bounded wait (Q18: up to PAL_SVSM_IPAM_WAIT_US, then the app starts
- * without an address and new binds fail closed). A fork child takes its own
- * lease in the PAL's fork return, before its code. `[svsm.auto] join = "lazy"`
+ * WHEN (owner, 2026-11-10): IMMEDIATELY by default, and for MEMBERS only.
+ * Every clone in a deployment, on its first entry after Finalize and before
+ * any app code, JOINs and holds its lease: the monitor answers Finalize in a
+ * clone with "member or not" (kernel ipc/auto.rs first_entry_rdx), the
+ * runtime's finalize wrapper writes "member" to /dev/mvlease for a member
+ * only (services/common/include/mv_first_entry.h), the LibOS calls
+ * auto_first_entry(PAL_AUTO_MEMBER), and ensure() runs with the bounded wait
+ * (Q18: up to PAL_SVSM_IPAM_WAIT_US, then the app starts without an address
+ * and new binds fail closed). The same wrapper wrote "hook" in the zygote
+ * (g_hooked): its clones are TOLD, so a clone that was not told is no member
+ * and never asks the monitor - a vault in no deployment pays nothing, at its
+ * first entry or later. A runtime without the hook (no "hook" from its
+ * zygote) keeps the first-use JOIN. A fork child takes its own lease in the
+ * PAL's fork return, before its code, if its parent was a member. `[svsm.auto] join = "lazy"`
  * (measured) opts out: the lease is then taken on the first use (uname or
  * gethostname, a query to the stub, the emulated resolv.conf once mounted).
  * Either way the LibOS mounts the emulated /etc/resolv.conf once a lease is
@@ -47,6 +54,8 @@ enum { A_UNTRIED, A_OFF, A_JOINED, A_LEASED };
 
 static bool g_enabled = true;
 static bool g_lazy;                      /* [svsm.auto] join = "lazy" */
+static bool g_hooked;                    /* the zygote's runtime tells its clones */
+static bool g_member;                    /* ... and this one was told: a member */
 static int g_state = A_UNTRIED;
 static uint32_t g_upstream;              /* [svsm.dns] nameserver, host order */
 static uint16_t g_upstream_port = PAL_SVSM_DNS_PORT;
@@ -149,8 +158,10 @@ static void forget_channel(void) {
 void pal_svsm_auto_after_fork(void) {
     /* The parent's service channel was shared into this child with its
      * other channels (fork_share): the child's own copy goes, and it joins
-     * as the instance it is - its own lease, its own address. */
-    if (g_state == A_OFF && !g_enabled)
+     * as the instance it is - its own lease, its own address. A child
+     * inherits its parent's deployment, so a parent that is no member (OFF,
+     * or hooked and never told) has a child that is none either: nothing. */
+    if (!g_enabled || g_state == A_OFF || (g_hooked && !g_member))
         return;
     if (g_win)
         pal_svsm_channel_close(g_win);
@@ -331,6 +342,8 @@ static bool hello(uint32_t claim) {
 static bool ensure_locked(void) {
     if (!g_enabled || g_state == A_OFF)
         return false;
+    if (g_hooked && !g_member)
+        return false;                     /* a clone not told it is a member: none */
     uint64_t now = pal_svsm_now_usec();
     if (g_state == A_LEASED) {
         if (channel_alive()) {
@@ -386,7 +399,14 @@ void pal_svsm_auto_refresh(void) {
     (void)pal_svsm_auto_ensure();
 }
 
-void pal_svsm_auto_first_entry(void) {
+void pal_svsm_auto_first_entry(int what) {
+    if (what == PAL_AUTO_HOOK) {
+        g_hooked = true;                  /* the zygote: its clones will be told */
+        return;
+    }
+    if (what != PAL_AUTO_MEMBER)
+        return;
+    g_member = true;
     if (g_enabled && !g_lazy)
         (void)pal_svsm_auto_ensure();
 }
@@ -413,7 +433,7 @@ static size_t put_str(char* o, size_t cap, const char* s) {
 }
 
 /* "lease addr A.B.C.D host H domain D join immediate|lazy\n", or "lease none
- * state untried|off|joined join ...\n". Never joins: what the instance holds
+ * state untried|dormant|off|joined join ...\n" (dormant: told it is no member). Never joins: what the instance holds
  * NOW (the lane's auto_ipam_lease_before_app reads it as the app's first act). */
 size_t pal_svsm_auto_lease_text(char* buf, size_t cap) {
     if (!cap)
@@ -430,6 +450,7 @@ size_t pal_svsm_auto_lease_text(char* buf, size_t cap) {
     } else {
         n += put_str(buf + n, cap - n, "none state ");
         n += put_str(buf + n, cap - n, g_state == A_OFF ? "off" : g_state == A_JOINED ? "joined"
+                                                         : g_hooked && !g_member ? "dormant"
                                                          : "untried");
     }
     n += put_str(buf + n, cap - n, g_lazy ? " join lazy\n" : " join immediate\n");
