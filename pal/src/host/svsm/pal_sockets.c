@@ -1147,6 +1147,8 @@ int _PalSocketBind(PAL_HANDLE handle, struct pal_socket_addr* addr) {
         handle->sock.bind_port = ntohs(addr->ipv4.port);
     else
         __UNUSED(addr);
+    if (handle->sock.type == PAL_SOCKET_TCP && addr)
+        handle->sock.listen_port = ntohs(addr->domain == PAL_IPV6 ? addr->ipv6.port : addr->ipv4.port);
     handle->sock.bound = true;
     return 0;
 }
@@ -1260,10 +1262,38 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
             cli->sock.side           = 1;   /* they asked, we were asked */
             sock_claim(w, nwin);
 
-            if (out_client_addr)
+            /* The listener's own FAMILY, not family 0: the LibOS turns an
+             * address of no family into EAFNOSUPPORT, and Go - which listens
+             * on [::], an AF_INET6 socket - died on its first accept with
+             * "accept4: address family not supported" (every DSB gRPC
+             * server). The peer's address is not known here (a channel has a
+             * vault at the far end, not an IP), so it is the family's
+             * unspecified address; the local one is the listener's.
+             *
+             * And PORTS that are not 0: mongod refuses a connection whose
+             * remote or local end parses as port 0 ("Port number 0 out of
+             * range parsing HostAndPort", 381 refused connects, DSB). The
+             * far end gets one from the ephemeral range, distinct per window
+             * so two connections at once do not look the same; the local end
+             * the port the listener was bound to (listen_port). */
+            uint16_t rport = (uint16_t)(32768 + (w % 28232));
+            uint16_t lport = handle->sock.listen_port ? handle->sock.listen_port : 1;
+            if (out_client_addr) {
                 memset(out_client_addr, 0, sizeof(*out_client_addr));
-            if (out_local_addr)
+                out_client_addr->domain = handle->sock.domain;
+                if (handle->sock.domain == PAL_IPV6)
+                    out_client_addr->ipv6.port = htons(rport);
+                else
+                    out_client_addr->ipv4.port = htons(rport);
+            }
+            if (out_local_addr) {
                 memset(out_local_addr, 0, sizeof(*out_local_addr));
+                out_local_addr->domain = handle->sock.domain;
+                if (handle->sock.domain == PAL_IPV6)
+                    out_local_addr->ipv6.port = htons(lport);
+                else
+                    out_local_addr->ipv4.port = htons(lport);
+            }
             *out_client = cli;
             return 0;
         }

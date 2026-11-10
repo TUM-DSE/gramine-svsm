@@ -295,6 +295,11 @@ struct pal_handle_inner {
              * for [svsm.net] (DSB M1): a raw channel of its own, counted in
              * that entry's `conns` until destroyed. */
             uint8_t  peer_route;
+            /* A STREAM socket's bound port, as a label only (what accept
+             * reports as the local end; nothing is bound on it). Kept apart
+             * from bind_port, which a datagram socket and the mvnet
+             * handshake mean literally. */
+            uint16_t listen_port;
         } sock;
 
         struct {
