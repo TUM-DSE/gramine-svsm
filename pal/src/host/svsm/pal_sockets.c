@@ -303,15 +303,15 @@ extern struct handle_ops g_sock_ops;
 
 /* Which IPC windows this vault has already turned into a socket.
  *
- * EIGHT words, not one, because the monitor publishes eight: a vault has
- * IPC_WINDOWS = 512 windows and `write_directory` fills `0x040 + i*8` for
- * i in 0..8 (monitor ipc/mod.rs). A single u64 could only ever name windows
+ * One bit per IPC window: IPC_WINDOWS = 4096 (PLATFORM-LIMITS.md rev. 2;
+ * was 512, eight words) and `write_directory` publishes them all at
+ * PAL_CHAN_DIR_LIVE2 (directory abi 2; monitor ipc/mod.rs). A single u64 could only ever name windows
  * 0..63, so a channel granted into window 64 or above was invisible here -
  * `_PalSocketAccept` never saw it and the peer waited for an accept that
  * could not arrive. Harmless while a service held at most sixteen
  * connections; the first thing to break when that cap is raised, and silent
  * when it breaks. */
-#define PAL_CHAN_LIVE_WORDS  8
+#define PAL_CHAN_LIVE_WORDS  (PAL_CHAN_SLOT_WINDOWS / 64)   /* 64 for 4096 windows */
 #define PAL_CHAN_WINDOWS     (PAL_CHAN_LIVE_WORDS * 64)
 
 static uint64_t g_sock_claimed[PAL_CHAN_LIVE_WORDS];

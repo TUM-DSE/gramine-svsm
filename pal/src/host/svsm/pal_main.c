@@ -494,9 +494,10 @@ noreturn void pal_svsm_main(void)
             toml_int_in(del, "max_channels", 0, &max_channels);
             if (max_accepts < 0 || max_accepts > 8)
                 pal_svsm_fail("svsm.delegate.max_accepts is outside 0..8", (int)max_accepts);
-            /* 255: the monitor's MAX_CHANNELS_PER_VAULT (PLATFORM-LIMITS.md) */
-            if (max_channels < 0 || max_channels > 255)
-                pal_svsm_fail("svsm.delegate.max_channels is outside 0..255", (int)max_channels);
+            /* Any u16 (PLATFORM-LIMITS.md rev. 2): what a vault can hold is
+             * derived from its free IPC windows, the policy only lowers it. */
+            if (max_channels < 0 || max_channels > 0xFFFF)
+                pal_svsm_fail("svsm.delegate.max_channels is outside 0..65535", (int)max_channels);
             delegate_record[0x04] = allow_policy;
             delegate_record[0x05] = allow_device;
             delegate_record[0x06] = (uint8_t)max_accepts;
@@ -881,8 +882,9 @@ noreturn void pal_svsm_main(void)
 
             int64_t max_channels = 64;
             toml_int_in(ep, "max_channels", 64, &max_channels);
-            /* 1..255: the monitor's MAX_CHANNELS_PER_VAULT (PLATFORM-LIMITS.md) */
-            if (max_channels <= 0 || max_channels > 255)
+            /* 1..65535 (PLATFORM-LIMITS.md rev. 2): the policy may only LOWER
+             * what the vault's free IPC windows allow. */
+            if (max_channels <= 0 || max_channels > 0xFFFF)
                 pal_svsm_fail("svsm.endpoint.max_channels is out of range", 0);
             uint16_t mc = (uint16_t)max_channels;
             memcpy(policy_record + 0x3E, &mc, 2);
@@ -978,6 +980,19 @@ noreturn void pal_svsm_main(void)
             wanted = true;
         }
         policy_record[0x40] = (uint8_t)n_accepts;
+        /* [svsm] region_quota: the regions this vault may hold as a
+         * requester (record 0x42, u16; 0 = the monitor's default, 1024;
+         * PLATFORM-LIMITS.md rev. 2 §2). */
+        {
+            int64_t rq = 0;
+            if (toml_int_in(manifest_svsm_early, "region_quota", 0, &rq) < 0 || rq < 0 || rq > 0xFFFF)
+                pal_svsm_fail("svsm.region_quota is not an integer 0..65535", 0);
+            if (rq) {
+                uint16_t rq16 = (uint16_t)rq;
+                memcpy(policy_record + 0x42, &rq16, 2);
+                wanted = true;
+            }
+        }
 
         if (wanted) {
             int64_t sealed = pal_svsm_channel_policy(policy_record,
