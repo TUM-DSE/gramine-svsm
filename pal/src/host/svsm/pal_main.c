@@ -494,8 +494,9 @@ noreturn void pal_svsm_main(void)
             toml_int_in(del, "max_channels", 0, &max_channels);
             if (max_accepts < 0 || max_accepts > 8)
                 pal_svsm_fail("svsm.delegate.max_accepts is outside 0..8", (int)max_accepts);
-            if (max_channels < 0 || max_channels > 64)
-                pal_svsm_fail("svsm.delegate.max_channels is outside 0..64", (int)max_channels);
+            /* 255: the monitor's MAX_CHANNELS_PER_VAULT (PLATFORM-LIMITS.md) */
+            if (max_channels < 0 || max_channels > 255)
+                pal_svsm_fail("svsm.delegate.max_channels is outside 0..255", (int)max_channels);
             delegate_record[0x04] = allow_policy;
             delegate_record[0x05] = allow_device;
             delegate_record[0x06] = (uint8_t)max_accepts;
@@ -880,7 +881,8 @@ noreturn void pal_svsm_main(void)
 
             int64_t max_channels = 64;
             toml_int_in(ep, "max_channels", 64, &max_channels);
-            if (max_channels <= 0 || max_channels > 64)
+            /* 1..255: the monitor's MAX_CHANNELS_PER_VAULT (PLATFORM-LIMITS.md) */
+            if (max_channels <= 0 || max_channels > 255)
                 pal_svsm_fail("svsm.endpoint.max_channels is out of range", 0);
             uint16_t mc = (uint16_t)max_channels;
             memcpy(policy_record + 0x3E, &mc, 2);
