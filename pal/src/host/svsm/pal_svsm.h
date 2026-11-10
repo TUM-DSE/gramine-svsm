@@ -232,6 +232,28 @@ extern char     g_pal_svsm_net_name[32];
  * is going first (svsm.net.protocol = "mvnet"). */
 extern int      g_pal_svsm_net_protocol;
 extern uint64_t g_pal_svsm_net_endpoint;
+
+/* The peer table, [[svsm.peer]] in the measured manifest (DSB M1,
+ * notes/deathstar/CHANNEL-SUBSCRIBE.md §4.1): `connect(ip:port)` to one of
+ * these opens a RAW channel to that vault's endpoint, one per connection;
+ * anything else goes to [svsm.net] as before, or is refused. */
+#define PAL_SVSM_MAX_PEERS 32
+struct pal_svsm_peer {
+    char     service[32];        /* the peer's [svsm] name (not terminated at 32) */
+    uint64_t endpoint;           /* its [svsm.endpoint] id, packed as svsm.net's */
+    uint8_t  ip[4];
+    uint16_t port;               /* host order; 0 = any port ("ip:*") */
+    bool     pinned;             /* grant by vault_id (selector 2), not by name */
+    uint8_t  vault_id[64];
+    uint32_t conns_max;          /* 0 = no PAL cap */
+    uint32_t conns;              /* open now (atomic) */
+};
+extern struct pal_svsm_peer g_pal_svsm_peers[PAL_SVSM_MAX_PEERS];
+extern unsigned g_pal_svsm_npeers;
+/* [svsm] address: this vault's own IPv4, what getsockname() reports on a
+ * peer connection (all zero when not given). */
+extern uint8_t g_pal_svsm_self_addr[4];
+int pal_svsm_parse_addr(const char* s, bool with_port, uint8_t ip[4], uint16_t* port);
 void pal_svsm_poll_wake(void);
 /* The Park arms of every blocked context (at most `max`); *partial if some
  * were left out. */

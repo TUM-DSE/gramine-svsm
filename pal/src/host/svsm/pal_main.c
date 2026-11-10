@@ -640,6 +640,101 @@ noreturn void pal_svsm_main(void)
             }
         }
 
+        /* [[svsm.peer]]: the vaults this one may dial BY ADDRESS (DSB M1,
+         * notes/deathstar/CHANNEL-SUBSCRIBE.md §4.1). Measured, so a verifier
+         * reading the manifest sees every peer the vault may reach, and
+         * neither the host nor the application can add one.
+         *
+         *   [svsm]
+         *   address = "10.233.70.10"        # optional: this vault's IPv4
+         *   [[svsm.peer]]
+         *   service  = "search"             # the peer's [svsm] name
+         *   endpoint = "rpc"                # its [svsm.endpoint] id
+         *   address  = "10.233.70.11:8082"  # what the app dials; port "*" = any
+         *   pin      = "vault_id:<128 hex>" # optional: grant by vault_id
+         *   conns    = 64                   # optional: open connections at most
+         *
+         * Every check fails the vault at init, as [svsm.net]'s do. */
+        {
+            char* self = NULL;
+            if (toml_string_in(manifest_svsm_early, "address", &self) == 0 && self) {
+                uint16_t unused;
+                if (pal_svsm_parse_addr(self, false, g_pal_svsm_self_addr, &unused) != 0)
+                    pal_svsm_fail("svsm.address is not a dotted IPv4 address", 0);
+                free(self);
+            }
+            toml_array_t* peers = toml_array_in(manifest_svsm_early, "peer");
+            int np = peers ? toml_array_nelem(peers) : 0;
+            if (np > PAL_SVSM_MAX_PEERS)
+                pal_svsm_fail("svsm.peer has more than 32 entries", np);
+            for (int i = 0; i < np; i++) {
+                toml_table_t* t = toml_table_at(peers, i);
+                if (!t)
+                    pal_svsm_fail("svsm.peer holds something that is not a table", i);
+                struct pal_svsm_peer* p = &g_pal_svsm_peers[i];
+                char* str = NULL;
+                if (toml_string_in(t, "service", &str) != 0 || !str)
+                    pal_svsm_fail("svsm.peer needs a service name", i);
+                size_t n = strlen(str);
+                if (n == 0 || n > sizeof(p->service))
+                    pal_svsm_fail("svsm.peer.service is empty or longer than 32 bytes", i);
+                memcpy(p->service, str, n);
+                free(str);
+                str = NULL;
+                if (toml_string_in(t, "endpoint", &str) != 0 || !str)
+                    pal_svsm_fail("svsm.peer needs an endpoint", i);
+                n = strlen(str);
+                if (n == 0 || n > 8)
+                    pal_svsm_fail("svsm.peer.endpoint is empty or longer than 8 bytes", i);
+                for (size_t k = 0; k < n; k++)
+                    p->endpoint |= (uint64_t)(unsigned char)str[k] << (k * 8);
+                free(str);
+                str = NULL;
+                if (toml_string_in(t, "address", &str) != 0 || !str)
+                    pal_svsm_fail("svsm.peer needs an address", i);
+                if (pal_svsm_parse_addr(str, true, p->ip, &p->port) != 0)
+                    pal_svsm_fail("svsm.peer.address is not a.b.c.d:port or a.b.c.d:*", i);
+                free(str);
+                str = NULL;
+                if (toml_string_in(t, "pin", &str) == 0 && str) {
+                    if (strncmp(str, "vault_id:", 9) || strlen(str + 9) != 128)
+                        pal_svsm_fail("svsm.peer.pin is not vault_id:<128 hex>", i);
+                    for (int b = 0; b < 64; b++) {
+                        uint8_t byte = 0;
+                        for (int half = 0; half < 2; half++) {
+                            char c = str[9 + b * 2 + half];
+                            uint8_t v;
+                            if (c >= '0' && c <= '9') v = (uint8_t)(c - '0');
+                            else if (c >= 'a' && c <= 'f') v = (uint8_t)(c - 'a' + 10);
+                            else if (c >= 'A' && c <= 'F') v = (uint8_t)(c - 'A' + 10);
+                            else pal_svsm_fail("svsm.peer.pin is not vault_id:<128 hex>", i);
+                            byte = (uint8_t)(byte << 4 | v);
+                        }
+                        p->vault_id[b] = byte;
+                    }
+                    p->pinned = true;
+                    free(str);
+                }
+                int64_t conns = 0;
+                if (toml_int_in(t, "conns", 0, &conns) < 0 || conns < 0 || conns > 65535)
+                    pal_svsm_fail("svsm.peer.conns is not an integer 0..65535", i);
+                p->conns_max = (uint32_t)conns;
+                /* No two entries on the same ip:port, and no ip:* that
+                 * swallows another peer's ip:port - either would make where
+                 * a connect goes depend on the order of the table. */
+                for (int j = 0; j < i; j++) {
+                    const struct pal_svsm_peer* q = &g_pal_svsm_peers[j];
+                    if (memcmp(p->ip, q->ip, 4))
+                        continue;
+                    if (p->port == q->port)
+                        pal_svsm_fail("svsm.peer: two entries have the same address", i);
+                    if (!p->port || !q->port)
+                        pal_svsm_fail("svsm.peer: an ip:* entry overlaps another peer's ip:port", i);
+                }
+            }
+            g_pal_svsm_npeers = (unsigned)np;
+        }
+
         /* [svsm.dns]: the resolver this vault uses.
          *
          *   [svsm.dns]
