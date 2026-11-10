@@ -356,6 +356,10 @@ bool   pal_svsm_pipesrv_pending(PAL_HANDLE handle);
 #define PAL_SVSM_STATUS_UNSUPPORTED   (-6)
 #define PAL_SVSM_STATUS_PEER_QUOTA    (-7)
 #define PAL_SVSM_STATUS_SERVICE_FULL  (-8)
+/* The requester's grant token bucket is empty (the monitor's
+ * GRANT_RATE_PER_S, owner Q13): not a refusal - a connect waits one token
+ * time and asks again, under its own budget (pal_sockets.c). */
+#define PAL_SVSM_STATUS_RATE_LIMITED  (-15)
 
 /* --- many connections on one channel (pal_svsm_mux.c) ------------------
  *

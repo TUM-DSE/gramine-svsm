@@ -44,6 +44,13 @@
  * Each try waits ~200 us, so this is about a tenth of a second - longer
  * than any dispatch and shorter than a client would notice. */
 #define PAL_GRANT_TRIES 500
+/* RATE_LIMITED is a different wait: the monitor refills a vault's grant
+ * bucket at 1000/s, so one token time is 1 ms, and the budget is its own -
+ * a busy target's tries are not spent on pacing, nor the other way round.
+ * 3 s covers a vault's threads contending for the same bucket after a burst
+ * (the peer_grant_rate row connects 3000 times back to back). */
+#define PAL_GRANT_TOKEN_US   1000
+#define PAL_GRANT_RATE_TRIES 3000
 
 /* The grant request, exactly as monitor/kernel/src/ipc/mod.rs parses it. */
 struct pal_sock_grant {
@@ -1710,12 +1717,19 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
 
     if (granting)
         g_mux_granting = true;
-    for (int try = 0; try < PAL_GRANT_TRIES; try++) {
+    for (int busy = 0, paced = 0; busy < PAL_GRANT_TRIES && paced < PAL_GRANT_RATE_TRIES;) {
         win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
-        if (win >= 0 || win != PAL_SVSM_STATUS_BAD_STATE)
+        if (win == PAL_SVSM_STATUS_RATE_LIMITED) {
+            /* This vault's own grant rate: a token comes back in 1 ms. */
+            paced++;
+            (void)sock_block(NULL, 0, NULL, 0, PAL_GRANT_TOKEN_US, /*interruptible=*/false);
+            continue;
+        }
+        if (win != PAL_SVSM_STATUS_BAD_STATE)
             break;
         /* Nothing here announces the target's dispatch ending: the bound
          * alone, and the vault's other threads run meanwhile. */
+        busy++;
         (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
     }
     /* Cleared here, and nothing below yields before g_pal_svsm_mux_open is
