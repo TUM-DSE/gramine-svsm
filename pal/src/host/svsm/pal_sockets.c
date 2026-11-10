@@ -64,6 +64,64 @@ uint64_t g_pal_svsm_net_endpoint;
 int      g_pal_svsm_net_protocol;
 
 struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
+
+/* The peer table ([[svsm.peer]], pal_main.c) and this vault's own address
+ * ([svsm] address). See pal_svsm.h. */
+struct pal_svsm_peer g_pal_svsm_peers[PAL_SVSM_MAX_PEERS];
+unsigned g_pal_svsm_npeers;
+uint8_t  g_pal_svsm_self_addr[4];
+
+/* "a.b.c.d", then ":port" or ":*" when `with_port` - nothing else, no
+ * spaces, each part in range. 0 when it parses; *port is 0 for "*". */
+int pal_svsm_parse_addr(const char* s, bool with_port, uint8_t ip[4], uint16_t* port) {
+    for (int i = 0; i < 4; i++) {
+        if (*s < '0' || *s > '9')
+            return -1;
+        unsigned v = 0, digits = 0;
+        while (*s >= '0' && *s <= '9') {
+            v = v * 10 + (unsigned)(*s++ - '0');
+            if (++digits > 3 || v > 255)
+                return -1;
+        }
+        ip[i] = (uint8_t)v;
+        if (i < 3 && *s++ != '.')
+            return -1;
+    }
+    if (!with_port)
+        return *s ? -1 : 0;
+    if (*s++ != ':')
+        return -1;
+    if (s[0] == '*' && !s[1]) {
+        *port = 0;
+        return 0;
+    }
+    unsigned v = 0, digits = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (unsigned)(*s++ - '0');
+        if (++digits > 5 || v > 65535)
+            return -1;
+    }
+    if (*s || !digits || !v)
+        return -1;
+    *port = (uint16_t)v;
+    return 0;
+}
+
+/* The [[svsm.peer]] entry `connect(ip:port)` goes to, or -1: an exact
+ * ip:port first, then ip:* (§4.1's routing, steps 1 and 2). */
+static int peer_route(const uint8_t ip[4], uint16_t port) {
+    int any = -1;
+    for (unsigned i = 0; i < g_pal_svsm_npeers; i++) {
+        const struct pal_svsm_peer* p = &g_pal_svsm_peers[i];
+        if (memcmp(p->ip, ip, 4))
+            continue;
+        if (p->port == port)
+            return (int)i;
+        if (!p->port && any < 0)
+            any = (int)i;
+    }
+    return any;
+}
 static int g_fin_owed_n;   /* see mux_fin_flush */
 static bool g_mux_granting;  /* a connect is asking for the vault's channel (_PalSocketConnect) */
 
@@ -1449,6 +1507,22 @@ static void sock_report_local(PAL_HANDLE handle, struct pal_socket_addr* out) {
     if (!out)
         return;
     memset(out, 0, sizeof(*out));
+    if (handle->sock.peer_route) {
+        /* A [[svsm.peer]] connection: this vault's own [svsm] address, and a
+         * port that is ours alone - a real AF_INET answer, for the same
+         * getaddrinfo reason as below (F4). Zeros when the manifest gave no
+         * address. */
+        if (!handle->sock.local.local_port) {
+            static uint32_t next_port;
+            handle->sock.local.local_port =
+                (uint16_t)(32768 + __atomic_fetch_add(&next_port, 1, __ATOMIC_RELAXED) % 28232);
+            memcpy(handle->sock.local.local_addr, g_pal_svsm_self_addr, 4);
+        }
+        out->domain = PAL_IPV4;
+        memcpy(&out->ipv4.addr, handle->sock.local.local_addr, 4);
+        out->ipv4.port = htons(handle->sock.local.local_port);
+        return;
+    }
     if (!g_pal_svsm_net_protocol)
         return;             /* a raw channel to a peer vault has no address */
     out->domain = PAL_IPV4;
@@ -1495,8 +1569,35 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     }
     if (handle->sock.win)
         return -PAL_ERROR_INVAL;
-    if (!g_pal_svsm_net_name[0])
+    /* Where this connection goes (DSB M1, CHANNEL-SUBSCRIBE.md §4.1): an
+     * exact [[svsm.peer]] ip:port, then an ip:*, then [svsm.net], else it is
+     * refused - the answer a vault without [svsm.net] always got. Streams
+     * only: a peer is one raw channel, and a datagram socket goes to the
+     * network service as before. */
+    int peer = -1;
+    if (handle->sock.type == PAL_SOCKET_TCP && addr && addr->domain == PAL_IPV4
+            && g_pal_svsm_npeers)
+        peer = peer_route((const uint8_t*)&addr->ipv4.addr, ntohs(addr->ipv4.port));
+    if (peer < 0 && !g_pal_svsm_net_name[0])
         return -PAL_ERROR_DENIED;
+    /* Whether THIS connection speaks mvnet: a peer route never does, whatever
+     * [svsm.net] says (that global was "the" protocol while a vault had one
+     * peer). */
+    bool mvnet = peer < 0 && g_pal_svsm_net_protocol;
+    struct pal_svsm_peer* pr = peer >= 0 ? &g_pal_svsm_peers[peer] : NULL;
+    if (pr && pr->conns_max) {
+        /* The PAL's cap on open connections to this peer (`conns`): a
+         * policy of this vault's own manifest, so EACCES-like DENIED, not a
+         * connection failure. Taken here and given back by sock_destroy, or
+         * below if the grant fails. */
+        uint32_t now = __atomic_add_fetch(&pr->conns, 1, __ATOMIC_ACQ_REL);
+        if (now > pr->conns_max) {
+            __atomic_sub_fetch(&pr->conns, 1, __ATOMIC_ACQ_REL);
+            return -PAL_ERROR_DENIED;
+        }
+    } else if (pr) {
+        __atomic_add_fetch(&pr->conns, 1, __ATOMIC_ACQ_REL);
+    }
     /* IPv4 only, and refused HERE rather than carried and dropped later.
      *
      * The network service's stack is a NO_SYS IPv4 lwIP with no IPv6 at all
@@ -1524,6 +1625,14 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     req.selector = 1;                       /* by name */
     req.endpoint = g_pal_svsm_net_endpoint;
     memcpy(req.name, g_pal_svsm_net_name, sizeof(req.name));
+    if (pr) {
+        req.endpoint = pr->endpoint;
+        memcpy(req.name, pr->service, sizeof(req.name));
+        if (pr->pinned) {
+            req.selector = 2;               /* by vault_id: an impostor of the same name is not reached */
+            memcpy(req.vault_id, pr->vault_id, sizeof(req.vault_id));
+        }
+    }
 
     /* -3 (STATUS_BAD_STATE) from a grant is "the target is being entered
      * or deleted - retry", not a refusal: the monitor needs the target's
@@ -1553,10 +1662,10 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
      * channel where the service had never heard of their ids - and its own
      * channel leaked. So a connect that finds a grant in progress waits for
      * it and then looks for the channel again. */
-    bool granting = PAL_MUX_SHARE_CHANNEL && g_pal_svsm_net_protocol;
+    bool granting = PAL_MUX_SHARE_CHANNEL && mvnet;
     while (granting && g_mux_granting && !g_pal_svsm_mux_open)
         (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
-    if (PAL_MUX_SHARE_CHANNEL && g_pal_svsm_net_protocol && g_pal_svsm_mux_open) {
+    if (PAL_MUX_SHARE_CHANNEL && mvnet && g_pal_svsm_mux_open) {
         handle->sock.muxed = true;
         handle->sock.win   = 0;          /* the MUX owns the channel, not this */
         handle->sock.side  = g_pal_svsm_mux_side;
@@ -1605,6 +1714,8 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
          * both still answer -2, identically, so a vault still cannot learn
          * who exists by asking (the `chan_denied_uniform` row).
          */
+        if (pr)
+            __atomic_sub_fetch(&pr->conns, 1, __ATOMIC_ACQ_REL);
         if (win == PAL_SVSM_STATUS_PEER_QUOTA)
             return -PAL_ERROR_DENIED;
         return -PAL_ERROR_CONNFAILED;
@@ -1620,10 +1731,14 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
         if (why != PAL_CHAN_HDR_OK) {
             sock_refuse((unsigned)win, why, pal_chan_u64(addr_out, PAL_CHAN_HDR_REGION));
             pal_svsm_channel_close((uint64_t)win);
+            if (pr)
+                __atomic_sub_fetch(&pr->conns, 1, __ATOMIC_ACQ_REL);
             return -PAL_ERROR_CONNFAILED;
         }
         sock_claim((unsigned)win, nwin);
     }
+    /* Counted in pr->conns from here until sock_destroy. */
+    handle->sock.peer_route = pr ? (uint8_t)(peer + 1) : 0;
 
     /* EVERY socket through a service is framed and carries a connection id.
      *
@@ -1634,7 +1749,7 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
      * that happened to open the channel, every LATER socket sent unframed
      * bytes to a service that was parsing frames, and `cm8` opened exactly
      * one connection of eight. */
-    if (g_pal_svsm_net_protocol) {
+    if (mvnet) {
         if (PAL_MUX_SHARE_CHANNEL) {
             /* THE MUX OWNS IT, not this socket - including the very socket
              * whose connect granted it.
@@ -1678,7 +1793,7 @@ have_channel:
         handle->sock.has_peer  = true;
     }
 
-    if (g_pal_svsm_net_protocol) {
+    if (mvnet) {
         /* `muxed` and the connection id are set above, by whichever branch
          * granted or reused the channel. */
         uint8_t proto = handle->sock.type == PAL_SOCKET_UDP
@@ -2941,6 +3056,12 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
+    if (handle->sock.peer_route) {
+        /* Its [[svsm.peer]] entry's open count (the `conns` cap). */
+        __atomic_sub_fetch(&g_pal_svsm_peers[handle->sock.peer_route - 1].conns, 1,
+                           __ATOMIC_ACQ_REL);
+        handle->sock.peer_route = 0;
+    }
     mux_queue_release(handle);      /* the pool is the vault's, not this socket's */
     if (handle->sock.win)
         sock_unclaim((unsigned)handle->sock.widx);

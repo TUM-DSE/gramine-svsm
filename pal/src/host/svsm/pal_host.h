@@ -281,6 +281,10 @@ struct pal_handle_inner {
             uint16_t peer_port;
             uint8_t  peer_addr[4];
             bool     has_peer;
+            /* 1 + the [[svsm.peer]] entry this connection was routed to, 0
+             * for [svsm.net] (DSB M1): a raw channel of its own, counted in
+             * that entry's `conns` until destroyed. */
+            uint8_t  peer_route;
         } sock;
 
         struct {
