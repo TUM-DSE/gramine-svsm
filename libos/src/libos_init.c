@@ -69,6 +69,7 @@ static unsigned pal_errno_to_unix_errno_table[PAL_ERROR_NATIVE_COUNT + 1] = {
     [PAL_ERROR_ADDRNOTEXIST]    = EADDRNOTAVAIL,
     [PAL_ERROR_AFNOSUPPORT]     = EAFNOSUPPORT,
     [PAL_ERROR_CONNFAILED_PIPE] = EPIPE,
+    [PAL_ERROR_CONNREFUSED]     = ECONNREFUSED,
 };
 
 static unsigned long pal_to_unix_errno_positive(unsigned long err) {

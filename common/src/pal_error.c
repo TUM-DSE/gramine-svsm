@@ -30,6 +30,7 @@ static const char* g_pal_error_list[] = {
     [PAL_ERROR_ADDRNOTEXIST] = "Resource address does not exist (PAL_ERROR_ADDRNOTEXIST)",
     [PAL_ERROR_AFNOSUPPORT] = "Address family not supported by protocol (PAL_ERROR_AFNOSUPPORT)",
     [PAL_ERROR_CONNFAILED_PIPE] = "Broken pipe (PAL_ERROR_CONNFAILED_PIPE)",
+    [PAL_ERROR_CONNREFUSED] = "Connection refused (PAL_ERROR_CONNREFUSED)",
 
     [PAL_ERROR_CRYPTO_FEATURE_UNAVAILABLE] = "[Crypto] Feature not available (PAL_ERROR_CRYPTO_FEATURE_UNAVAILABLE)",
     [PAL_ERROR_CRYPTO_INVALID_CONTEXT] = "[Crypto] Invalid context (PAL_ERROR_CRYPTO_INVALID_CONTEXT)",

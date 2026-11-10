@@ -33,6 +33,8 @@ static int put_string(char** buf, size_t* bufsize, const char* fmt, ...) {
 }
 
 static int provide_etc_resolv_conf(struct libos_dentry* dent, char** out_data, size_t* out_size) {
+    if (g_pal_public_state->refresh_dns_host)
+        g_pal_public_state->refresh_dns_host();
     __UNUSED(dent);
 
     size_t size = 0;

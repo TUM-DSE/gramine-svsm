@@ -272,6 +272,13 @@ struct pal_public_state {
 
     bool extra_runtime_domain_names_conf;
     struct pal_dns_host_conf dns_host;
+
+    /* Called by the LibOS before it reads `dns_host` (the emulated
+     * /etc/resolv.conf, uname's nodename), when set: a PAL that learns its
+     * names after init fills them in here. svsm: auto-peering's lease from
+     * the address service, taken in the clone that runs the app
+     * (pal_svsm_ipam.c). NULL on every other host. */
+    void (*refresh_dns_host)(void);
 };
 
 /* We cannot mark this as returning a pointer to `const` object, because LibOS can
