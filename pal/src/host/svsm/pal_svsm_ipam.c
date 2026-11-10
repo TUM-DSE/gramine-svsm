@@ -7,8 +7,21 @@
  * (§3.3). It is trusted for nothing the monitor does not check again - and
  * in phase 1 nothing is granted on its word at all.
  *
+ * WHEN (owner, 2026-11-10): IMMEDIATELY by default. Every clone, on its first
+ * entry after Finalize and before any app code, JOINs and holds its lease:
+ * the runtime's finalize wrapper writes /dev/mvlease (services/common/include/
+ * mv_first_entry.h), the LibOS calls auto_first_entry, and ensure() runs with
+ * the bounded wait (Q18: up to PAL_SVSM_IPAM_WAIT_US, then the app starts
+ * without an address and new binds fail closed). A fork child takes its own
+ * lease in the PAL's fork return, before its code. `[svsm.auto] join = "lazy"`
+ * (measured) opts out: the lease is then taken on the first use (uname or
+ * gethostname, a query to the stub, the emulated resolv.conf once mounted).
+ * Either way the LibOS mounts the emulated /etc/resolv.conf once a lease is
+ * held (dns_host_leased) - at the first entry when immediate - and a vault in
+ * no deployment keeps the resolver and hostname it had.
+ *
  * States of THIS instance (a zygote never leaves UNTRIED: its JOIN answers
- * BAD_STATE, and nothing is cached, so the clone joins on its first use):
+ * BAD_STATE, and nothing is cached; a zygote never reaches a first entry):
  *   UNTRIED  nothing asked yet
  *   OFF      not in a deployment, auto-peering opted out, or a monitor
  *            without AutoNet: the vault's resolver and hostname stay as they
@@ -33,6 +46,7 @@
 enum { A_UNTRIED, A_OFF, A_JOINED, A_LEASED };
 
 static bool g_enabled = true;
+static bool g_lazy;                      /* [svsm.auto] join = "lazy" */
 static int g_state = A_UNTRIED;
 static uint32_t g_upstream;              /* [svsm.dns] nameserver, host order */
 static uint16_t g_upstream_port = PAL_SVSM_DNS_PORT;
@@ -89,6 +103,20 @@ void pal_svsm_auto_config(toml_table_t* svsm) {
                 || port < 1 || port > 65535)
             pal_svsm_fail("svsm.auto.dns_upstream_port is not a port", 0);
         g_upstream_port = (uint16_t)port;
+        /* When this instance takes its lease: "immediate" (the default) at
+         * its first entry after Finalize, "lazy" on first use. Measured. */
+        if (toml_table_in(a, "join") || toml_array_in(a, "join"))
+            pal_svsm_fail("svsm.auto.join is not a string", 0);
+        char* join = NULL;
+        if (toml_string_in(a, "join", &join) < 0)
+            pal_svsm_fail("svsm.auto.join is not a string", 0);
+        if (join) {
+            bool lazy = !strcmp(join, "lazy"), immediate = !strcmp(join, "immediate");
+            free(join);
+            if (!lazy && !immediate)
+                pal_svsm_fail("svsm.auto.join must be \"immediate\" or \"lazy\"", 0);
+            g_lazy = lazy;
+        }
     }
     if (!g_enabled) {
         g_state = A_OFF;
@@ -97,10 +125,12 @@ void pal_svsm_auto_config(toml_table_t* svsm) {
     if (g_pal_public_state.dns_host.nsaddr_list_count > 0
             && !g_pal_public_state.dns_host.nsaddr_list[0].is_ipv6)
         g_upstream = g_pal_public_state.dns_host.nsaddr_list[0].ipv4;
-    /* The emulated /etc/resolv.conf exists from here, filled when the clone
-     * joins (refresh_dns_host): as before, until a lease says otherwise. */
-    g_pal_public_state.extra_runtime_domain_names_conf = true;
+    /* The emulated /etc/resolv.conf is NOT mounted for this (only [svsm.dns]
+     * mounts it at init): the LibOS mounts it once dns_host_leased says a
+     * lease filled it, so a vault that never leases keeps its own file. */
     g_pal_public_state.refresh_dns_host = pal_svsm_auto_refresh;
+    g_pal_public_state.auto_first_entry = pal_svsm_auto_first_entry;
+    g_pal_public_state.auto_lease_text = pal_svsm_auto_lease_text;
 }
 
 static void cache_clear(void) {
@@ -130,6 +160,10 @@ void pal_svsm_auto_after_fork(void) {
     g_state = A_UNTRIED;
     g_retry_us = 0;
     cache_clear();
+    /* The child's first code is the return of this fork: immediate means its
+     * own lease before it (bounded, as at a clone's first entry). */
+    if (g_enabled && !g_lazy)
+        (void)pal_svsm_auto_ensure();
 }
 
 static bool channel_alive(void) {
@@ -262,6 +296,7 @@ static void apply_lease(const struct mva_lease* l) {
     size_t hl = strlen(g_lease.hostname);
     if (hl && hl < PAL_HOSTNAME_MAX)
         memcpy(dh->hostname, g_lease.hostname, hl + 1);
+    g_pal_public_state.dns_host_leased = true;
 }
 
 /* HELLO and its LEASE. `claim` is the address held before a service restart. */
@@ -349,6 +384,58 @@ bool pal_svsm_auto_ensure(void) {
 
 void pal_svsm_auto_refresh(void) {
     (void)pal_svsm_auto_ensure();
+}
+
+void pal_svsm_auto_first_entry(void) {
+    if (g_enabled && !g_lazy)
+        (void)pal_svsm_auto_ensure();
+}
+
+static size_t put_ip(char* o, size_t cap, uint32_t a) {
+    size_t n = 0;
+    for (int i = 3; i >= 0 && n + 4 < cap; i--) {
+        unsigned v = (a >> (8 * i)) & 0xFF;
+        if (v >= 100) o[n++] = (char)('0' + v / 100);
+        if (v >= 10) o[n++] = (char)('0' + v / 10 % 10);
+        o[n++] = (char)('0' + v % 10);
+        if (i) o[n++] = '.';
+    }
+    return n;
+}
+
+static size_t put_str(char* o, size_t cap, const char* s) {
+    size_t n = 0;
+    while (s[n] && n + 1 < cap) {
+        o[n] = s[n];
+        n++;
+    }
+    return n;
+}
+
+/* "lease addr A.B.C.D host H domain D join immediate|lazy\n", or "lease none
+ * state untried|off|joined join ...\n". Never joins: what the instance holds
+ * NOW (the lane's auto_ipam_lease_before_app reads it as the app's first act). */
+size_t pal_svsm_auto_lease_text(char* buf, size_t cap) {
+    if (!cap)
+        return 0;
+    spinlock_lock(&g_lock);
+    size_t n = put_str(buf, cap, "lease ");
+    if (g_state == A_LEASED) {
+        n += put_str(buf + n, cap - n, "addr ");
+        n += put_ip(buf + n, cap - n, g_lease.addr);
+        n += put_str(buf + n, cap - n, " host ");
+        n += put_str(buf + n, cap - n, g_lease.hostname[0] ? g_lease.hostname : "-");
+        n += put_str(buf + n, cap - n, " domain ");
+        n += put_str(buf + n, cap - n, g_lease.domain[0] ? g_lease.domain : "-");
+    } else {
+        n += put_str(buf + n, cap - n, "none state ");
+        n += put_str(buf + n, cap - n, g_state == A_OFF ? "off" : g_state == A_JOINED ? "joined"
+                                                         : "untried");
+    }
+    n += put_str(buf + n, cap - n, g_lazy ? " join lazy\n" : " join immediate\n");
+    spinlock_unlock(&g_lock);
+    buf[n < cap ? n : cap - 1] = '\0';
+    return n;
 }
 
 static int map_status(int32_t s) {

@@ -528,6 +528,9 @@ int init_fs(void);
 int init_mount_root(void);
 int init_mount(void);
 int mount_etcfs(void);
+/* Mount the emulated /etc/resolv.conf now, if init did not and the PAL's
+ * dns_host holds a lease (svsm auto-peering). Idempotent. */
+void etcfs_mount_late(void);
 
 /* file system operations */
 

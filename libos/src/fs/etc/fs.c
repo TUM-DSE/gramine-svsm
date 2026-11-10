@@ -139,15 +139,39 @@ int init_etcfs(void) {
     return 0;
 }
 
-int mount_etcfs(void) {
-    if (!g_pal_public_state->extra_runtime_domain_names_conf)
-        return 0;
+/* 0 not mounted, 1 being mounted, 2 mounted. */
+static int g_etc_mounted;
 
+static int mount_resolv_conf(void) {
     return mount_fs(&(struct libos_mount_params){
         .type = "pseudo",
         .path = "/etc/resolv.conf",
         .uri = "emulated-etc-resolv-conf",
     });
+}
+
+int mount_etcfs(void) {
+    if (!g_pal_public_state->extra_runtime_domain_names_conf)
+        return 0;
+
+    int ret = mount_resolv_conf();
+    if (ret == 0)
+        __atomic_store_n(&g_etc_mounted, 2, __ATOMIC_RELEASE);
+    return ret;
+}
+
+void etcfs_mount_late(void) {
+    if (!g_pal_public_state->dns_host_leased
+            || __atomic_load_n(&g_etc_mounted, __ATOMIC_ACQUIRE) != 0)
+        return;
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&g_etc_mounted, &expected, 1, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE))
+        return;                           /* another thread mounts it */
+    int ret = mount_resolv_conf();
+    if (ret < 0)
+        log_warning("could not mount the emulated /etc/resolv.conf for the lease: %d", ret);
+    __atomic_store_n(&g_etc_mounted, ret == 0 ? 2 : 0, __ATOMIC_RELEASE);
 }
 
 BEGIN_CP_FUNC(etc_info) {

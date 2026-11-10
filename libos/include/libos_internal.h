@@ -150,6 +150,8 @@ bool handle_signal(PAL_CONTEXT* context);
 long pal_to_unix_errno(long err);
 
 int set_hostname(const char* name, size_t len);
+/* The PAL's late names (svsm auto-peering): libos_uname.c. */
+void libos_refresh_names(bool first_entry);
 
 extern bool g_eventfd_passthrough_mode;
 int init_eventfd_mode(void);

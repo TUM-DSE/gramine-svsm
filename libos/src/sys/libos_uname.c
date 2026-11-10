@@ -9,6 +9,7 @@
  */
 
 #include "api.h"
+#include "libos_fs.h"
 #include "libos_internal.h"
 #include "libos_table.h"
 #include "linux_abi/errors.h"
@@ -38,18 +39,31 @@ long libos_syscall_uname(struct linux_new_utsname* buf) {
     if (!is_user_memory_writable(buf, sizeof(*buf)))
         return -EFAULT;
 
-    /* A PAL that learns the hostname after init (svsm auto-peering, in the
-     * clone that runs the app) is followed until the app names itself. */
-    if (g_pal_public_state->refresh_dns_host && !g_hostname_by_app) {
-        g_pal_public_state->refresh_dns_host();
+    libos_refresh_names(/*first_entry=*/false);
+
+    memcpy(buf, &g_current_uname, sizeof(g_current_uname));
+    return 0;
+}
+
+/* A PAL that learns its names after init (svsm auto-peering's lease, in the
+ * clone that runs the app) is followed: the hostname until the app names
+ * itself, and the emulated /etc/resolv.conf mounted once a lease filled it.
+ * first_entry: the clone's first code after Finalize (/dev/mvlease written by
+ * the runtime's finalize wrapper) - the PAL leases there unless the manifest
+ * says join = "lazy"; otherwise any use (uname) leases if not yet. */
+void libos_refresh_names(bool first_entry) {
+    void (*f)(void) = first_entry ? g_pal_public_state->auto_first_entry
+                                  : g_pal_public_state->refresh_dns_host;
+    if (!f)
+        return;
+    f();
+    if (!g_hostname_by_app) {
         const char* h = g_pal_public_state->dns_host.hostname;
         size_t n = strnlen(h, sizeof(g_pal_public_state->dns_host.hostname));
         if (n && n < sizeof(g_current_uname.nodename) && strcmp(h, g_current_uname.nodename))
             set_hostname(h, n);
     }
-
-    memcpy(buf, &g_current_uname, sizeof(g_current_uname));
-    return 0;
+    etcfs_mount_late();
 }
 
 int set_hostname(const char* name, size_t len) {

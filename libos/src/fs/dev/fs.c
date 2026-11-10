@@ -11,6 +11,7 @@
 
 #include "libos_flags_conv.h"
 #include "libos_fs_pseudo.h"
+#include "libos_internal.h"
 #include "pal.h"
 
 static ssize_t dev_null_read(struct libos_handle* hdl, void* buf, size_t count) {
@@ -100,6 +101,46 @@ static ssize_t dev_tty_write(struct libos_handle* hdl, const void* buf, size_t c
 static int dev_tty_flush(struct libos_handle* hdl) {
     int ret = PalStreamFlush(hdl->pal_handle);
     return pal_to_unix_errno(ret);
+}
+
+/*
+ * /dev/mvlease - svsm auto-peering's lease (notes/net/AUTO-PEER.md; the PAL's
+ * pal_svsm_ipam.c). WRITTEN once by the runtime's finalize wrapper, as a
+ * clone's first code after Finalize (services/common/include/mv_first_entry.h):
+ * the PAL then JOINs and takes this instance's lease, bounded, before any app
+ * code ([svsm.auto] join = "immediate", the default; "lazy" defers it to the
+ * first use), and the LibOS follows its names (hostname, the emulated
+ * /etc/resolv.conf). READ: the lease as one line, as held now - reading never
+ * joins. ENODEV on a PAL without auto-peering.
+ */
+static ssize_t dev_mvlease_write(struct libos_handle* hdl, const void* buf, size_t count) {
+    __UNUSED(hdl);
+    __UNUSED(buf);
+    if (!g_pal_public_state->auto_first_entry)
+        return -ENODEV;
+    libos_refresh_names(/*first_entry=*/true);
+    return count;
+}
+
+static ssize_t dev_mvlease_read(struct libos_handle* hdl, void* buf, size_t count) {
+    if (!g_pal_public_state->auto_lease_text)
+        return -ENODEV;
+    char line[256];
+    size_t n = g_pal_public_state->auto_lease_text(line, sizeof(line));
+    if (n >= sizeof(line))
+        n = sizeof(line) - 1;
+    lock(&hdl->lock);
+    file_off_t pos = hdl->pos;
+    if (pos < 0 || (size_t)pos >= n) {
+        unlock(&hdl->lock);
+        return 0;
+    }
+    if (count > n - (size_t)pos)
+        count = n - (size_t)pos;
+    memcpy(buf, line + pos, count);
+    hdl->pos = pos + count;
+    unlock(&hdl->lock);
+    return count;
 }
 
 /* this dummy function is required only to override the default behavior of pseudo_poll() -- this is
@@ -418,6 +459,13 @@ int init_devfs(void) {
     mvcfg->dev.minor = 202;
     mvcfg->dev.dev_ops.read = &dev_mvcfg_read;
     mvcfg->dev.dev_ops.seek = &dev_mvcfg_seek;
+
+    struct pseudo_node* mvlease = pseudo_add_dev(root, "mvlease");
+    mvlease->perm = PSEUDO_PERM_FILE_RW;
+    mvlease->dev.major = 10;
+    mvlease->dev.minor = 203;
+    mvlease->dev.dev_ops.read = &dev_mvlease_read;
+    mvlease->dev.dev_ops.write = &dev_mvlease_write;
 
     /* see `man 4 tty` for more info, including major/minor numbers */
     struct pseudo_node* tty = pseudo_add_dev(root, "tty");

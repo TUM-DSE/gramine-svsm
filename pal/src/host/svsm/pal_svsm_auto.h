@@ -7,9 +7,9 @@
  * answer that points into the deployment's subnet.
  *
  * Nothing here runs in the zygote: the monitor answers a zygote's JOIN
- * BAD_STATE and nothing is cached, so the clone that runs the app joins on
- * its first use (the LibOS's refresh_dns_host before /etc/resolv.conf or
- * uname, or a query to the stub). A vault in no deployment, or on a monitor
+ * BAD_STATE and nothing is cached. The clone that runs the app joins at its
+ * first entry after Finalize ([svsm.auto] join = "immediate", the default) or
+ * on its first use (join = "lazy"). A vault in no deployment, or on a monitor
  * without AutoNet, keeps the resolver and hostname it had. */
 #ifndef PAL_SVSM_AUTO_H
 #define PAL_SVSM_AUTO_H
@@ -34,8 +34,12 @@
 void pal_svsm_auto_config(toml_table_t* svsm);
 /* pal_process.c, in a fork's child: its own instance joins again. */
 void pal_svsm_auto_after_fork(void);
-/* The LibOS's refresh_dns_host. */
+/* The LibOS's refresh_dns_host (any use: joins if not yet), auto_first_entry
+ * (a clone's first code after Finalize: joins unless join = "lazy") and
+ * auto_lease_text (never joins). */
 void pal_svsm_auto_refresh(void);
+void pal_svsm_auto_first_entry(void);
+size_t pal_svsm_auto_lease_text(char* buf, size_t cap);
 
 /* The lease, after pal_svsm_auto_ensure() said true. */
 struct pal_svsm_lease {
