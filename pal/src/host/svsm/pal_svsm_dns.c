@@ -330,9 +330,13 @@ bool pal_svsm_dns_connect(PAL_HANDLE handle, struct pal_socket_addr* addr,
         }
         return false;
     }
+    /* Joined and leased first, outside g_ss_lock: ensure may wait up to
+     * PAL_SVSM_IPAM_WAIT_US for the service, and a poll on another thread
+     * takes g_ss_lock (pal_svsm_dns_readable). */
+    bool for_stub = stub && pal_svsm_auto_ensure();
     spinlock_lock(&g_ss_lock);
     struct stub_sock* s = ss_of(handle, false);
-    if (!stub || !pal_svsm_auto_ensure()) {
+    if (!for_stub) {
         if (s)
             s->connected = false;         /* re-pointed elsewhere */
         spinlock_unlock(&g_ss_lock);
