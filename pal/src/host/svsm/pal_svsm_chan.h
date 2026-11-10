@@ -33,7 +33,10 @@
 /* The directory, window 0 of every vault that holds a channel. */
 #define PAL_CHAN_DIR_VADDR    PAL_CHAN_START_VADDR
 #define PAL_CHAN_DIR_SERIAL   0x018
-#define PAL_CHAN_DIR_LIVE     0x040
+#define PAL_CHAN_DIR_LIVE     0x040   /* abi 1: windows 0..511 */
+/* abi 2 (PLATFORM-LIMITS.md rev. 2): the live mask of all
+ * PAL_CHAN_SLOT_WINDOWS windows, 512 B. The monitor writes both. */
+#define PAL_CHAN_DIR_LIVE2    0x900
 
 /* WHO is in a lineage: sixteen serials in the region header, zero for an
  * empty slot (monitor ipc/mod.rs write_header, KIND_LINEAGE only). The PAL
@@ -310,7 +313,7 @@ static inline int pal_chan_recv(struct pal_chan_ring* r, void* msg, uint32_t max
  * 0, the directory) so that test/chan_accept_test.c runs the same code on an
  * imitation of the slot.
  */
-#define PAL_CHAN_SLOT_WINDOWS    512u   /* IPC_WINDOWS */
+#define PAL_CHAN_SLOT_WINDOWS    4096u  /* IPC_WINDOWS: 8 GiB at the IPC slot (was 512) */
 #define PAL_CHAN_REGION_WINDOWS  256u   /* MAX_WINDOWS_PER_REGION (monitor ipc/mod.rs) */
 #define PAL_CHAN_PAGE            4096u
 #define PAL_CHAN_HDR_ABI         0x008
@@ -430,7 +433,7 @@ static inline bool pal_chan_bit(const uint64_t* bm, unsigned w) {
 static inline bool pal_chan_dir_live(unsigned long slot_base, unsigned w) {
     if (w == 0 || w >= PAL_CHAN_SLOT_WINDOWS)
         return false;
-    return (pal_chan_u64(slot_base, PAL_CHAN_DIR_LIVE + (w / 64) * 8) >> (w % 64)) & 1;
+    return (pal_chan_u64(slot_base, PAL_CHAN_DIR_LIVE2 + (w / 64) * 8) >> (w % 64)) & 1;
 }
 
 /* Hold a channel's whole run of windows in `held` (one bit per window), and
@@ -473,6 +476,16 @@ typedef void (*pal_chan_reject_fn)(unsigned w, int why, uint64_t tag);
 static inline unsigned pal_chan_accept_scan(unsigned long slot_base, const uint64_t* held,
                                             uint32_t* out_windows, pal_chan_reject_fn reject) {
     for (unsigned w = 1; w < PAL_CHAN_SLOT_WINDOWS; w++) {
+        /* A whole 64-window word with nothing live that is not held is
+         * skipped in one look: 4096 windows are 64 words, and the scheduler
+         * asks this on every re-test of a listener. */
+        if (w == 1 || (w & 63) == 0) {
+            uint64_t cand = pal_chan_u64(slot_base, PAL_CHAN_DIR_LIVE2 + (w / 64) * 8) & ~held[w / 64];
+            if (!(cand >> (w & 63))) {
+                w |= 63;
+                continue;
+            }
+        }
         if (pal_chan_bit(held, w) || !pal_chan_dir_live(slot_base, w))
             continue;
         if (w > 1 && pal_chan_dir_live(slot_base, w - 1) && !pal_chan_bit(held, w - 1))
