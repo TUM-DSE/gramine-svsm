@@ -31,9 +31,22 @@ static struct linux_new_utsname g_current_uname = {
     .domainname = "(none)", /* this seems to be the default on Linux */
 };
 
+/* Set by sethostname: from then on the app's name, not the PAL's. */
+static bool g_hostname_by_app;
+
 long libos_syscall_uname(struct linux_new_utsname* buf) {
     if (!is_user_memory_writable(buf, sizeof(*buf)))
         return -EFAULT;
+
+    /* A PAL that learns the hostname after init (svsm auto-peering, in the
+     * clone that runs the app) is followed until the app names itself. */
+    if (g_pal_public_state->refresh_dns_host && !g_hostname_by_app) {
+        g_pal_public_state->refresh_dns_host();
+        const char* h = g_pal_public_state->dns_host.hostname;
+        size_t n = strnlen(h, sizeof(g_pal_public_state->dns_host.hostname));
+        if (n && n < sizeof(g_current_uname.nodename) && strcmp(h, g_current_uname.nodename))
+            set_hostname(h, n);
+    }
 
     memcpy(buf, &g_current_uname, sizeof(g_current_uname));
     return 0;
@@ -56,6 +69,7 @@ long libos_syscall_sethostname(char* name, int len) {
     if (!is_user_memory_readable(name, len))
         return -EFAULT;
 
+    g_hostname_by_app = true;
     return set_hostname(name, len);
 }
 

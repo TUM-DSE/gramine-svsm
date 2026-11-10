@@ -30,6 +30,7 @@
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
 #include "pal_svsm_chan.h"
+#include "pal_svsm_auto.h"
 #include "socket_utils.h"
 
 /* How long a blocking call parks before looking again. Not a timeout the
@@ -1578,6 +1579,11 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
                       struct pal_socket_addr* out_local_addr, bool* out_inprogress) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_INVAL;
+    /* The auto-peering DNS stub (pal_svsm_dns.c): a datagram socket pointed
+     * at it needs no channel; TCP to it is refused. */
+    int dns_rc;
+    if (pal_svsm_dns_connect(handle, addr, out_local_addr, out_inprogress, &dns_rc))
+        return dns_rc;
     if (handle->sock.type == PAL_SOCKET_UDP && handle->sock.win) {
         /* A second connect on a datagram socket only re-points it; the
          * channel it already has is the same channel. glibc's getaddrinfo
@@ -1910,6 +1916,15 @@ static uint64_t iov_total(struct iovec* iov, size_t iov_len) {
 static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                     size_t* out_size, struct pal_socket_addr* addr,
                     bool force_nonblocking) {
+    /* A query to the auto-peering DNS stub is answered here, or forwarded
+     * to the upstream resolver through the ordinary path (pal_svsm_dns.c). */
+    struct pal_socket_addr dns_fwd;
+    int dns_rc;
+    switch (pal_svsm_dns_send(handle, iov, iov_len, out_size, addr, &dns_rc, &dns_fwd)) {
+        case 1: return dns_rc;
+        case 2: addr = &dns_fwd; break;
+        default: break;
+    }
     /* A sendto on a socket nobody connected still needs a channel. Opened
      * here, lazily, because there is nowhere earlier to do it: bind does
      * not reach the service and socket() does not know whether this will
@@ -2493,8 +2508,17 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
         return -PAL_ERROR_NOTCONNECTION;
     if (handle->sock.broken)
         return -PAL_ERROR_CONNFAILED;
-    if (handle->sock.type == PAL_SOCKET_UDP)
-        return udp_recv(handle, iov, iov_len, out_total_size, addr, force_nonblocking);
+    if (handle->sock.type == PAL_SOCKET_UDP) {
+        /* The DNS stub's answers first; a forwarded answer is shown as the
+         * stub's and checked for rebinding (pal_svsm_dns.c). */
+        int dns_rc;
+        if (pal_svsm_dns_recv(handle, iov, iov_len, out_total_size, addr, &dns_rc))
+            return dns_rc;
+        int urc = udp_recv(handle, iov, iov_len, out_total_size, addr, force_nonblocking);
+        if (urc == 0)
+            pal_svsm_dns_filter(handle, iov, iov_len, *out_total_size, addr);
+        return urc;
+    }
     /* A FIN already seen, and nothing left in the residue, is end of stream -
      * on EVERY later call, not just the one that saw it. Checked before the
      * ring, because the ring may well have another connection's traffic in it
@@ -2878,6 +2902,8 @@ bool pal_svsm_sock_readable(PAL_HANDLE handle) {
      * this; sock_wait_ready makes the same test for it. Loads only. */
     if (handle->sock.listening)
         return handle->sock.closed || accept_find(NULL, NULL) != 0;
+    if (pal_svsm_dns_readable(handle))
+        return true;                     /* the DNS stub's answer */
     if (!sock_has_chan(handle))
         return false;
     /* What a previous read could not take is readable too, or a poll
@@ -3110,6 +3136,7 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
+    pal_svsm_dns_close(handle);     /* the DNS stub's queue of this socket */
     if (handle->sock.peer_route) {
         /* Its [[svsm.peer]] entry's open count (the `conns` cap). */
         __atomic_sub_fetch(&g_pal_svsm_peers[handle->sock.peer_route - 1].conns, 1,

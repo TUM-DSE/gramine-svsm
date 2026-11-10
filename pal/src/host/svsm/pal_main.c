@@ -13,6 +13,7 @@
 #include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
+#include "pal_svsm_auto.h"
 #include "pal_svsm.h"
 #include "pal_rtld.h"
 #include "toml_utils.h"
@@ -807,6 +808,12 @@ noreturn void pal_svsm_main(void)
              * the name did not exist. */
             g_pal_public_state.extra_runtime_domain_names_conf = true;
         }
+
+        /* [svsm.auto]: auto-peering (notes/net/AUTO-PEER.md, pal_svsm_ipam.c).
+         * On unless `enabled = false`; a vault in no deployment, or on a
+         * monitor without it, is unchanged - its clone finds that out on its
+         * first lookup and keeps the resolver above. */
+        pal_svsm_auto_config(manifest_svsm_early);
 
         /* [svsm.pipes]: pipes that survive a fork.
          *

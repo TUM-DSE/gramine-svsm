@@ -4,13 +4,17 @@ CC      ?= cc
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=gnu11 -Wall -Wextra -Werror -fsanitize=undefined -fno-sanitize-recover=all
 
-check: chan_accept_test
+check: chan_accept_test dns_test
 	./chan_accept_test
+	./dns_test
 
 chan_accept_test: chan_accept_test.c ../pal_svsm_chan.h
 	$(CC) $(CFLAGS) -o $@ chan_accept_test.c
 
+dns_test: dns_test.c ../pal_svsm_dns.c
+	$(CC) $(CFLAGS) -o $@ dns_test.c
+
 clean:
-	rm -f chan_accept_test
+	rm -f chan_accept_test dns_test
 
 .PHONY: check clean

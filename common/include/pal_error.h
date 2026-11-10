@@ -36,8 +36,11 @@ typedef enum NODISCARD {
     PAL_ERROR_ADDRNOTEXIST,
     PAL_ERROR_AFNOSUPPORT,
     PAL_ERROR_CONNFAILED_PIPE,
+    /* Nothing listens there / the peer refused it (svsm auto-peering, AUTO-PEER
+     * X5): ECONNREFUSED, where CONNFAILED is ECONNRESET. */
+    PAL_ERROR_CONNREFUSED,
 
-#define PAL_ERROR_NATIVE_COUNT PAL_ERROR_CONNFAILED_PIPE
+#define PAL_ERROR_NATIVE_COUNT PAL_ERROR_CONNREFUSED
 #define PAL_ERROR_CRYPTO_START PAL_ERROR_CRYPTO_FEATURE_UNAVAILABLE
 
     /* Crypto error constants and their descriptions are adapted from mbedtls. */

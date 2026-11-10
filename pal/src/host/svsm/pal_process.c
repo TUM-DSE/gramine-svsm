@@ -15,6 +15,7 @@
 #include "pal_internal.h"
 #include "pal_host.h"
 #include "pal_monitor_call.h"
+#include "pal_svsm_auto.h"
 #include "pal_svsm.h"
 
 int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
@@ -152,6 +153,7 @@ int _PalProcessFork(uint64_t flags, struct pal_fork_ids* out) {
          * pending connections of threads that did not come along to drop. */
         pal_svsm_pipes_child_after_fork(serial);
         pal_svsm_net_ctr_reset();
+        pal_svsm_auto_after_fork();     /* its own instance: its own lease (AUTO-PEER) */
     }
     return 0;
 }
