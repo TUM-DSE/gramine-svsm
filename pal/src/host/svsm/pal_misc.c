@@ -92,12 +92,60 @@ static const struct pal_rng_src g_cpu_rng = {
     .pause  = cpu_pause,
 };
 
-/* Up to 32 bytes: RDSEED words; more: ChaCha20 under a fresh RDSEED key per
- * call (pal_svsm_random.h). Nothing is kept between calls, so a clone of a
- * zygote shares no generator state with it. */
+/* Up to PAL_RNG_OLD_MAX (44) bytes: the loop this PAL always had - one
+ * 32-bit RDSEED per 4 bytes, 10 tries - unchanged: below that size it is
+ * the cheaper one (the CPU keeps a 32-bit word ready after an idle
+ * stretch; the new path costs four 64-bit words and a block, ~2.4 us
+ * flat), and the owner's rule is that nothing gets slower (2026-11-11).
+ * Measured on jamie (Zen 4, TSC ticks, median of 1001; new/old): 40 B
+ * after idle 5784/5472, 48 B 5784/6768, 64 B 5784/9360, 2496 B
+ * 16392/403080. More than 44 bytes: ChaCha20 under a fresh RDSEED key per
+ * call (pal_svsm_random.h) - 2496 bytes ~7 us where the loop took ~170 us.
+ * Nothing is kept between calls either way, so a clone of a zygote shares
+ * no generator state with it. */
+#define PAL_RNG_OLD_MAX 44
 int _PalRandomBitsRead(void* buffer, size_t size) {
-    if (pal_rng_fill(&g_cpu_rng, buffer, size) < 0)
-        pal_svsm_fail("random: neither RDSEED nor RDRAND gave a usable word", (int)size);
+    if (size > PAL_RNG_OLD_MAX) {
+        if (pal_rng_fill(&g_cpu_rng, buffer, size) < 0)
+            pal_svsm_fail("random: neither RDSEED nor RDRAND gave a usable word", (int)size);
+        return 0;
+    }
+
+    uint8_t rnd_num[4];
+    int success = 1;
+    int retry_max = 10;
+    uint8_t* buf = buffer;
+
+    for(size_t i = 0; i < size;){
+        int retry = 0;
+        while (retry < retry_max) {
+            // Gets a 32-bit random number
+            __asm__ volatile (
+                "mov $0, %%ebx\n\t"
+                "rdseed %%eax\n\t"
+                "jc 1f\n\t"
+                "mov $1, %%ebx\n\t"
+                "1:\n\t"
+                : "=a" (rnd_num), "=b" (success));
+            if(success == 0){
+                break;
+            }
+            retry++;
+        }
+        if(success != 0) {
+            // Reached max retries here
+            pal_svsm_fail("This should not happen",0);
+        }
+
+        for(size_t j = 0; j < 4; j++){
+            buf[i] = rnd_num[j];
+            i++;
+            if(i == size)
+                break;
+        }
+
+    }
+
     return 0;
 }
 
