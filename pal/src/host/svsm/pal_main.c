@@ -23,6 +23,12 @@
  * be resident and the PAL's scheduler may Park it. See pal_threading.c's
  * park_on(). */
 bool g_pal_svsm_is_service = false;
+/* [svsm.app] resident = true (RESIDENT-APPS R1): this vault is a resident
+ * app. Its first Park or Sleep is preceded by AppResident, so the monitor
+ * puts it in the app class instead of the service table. Made from the
+ * TRUSTLET (pal_svsm_app_ensure), never from the zygote: the class is per
+ * process, and the trustlets are clones. */
+bool g_pal_svsm_is_app = false;
 #define MANIFEST_START (void*)0x10000000000
 typedef void (*loader_callback)(void);
 
@@ -356,6 +362,24 @@ noreturn void pal_svsm_main(void)
                 pal_svsm_fail("svsm.inference.enabled is not a boolean", 0);
             if (enabled && pal_svsm_inference_declare(1) < 0)
                 pal_svsm_fail("svsm.inference: the monitor refused the declaration", 0);
+        }
+    }
+
+    /* Is this vault a resident app (RESIDENT-APPS R1)?
+     *
+     *   [svsm.app]
+     *   resident = true
+     *
+     * Measured with the manifest, like [svsm.service]: an app parks (its
+     * first Park ends the host invoke that started it), so the PAL must
+     * know the vault means to be resident. */
+    if (manifest_svsm_early) {
+        toml_table_t* app = toml_table_in(manifest_svsm_early, "app");
+        if (app) {
+            bool resident = false;
+            if (toml_bool_in(app, "resident", false, &resident) < 0)
+                pal_svsm_fail("svsm.app.resident is not a boolean", 0);
+            g_pal_svsm_is_app = resident;
         }
     }
 

@@ -471,11 +471,26 @@ int64_t pal_svsm_channel_notify(uint64_t window) {
  * `expected:32 | which:4 | window:28`; which 0 is the peer's tail ("until
  * there is something to read"), 1 its head ("until there is room"). */
 int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec) {
+    pal_svsm_app_ensure();
     struct monitor_call_data data;
     data.rax = 0x4FFFFFE1;
     data.rbx = (uint64_t)arms;
     data.rcx = count;
     data.rdx = usec;
+    monitor_call(&data);
+    return (int64_t)data.rcx;
+}
+
+/* AppResident (0x4FFFFFAC, RESIDENT-APPS R1): this vault becomes a resident
+ * app -> rcx = 0, or a negative status (-2 BAD_STATE: already one; others:
+ * refused - a service, a device holder, a lineage member, multi-VC, the
+ * host's limit). */
+int64_t pal_svsm_app_resident(void) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFAC;
+    data.rbx = 0;
+    data.rcx = 0;
+    data.rdx = 0;
     monitor_call(&data);
     return (int64_t)data.rcx;
 }
@@ -501,6 +516,7 @@ void pal_svsm_time_info(uint64_t* out_tsc_hz, uint64_t* out_epoch_us) {
  * This is what a cooperative scheduler with nothing runnable should do:
  * one dispatch instead of a processor held for the whole wait. */
 long pal_svsm_sleep_arms(const uint64_t* arms, uint64_t count, uint64_t usec) {
+    pal_svsm_app_ensure();
     struct monitor_call_data data;
     data.rax = 0x4FFFFFDE;
     data.rbx = (uint64_t)arms;

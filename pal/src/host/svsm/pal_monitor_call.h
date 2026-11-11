@@ -170,6 +170,10 @@ int64_t pal_svsm_channel_grant(const void* request, uint64_t len, uint64_t* out_
 int64_t pal_svsm_channel_close(uint64_t window);
 int64_t pal_svsm_channel_notify(uint64_t window);
 int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec);
+/* RESIDENT-APPS R1: AppResident (0x4FFFFFAC), and the once-per-process call
+ * made before an app's first Park/Sleep. */
+int64_t pal_svsm_app_resident(void);
+void pal_svsm_app_ensure(void);
 /* SetExceptionEntry (0x4FFFFFE9): where the monitor should enter this PAL
  * when it has a fault for it rather than a reason to retire the process.
  * 0 stops asking, which is the state a PAL that never calls this is in.

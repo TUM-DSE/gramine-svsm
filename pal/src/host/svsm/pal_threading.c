@@ -234,6 +234,22 @@ static size_t gather_arms_for(uint64_t* arms, size_t max, bool* partial, bool li
  * ordinary vault doing an ordinary invoke, and the caller falls back to
  * what it did before.
  */
+/* Once per process, before the first Park/Sleep of an app (g_pal_svsm_is_app).
+ * The zygote never parks, so a clone starts with it undone; a fork child
+ * inherits "done" and parks as a service, as before (RESIDENT-APPS-R1-DELTA
+ * D2: its app children are a follow-up). A refusal is said once and the
+ * vault parks as a service if it is one. */
+static bool g_app_done = false;
+void pal_svsm_app_ensure(void) {
+    extern bool g_pal_svsm_is_app;
+    if (!g_pal_svsm_is_app || g_app_done)
+        return;
+    g_app_done = true;
+    int64_t st = pal_svsm_app_resident();
+    if (st != 0 && st != -2)
+        log_warning("svsm.app: the monitor refused AppResident (%ld); parking as before", (long)st);
+}
+
 static bool park_on(const uint64_t* arms, size_t n, uint64_t usec) {
     /* Only a vault whose MEASURED manifest declared a service. For
      * anything else a Park would end the host invoke it is sitting in
@@ -241,7 +257,8 @@ static bool park_on(const uint64_t* arms, size_t n, uint64_t usec) {
      * which is exactly why Sleep refuses in that position. The manifest
      * is the only signal available here that says "this vault means to
      * be resident", and being measured is what makes it a safe one. */
-    if (!g_pal_svsm_is_service)
+    extern bool g_pal_svsm_is_app;
+    if (!g_pal_svsm_is_service && !g_pal_svsm_is_app)
         return false;
     return pal_svsm_park(n ? arms : NULL, n, usec) >= 0;
 }
