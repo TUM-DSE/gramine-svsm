@@ -160,7 +160,12 @@ static int listen(struct libos_handle* handle, unsigned int backlog) {
         return -EOPNOTSUPP;
     }
 
-    return pal_to_unix_errno(PalSocketListen(sock->pal_handle, backlog));
+    int ret = PalSocketListen(sock->pal_handle, backlog);
+    /* The svsm PAL answers STREAMEXIST when another vault holds the port at
+     * the network service (inbound TCP): that is EADDRINUSE to a program. */
+    if (ret == -PAL_ERROR_STREAMEXIST)
+        return -EADDRINUSE;
+    return pal_to_unix_errno(ret);
 }
 
 static int accept(struct libos_handle* handle, bool is_nonblocking,

@@ -78,6 +78,10 @@ struct pal_svsm_peer g_pal_svsm_peers[PAL_SVSM_MAX_PEERS];
 unsigned g_pal_svsm_npeers;
 uint8_t  g_pal_svsm_self_addr[4];
 
+/* [[svsm.inbound]] (pal_main.c). */
+struct pal_svsm_inbound g_pal_svsm_inbound[PAL_SVSM_MAX_INBOUND];
+unsigned g_pal_svsm_ninbound;
+
 /* "a.b.c.d", then ":port" or ":*" when `with_port` - nothing else, no
  * spaces, each part in range. 0 when it parses; *port is 0 for "*". */
 int pal_svsm_parse_addr(const char* s, bool with_port, uint8_t ip[4], uint16_t* port) {
@@ -208,6 +212,12 @@ void pal_svsm_net_ctr_reset(void) {
 #define PAL_MVMUX_OP_FIN      2
 #define PAL_MVMUX_OP_RST      3
 #define PAL_MVMUX_OP_CREDIT   4
+/* INBOUND (MicroVault notes/net/INBOUND-TCP.md; netsvc mvmux.h): LISTEN asks
+ * the service to expose a port and is answered on the same id; ACCEPT is the
+ * service's OFFER of a connection on the listener's id and the vault's answer
+ * on a new id. ACCEPT is a control frame like FIN, RST and CREDIT. */
+#define PAL_MVMUX_OP_LISTEN   5
+#define PAL_MVMUX_OP_ACCEPT   6
 #define PAL_MVMUX_FIN_HALF    0x01  /* FIN's flags: shutdown(SHUT_WR), still reading */
 /* DATA's flags on a datagram socket that asked for PAL_MVNET_REQ_DGRAM_BATCH:
  * the body is [pal_mvnet_dgram][payload] records back to back, none split.
@@ -252,6 +262,7 @@ static inline uint64_t mux_room(uint64_t slot, bool muxed) {
  * other; change one and change the other. */
 #define PAL_MVNET_MAGIC      0x314E564DU   /* "MVN1" */
 #define PAL_MVNET_OP_CONNECT 1
+#define PAL_MVNET_OP_LISTEN  2   /* port = the bound port; flags = max | backlog << 16 */
 #define PAL_MVNET_PROTO_TCP  6
 #define PAL_MVNET_PROTO_UDP  17
 /* The request's flags. DGRAM_BATCH: this PAL reads PAL_MVMUX_DATA_DGRAMS
@@ -296,6 +307,30 @@ struct pal_mvnet_dgram {
     uint16_t port;
     uint8_t  addr[4];
 } __attribute__((packed));
+
+/* An inbound connection OFFERED (service -> vault, on the listener's id), and
+ * the vault's answer (on the new id it claims, or on 0 to refuse). Mirrored
+ * from netsvc's mvnet.h - change one and change the other. */
+#define PAL_MVNET_ACCEPT_MAGIC 0x41564E4DU   /* "MNVA" */
+struct pal_mvnet_accept {
+    uint32_t magic;
+    uint32_t cookie;
+    uint8_t  peer_addr[4];
+    uint16_t peer_port;
+    uint16_t local_port;
+    uint8_t  local_addr[4];
+} __attribute__((packed));
+
+struct pal_mvnet_accept_rep {
+    uint32_t magic;
+    uint32_t cookie;
+    int32_t  status;
+} __attribute__((packed));
+
+/* The refusal details of a LISTEN's answer (netsvc mvnet.h MVNET_REF_*). */
+#define PAL_MVNET_REF_INBOUND_OFF   8
+#define PAL_MVNET_REF_INBOUND_PORT  9
+#define PAL_MVNET_REF_INBOUND_TAKEN 10
 
 /* Windows already handed to a handle - by `connect`, which opened one, or by
  * `accept`, which found one. A bit per window, which is also how the monitor
@@ -467,7 +502,12 @@ static bool sock_wr_over(PAL_HANDLE h) {
  * session table, which is the real limit on how many connections one vault can
  * have open at once. The rest is headroom so a few can run at the cap.
  */
-#define PAL_MUX_FLOORS 32
+/* 128 since inbound TCP (MicroVault notes/net/INBOUND-TCP.md section 5): a
+ * server vault holds wrk2 -c64 and more on its one channel, and a floor per
+ * socket is what keeps a frame for every one of them from blocking the head.
+ * The pool is allocated on first use, so a vault with a few sockets still
+ * holds a few buffers. */
+#define PAL_MUX_FLOORS 128
 #define PAL_MUX_POOL   (PAL_MUX_FLOORS + 3 * (PAL_MUX_CREDIT_CAP - 1))
 
 static void* g_mux_pool[PAL_MUX_POOL];
@@ -917,6 +957,98 @@ static void mux_fin_flush(void) {
  *   MUX_HEAD_EMPTY    nothing there, or this handle owns its channel.
  *   MUX_HEAD_NOMEM
  */
+/* --------------------------------------------------- inbound: the offers
+ *
+ * An OFFER (an ACCEPT frame on a listener's id) is consumed by whoever routes
+ * the shared head and queued HERE, in a fixed table: the router may run where
+ * the heap is not safe (pal_svsm_heap_unsafe), and an offer must never wait at
+ * the head behind data, or one listener nobody accepts on would stall every
+ * connection of the vault. accept() takes them out in arrival order.
+ *
+ * The listener table holds each inbound listener's `max` and how many of the
+ * connections accepted from it are open: the vault's own count, measured
+ * separately from the service's (both ends enforce the manifest's `max`). */
+#define PAL_INB_OFFERS    256
+#define PAL_INB_LISTENERS PAL_SVSM_MAX_INBOUND
+static struct {
+    uint32_t lid;
+    struct pal_mvnet_accept a;
+} g_inb_off[PAL_INB_OFFERS];
+static int g_inb_noff;
+static struct {
+    uint32_t lid;               /* 0 = free */
+    uint32_t live, max;
+} g_inb_lis[PAL_INB_LISTENERS];
+static uint64_t g_inb_dropped, g_inb_refused;
+
+static int inb_lis_find(uint32_t lid) {
+    for (int i = 0; lid && i < PAL_INB_LISTENERS; i++)
+        if (g_inb_lis[i].lid == lid)
+            return i;
+    return -1;
+}
+
+/* Refuse an offer: the service resets that connection. Best effort - a full
+ * ring loses the answer, and the service then resets it when the offer times
+ * out, which is the same outcome two seconds later. */
+static void inb_refuse(uint32_t cookie) {
+    if (!g_pal_svsm_mux_open)
+        return;
+    struct pal_chan_ring out;
+    pal_chan_ring_init(&out, g_pal_svsm_mux_win, g_pal_svsm_mux_side, /*producing=*/1);
+    struct pal_mvmux_hdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.op = PAL_MVMUX_OP_ACCEPT;          /* on id 0: a refusal */
+    struct pal_mvnet_accept_rep r = { PAL_MVNET_ACCEPT_MAGIC, cookie, -1 };
+    if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, &r, sizeof r) == 0)
+        pal_svsm_channel_notify(g_pal_svsm_mux_widx);
+    g_inb_refused++;
+}
+
+/* The router's half: an ACCEPT frame for `target`. No heap, no wait. */
+static void inb_offer_in(PAL_HANDLE target, const char* body, uint32_t len) {
+    struct pal_mvnet_accept a;
+    if (len < sizeof a) {
+        g_inb_dropped++;
+        return;
+    }
+    memcpy(&a, body, sizeof a);
+    if (a.magic != PAL_MVNET_ACCEPT_MAGIC) {
+        g_inb_dropped++;
+        return;
+    }
+    /* Only a listener this vault TOLD the service about: an offer on any other
+     * id is not one this vault asked for, and is refused, not taken. */
+    if (!target || target->hdr.type != PAL_TYPE_SOCKET || !target->sock.listening
+        || !target->sock.inbound || target->sock.closed || g_inb_noff >= PAL_INB_OFFERS) {
+        inb_refuse(a.cookie);
+        return;
+    }
+    g_inb_off[g_inb_noff].lid = target->sock.conn_id;
+    g_inb_off[g_inb_noff].a   = a;
+    g_inb_noff++;
+}
+
+/* The oldest offer for listener `lid`, removed from the table; false if none. */
+static bool inb_offer_take(uint32_t lid, struct pal_mvnet_accept* out) {
+    for (int i = 0; i < g_inb_noff; i++) {
+        if (g_inb_off[i].lid != lid)
+            continue;
+        *out = g_inb_off[i].a;
+        memmove(&g_inb_off[i], &g_inb_off[i + 1], (size_t)(g_inb_noff - i - 1) * sizeof g_inb_off[0]);
+        g_inb_noff--;
+        return true;
+    }
+    return false;
+}
+
+static bool inb_offer_any(uint32_t lid) {
+    for (int i = 0; i < g_inb_noff; i++)
+        if (g_inb_off[i].lid == lid)
+            return true;
+    return false;
+}
+
 enum mux_head {
     MUX_HEAD_EMPTY = 0,
     MUX_HEAD_MINE,
@@ -984,7 +1116,7 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
      * below had no case for it, and "an op this build does not know" consumed
      * and dropped the one message the connecting socket was waiting for. */
     bool ctl = (ph.op == PAL_MVMUX_OP_FIN || ph.op == PAL_MVMUX_OP_RST
-                || ph.op == PAL_MVMUX_OP_CREDIT);
+                || ph.op == PAL_MVMUX_OP_CREDIT || ph.op == PAL_MVMUX_OP_ACCEPT);
 
     if (target == handle && !ctl) {
         /* Ours to read. Straight out of the ring into `rx` if there is room -
@@ -1087,6 +1219,8 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
         target->sock.fin_seen = true;
     } else if (ph.op == PAL_MVMUX_OP_RST) {
         target->sock.broken = true;
+    } else if (ph.op == PAL_MVMUX_OP_ACCEPT) {
+        inb_offer_in(target, scratch + PAL_MVMUX_HDR_BYTES, got - PAL_MVMUX_HDR_BYTES);
     } else if (ph.op == PAL_MVMUX_OP_CREDIT) {
         if (got >= PAL_MVMUX_HDR_BYTES + 4) {
             uint32_t lim;
@@ -1169,9 +1303,33 @@ int _PalSocketBind(PAL_HANDLE handle, struct pal_socket_addr* addr) {
  * that a channel exists from the moment it is granted whether or not this
  * vault has accepted it yet.
  */
+static int inb_listen(PAL_HANDLE handle, const struct pal_svsm_inbound* e, unsigned int backlog);
+
 int _PalSocketListen(PAL_HANDLE handle, unsigned int backlog) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_INVAL;
+    /* INBOUND: a stream socket bound to a port the measured manifest declares
+     * in [[svsm.inbound]] is ALSO reachable from outside, and the network
+     * service has to be told - which is the one thing listen() here ever
+     * tells anybody. Any other port is a peer-channel listener, as before.
+     * Once per socket: a second listen() only changes the backlog. */
+    if (handle->sock.type == PAL_SOCKET_TCP && g_pal_svsm_net_protocol
+            && handle->sock.listen_port && !handle->sock.inbound) {
+        const struct pal_svsm_inbound* e = NULL;
+        for (unsigned i = 0; i < g_pal_svsm_ninbound; i++) {
+            if (g_pal_svsm_inbound[i].port == handle->sock.listen_port) {
+                e = &g_pal_svsm_inbound[i];
+                break;
+            }
+            if (!g_pal_svsm_inbound[i].port && !e)
+                e = &g_pal_svsm_inbound[i];          /* "*" */
+        }
+        if (e) {
+            int rc = inb_listen(handle, e, backlog);
+            if (rc < 0)
+                return rc;
+        }
+    }
     handle->sock.listening = true;
     handle->sock.backlog   = backlog;
     return 0;
@@ -1228,6 +1386,10 @@ static unsigned accept_find(uint32_t* out_windows, pal_chan_reject_fn refuse) {
     return pal_chan_accept_scan(PAL_CHAN_START_VADDR, g_sock_claimed, out_windows, refuse);
 }
 
+static int inb_accept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE* out_client,
+                      struct pal_socket_addr* out_client_addr,
+                      struct pal_socket_addr* out_local_addr);
+
 int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE* out_client,
                      struct pal_socket_addr* out_client_addr,
                      struct pal_socket_addr* out_local_addr) {
@@ -1239,6 +1401,11 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
     bool nonblock = handle->sock.is_nonblocking || (options & PAL_OPTION_NONBLOCK);
 
     for (;;) {
+        if (handle->sock.inbound) {
+            int rc = inb_accept(handle, options, out_client, out_client_addr, out_local_addr);
+            if (rc != -PAL_ERROR_TRYAGAIN)
+                return rc;
+        }
         uint32_t nwin = 0;
         unsigned w = accept_find(&nwin, sock_refuse);
         if (w) {
@@ -1311,7 +1478,17 @@ int _PalSocketAccept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE
            is a wake rather than a poll interval; the bound is the backstop
            for a monitor that does not (and for the case where this vault is
            not the scheduler's to park). */
-        int wr = sock_block(handle, PAL_WAIT_READ, NULL, 0, 50000, /*interruptible=*/true);
+        /* An inbound listener also waits on the shared channel's inbound ring:
+         * an offer is a message there, so its arrival is a wake, not a poll. */
+        uint64_t arm[1];
+        size_t narm = 0;
+        if (handle->sock.inbound && g_pal_svsm_mux_open) {
+            struct pal_chan_ring in;
+            ring_for(handle, &in, NULL);
+            arm[narm++] = pal_chan_arm(g_pal_svsm_mux_widx, PAL_CHAN_ARM_TAIL, *in.peer_tail);
+        }
+        int wr = sock_block(handle, PAL_WAIT_READ, narm ? arm : NULL, narm, 50000,
+                            /*interruptible=*/true);
         if (wr < 0)
             return wr;
         if (handle->sock.closed)
@@ -1383,25 +1560,45 @@ static bool mvnet_wait(PAL_HANDLE handle, pal_wait_flags_t want, uint32_t seen,
  * to say whether it got there. Only for a peer the manifest declared to
  * be one: to any other peer these sixteen bytes would be the
  * application's data, arriving with a meaning nobody agreed to. */
+/* `op` PAL_MVNET_OP_LISTEN sends a LISTEN instead (inbound): `local_port` is
+ * the port to be reached on, `listen_flags` the manifest's max and backlog,
+ * and *out_detail (may be NULL) the refusal's detail byte if refused. */
+static int mvnet_exchange(PAL_HANDLE handle, struct pal_socket_addr* addr,
+                          uint8_t proto, uint16_t local_port, uint8_t op,
+                          uint32_t listen_flags, struct pal_mvnet_rep* out_rep,
+                          uint16_t* out_detail);
+
 static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
                            uint8_t proto, uint16_t local_port,
                            struct pal_mvnet_rep* out_rep) {
+    return mvnet_exchange(handle, addr, proto, local_port, PAL_MVNET_OP_CONNECT, 0, out_rep,
+                          NULL);
+}
+
+static int mvnet_exchange(PAL_HANDLE handle, struct pal_socket_addr* addr,
+                          uint8_t proto, uint16_t local_port, uint8_t op,
+                          uint32_t listen_flags, struct pal_mvnet_rep* out_rep,
+                          uint16_t* out_detail) {
+    bool listen = op == PAL_MVNET_OP_LISTEN;
     /* TCP must name a peer; UDP must not. For a datagram socket the peer
      * travels with each datagram, so an address here would be either
      * ignored or misleading - what it sends instead is the local port, so
      * the service knows whether to bind one or take an ephemeral. */
-    if (proto == PAL_MVNET_PROTO_TCP && (!addr || addr->domain != PAL_IPV4))
+    if (!listen && proto == PAL_MVNET_PROTO_TCP && (!addr || addr->domain != PAL_IPV4))
         return -PAL_ERROR_INVAL;
 
     struct pal_mvnet_req req;
     memset(&req, 0, sizeof(req));
     req.magic = PAL_MVNET_MAGIC;
-    req.op    = PAL_MVNET_OP_CONNECT;
+    req.op    = listen ? PAL_MVNET_OP_LISTEN : PAL_MVNET_OP_CONNECT;
     req.proto = proto;
     /* The port is carried in host order because both ends are the same
      * machine and neither puts it on a wire; the address is not, because
      * the service copies it straight into the header it builds. */
-    if (proto == PAL_MVNET_PROTO_TCP) {
+    if (listen) {
+        req.port  = local_port;
+        req.flags = listen_flags;
+    } else if (proto == PAL_MVNET_PROTO_TCP) {
         req.port = ntohs(addr->ipv4.port);
         memcpy(req.addr, &addr->ipv4.addr, 4);
     } else {
@@ -1441,7 +1638,7 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
     struct pal_mvmux_hdr cmh;
     memset(&cmh, 0, sizeof cmh);
     cmh.conn = handle->sock.conn_id;
-    cmh.op   = PAL_MVMUX_OP_CONNECT;
+    cmh.op   = listen ? PAL_MVMUX_OP_LISTEN : PAL_MVMUX_OP_CONNECT;
     const void* chf = handle->sock.muxed ? &cmh : NULL;
     uint32_t chfl = handle->sock.muxed ? PAL_MVMUX_HDR_BYTES : 0;
 
@@ -1503,6 +1700,17 @@ static int mvnet_handshake(PAL_HANDLE handle, struct pal_socket_addr* addr,
                MVNET_REF_*, the low byte; lwIP's err_t negated, the high) is
                counted here and said on the 1st, 2nd, 4th... of each, so a
                refusal is diagnosed from this end too (netsvc-5500). */
+            if (rep.status != 0 && listen) {
+                if (out_detail)
+                    *out_detail = rep.pad;
+                static uint64_t listen_refused;
+                uint64_t n = __atomic_add_fetch(&listen_refused, 1, __ATOMIC_RELAXED);
+                if ((n & (n - 1)) == 0)
+                    log_error("listen on port %u refused by the network service: detail %u "
+                              "(status %d) - %lu so far", local_port, rep.pad & 0xff,
+                              rep.status, n);
+                return -PAL_ERROR_CONNFAILED;
+            }
             if (rep.status != 0) {
                 unsigned why = rep.pad & 0xff;
                 if (why >= 8)
@@ -1885,6 +2093,276 @@ have_channel:
     if (out_inprogress)
         *out_inprogress = false;
     return 0;
+}
+
+/* ----------------------------------------------------- inbound (listen side)
+ *
+ * notes/net/INBOUND-TCP.md in MicroVault. The listener is a SHARING handle on
+ * the vault's one channel to the network service, with a connection id of its
+ * own that the service offers connections on. What accept() returns from an
+ * offer is an ordinary sharing socket: the same recv, send, credit and close
+ * as one connect() made. */
+
+/* The vault's channel to [svsm.net], granted now if no connect() has yet - the
+ * same grant connect() makes, by name, retried the same way. */
+static int mux_ensure(void) {
+    while (g_mux_granting && !g_pal_svsm_mux_open)
+        (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
+    if (g_pal_svsm_mux_open)
+        return 0;
+    struct pal_sock_grant req;
+    memset(&req, 0, sizeof(req));
+    memcpy(&req.magic, "MVG1", 4);
+    req.selector = 1;
+    req.endpoint = g_pal_svsm_net_endpoint;
+    memcpy(req.name, g_pal_svsm_net_name, sizeof(req.name));
+    uint64_t addr_out = 0;
+    int64_t win = -1;
+    g_mux_granting = true;
+    for (int busy = 0, paced = 0; busy < PAL_GRANT_TRIES && paced < PAL_GRANT_RATE_TRIES;) {
+        win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
+        if (win == PAL_SVSM_STATUS_RATE_LIMITED) {
+            paced++;
+            (void)sock_block(NULL, 0, NULL, 0, PAL_GRANT_TOKEN_US, /*interruptible=*/false);
+            continue;
+        }
+        if (win != PAL_SVSM_STATUS_BAD_STATE)
+            break;
+        busy++;
+        (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
+    }
+    g_mux_granting = false;
+    if (win < 0)
+        return win == PAL_SVSM_STATUS_PEER_QUOTA ? -PAL_ERROR_DENIED : -PAL_ERROR_CONNFAILED;
+    uint32_t nwin = 0;
+    int why = pal_chan_hdr_check(addr_out, (unsigned)win, &nwin);
+    if (why != PAL_CHAN_HDR_OK) {
+        sock_refuse((unsigned)win, why, pal_chan_u64(addr_out, PAL_CHAN_HDR_REGION));
+        pal_svsm_channel_close((uint64_t)win);
+        return -PAL_ERROR_CONNFAILED;
+    }
+    sock_claim((unsigned)win, nwin);
+    g_pal_svsm_mux_win  = addr_out;
+    g_pal_svsm_mux_widx = (unsigned long)win;
+    g_pal_svsm_mux_side = 0;
+    g_pal_svsm_mux_open = true;
+    return 0;
+}
+
+static int inb_listen(PAL_HANDLE handle, const struct pal_svsm_inbound* e, unsigned int backlog) {
+    int slot = -1;
+    for (int i = 0; i < PAL_INB_LISTENERS && slot < 0; i++)
+        if (!g_inb_lis[i].lid)
+            slot = i;
+    if (slot < 0)
+        return -PAL_ERROR_NOMEM;
+    int rc = mux_ensure();
+    if (rc < 0)
+        return rc;
+    handle->sock.muxed    = true;
+    handle->sock.win      = 0;           /* the MUX owns the channel */
+    handle->sock.side     = g_pal_svsm_mux_side;
+    handle->sock.tx_limit = PAL_MUX_CREDIT_FLOOR;
+    rc = pal_svsm_mux_claim(handle, &handle->sock.conn_id);
+    if (rc < 0) {
+        handle->sock.muxed = false;
+        return rc;
+    }
+    uint32_t max = e->max ? e->max : PAL_SVSM_MUX_MAX_CONNS;
+    uint32_t bl  = backlog ? backlog : 1;
+    if (e->backlog && e->backlog < bl)
+        bl = e->backlog;
+    if (bl > PAL_INB_OFFERS)
+        bl = PAL_INB_OFFERS;
+    if (bl > 0xffff)
+        bl = 0xffff;
+    struct pal_mvnet_rep rep;
+    memset(&rep, 0, sizeof(rep));
+    uint16_t detail = 0;
+    rc = mvnet_exchange(handle, NULL, PAL_MVNET_PROTO_TCP, handle->sock.listen_port,
+                        PAL_MVNET_OP_LISTEN, (max & 0xffff) | (bl << 16), &rep, &detail);
+    if (rc < 0) {
+        pal_svsm_mux_release(handle->sock.conn_id);
+        handle->sock.conn_id = 0;
+        handle->sock.muxed   = false;
+        if (handle->sock.closed)
+            return rc;
+        switch (detail & 0xff) {
+        case PAL_MVNET_REF_INBOUND_TAKEN:
+            return -PAL_ERROR_STREAMEXIST;    /* EADDRINUSE (libos ip.c) */
+        case PAL_MVNET_REF_INBOUND_OFF:
+        case PAL_MVNET_REF_INBOUND_PORT:
+            return -PAL_ERROR_DENIED;         /* the host exposes no such port */
+        default:
+            return rc;
+        }
+    }
+    handle->sock.local.local_port = rep.local_port;
+    memcpy(handle->sock.local.local_addr, rep.local_addr, 4);
+    g_inb_lis[slot].lid  = handle->sock.conn_id;
+    g_inb_lis[slot].live = 0;
+    g_inb_lis[slot].max  = max;
+    handle->sock.inbound = true;
+    return 0;
+}
+
+/* The listener closes: the service is told (a FIN on its id), offers still
+ * queued for it are refused, its table entry goes. Connections it accepted
+ * are theirs and stay. */
+static void inb_unlisten(PAL_HANDLE handle) {
+    if (!handle->sock.inbound)
+        return;
+    handle->sock.inbound = false;
+    uint32_t lid = handle->sock.conn_id;
+    struct pal_mvnet_accept a;
+    while (inb_offer_take(lid, &a))
+        inb_refuse(a.cookie);
+    int k = inb_lis_find(lid);
+    if (k >= 0)
+        g_inb_lis[k].lid = 0;
+    if (lid && g_pal_svsm_mux_open) {
+        mux_fin_flush();
+        if (!mux_fin_send(lid) && g_fin_owed_n < PAL_MUX_FIN_OWED)
+            g_fin_owed[g_fin_owed_n++] = lid;
+    }
+    pal_svsm_mux_release(lid);
+    handle->sock.conn_id = 0;
+}
+
+/* A connection accepted from an offer is closed: its listener's count. */
+static void inb_conn_gone(PAL_HANDLE h) {
+    if (!h->sock.inb_lid)
+        return;
+    int k = inb_lis_find(h->sock.inb_lid);
+    if (k >= 0 && g_inb_lis[k].live)
+        g_inb_lis[k].live--;
+    h->sock.inb_lid = 0;
+}
+
+/* Is an offer waiting for this listener? Routes the shared head first, so an
+ * offer that has arrived is seen. Loads and routing only. */
+static bool inb_ready(PAL_HANDLE h) {
+    if (!h->sock.inbound || !g_pal_svsm_mux_open)
+        return false;
+    if (inb_offer_any(h->sock.conn_id))
+        return true;
+    struct pal_chan_ring in;
+    ring_for(h, &in, NULL);
+    mux_poll_route(h, &in);
+    return inb_offer_any(h->sock.conn_id);
+}
+
+/* -PAL_ERROR_TRYAGAIN when no offer is waiting. */
+static int inb_accept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDLE* out_client,
+                      struct pal_socket_addr* out_client_addr,
+                      struct pal_socket_addr* out_local_addr) {
+    uint32_t lid = handle->sock.conn_id;
+    struct pal_mvnet_accept a;
+    for (;;) {
+        if (!inb_offer_take(lid, &a)) {
+            struct pal_chan_ring in;
+            ring_for(handle, &in, NULL);
+            mux_poll_route(handle, &in);
+            if (g_fin_owed_n)
+                mux_fin_flush();
+            if (!inb_offer_take(lid, &a))
+                return -PAL_ERROR_TRYAGAIN;
+        }
+        int k = inb_lis_find(lid);
+        if (k < 0 || g_inb_lis[k].live >= g_inb_lis[k].max) {
+            /* Over the manifest's max: refused here even if the service let
+             * it through - the two counts are each end's own. */
+            inb_refuse(a.cookie);
+            continue;
+        }
+        PAL_HANDLE cli = calloc(1, HANDLE_SIZE(sock));
+        if (!cli) {
+            inb_refuse(a.cookie);
+            return -PAL_ERROR_NOMEM;
+        }
+        init_handle_hdr(cli, PAL_TYPE_SOCKET);
+        cli->hdr.ops = &g_sock_ops;
+        cli->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
+        cli->sock.domain         = handle->sock.domain;
+        cli->sock.type           = handle->sock.type;
+        cli->sock.is_nonblocking = !!(options & PAL_OPTION_NONBLOCK);
+        cli->sock.muxed          = true;
+        cli->sock.win            = 0;
+        cli->sock.side           = g_pal_svsm_mux_side;
+        cli->sock.tx_limit       = PAL_MUX_CREDIT_FLOOR;
+        cli->sock.local.local_port = a.local_port;
+        memcpy(cli->sock.local.local_addr, a.local_addr, 4);
+        memcpy(cli->sock.peer_addr, a.peer_addr, 4);
+        cli->sock.peer_port = a.peer_port;
+        if (pal_svsm_mux_claim(cli, &cli->sock.conn_id) < 0) {
+            free(cli);
+            inb_refuse(a.cookie);
+            return -PAL_ERROR_NOMEM;
+        }
+        /* The answer, on the new id. It must go: without it the service
+         * resets the connection in two seconds. Waits for ring room as a FIN
+         * does (sock_half_close), bounded. */
+        struct pal_chan_ring out;
+        ring_for(cli, NULL, &out);
+        struct pal_mvmux_hdr mh;
+        memset(&mh, 0, sizeof mh);
+        mh.conn = cli->sock.conn_id;
+        mh.op   = PAL_MVMUX_OP_ACCEPT;
+        struct pal_mvnet_accept_rep r = { PAL_MVNET_ACCEPT_MAGIC, a.cookie, 0 };
+        uint64_t deadline = mvnet_deadline(PAL_MVNET_WAIT_US);
+        bool sent = false;
+        while (!sent) {
+            if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, &r, sizeof r) == 0) {
+                pal_svsm_channel_notify(g_pal_svsm_mux_widx);
+                sent = true;
+                break;
+            }
+            if (sock_chan_gone(cli) || mvnet_now() > deadline)
+                break;
+            uint32_t seen = *out.peer_head;
+            uint64_t arm  = pal_chan_arm(g_pal_svsm_mux_widx, PAL_CHAN_ARM_HEAD, seen);
+            (void)sock_block(cli, PAL_WAIT_WRITE, &arm, 1, 2000, /*interruptible=*/false);
+            ring_for(cli, NULL, &out);
+        }
+        if (!sent) {
+            pal_svsm_mux_release(cli->sock.conn_id);
+            free(cli);
+            return -PAL_ERROR_CONNFAILED;
+        }
+        cli->sock.inb_lid = lid;
+        g_inb_lis[k].live++;
+
+        if (out_client_addr) {
+            memset(out_client_addr, 0, sizeof(*out_client_addr));
+            out_client_addr->domain = handle->sock.domain;
+            if (handle->sock.domain == PAL_IPV6) {
+                /* The v4-mapped form, ::ffff:a.b.c.d, as Linux reports an
+                 * IPv4 peer on a dual-stack [::] listener (Go's). */
+                out_client_addr->ipv6.addr[10] = 0xff;
+                out_client_addr->ipv6.addr[11] = 0xff;
+                memcpy(&out_client_addr->ipv6.addr[12], a.peer_addr, 4);
+                out_client_addr->ipv6.port = htons(a.peer_port);
+            } else {
+                memcpy(&out_client_addr->ipv4.addr, a.peer_addr, 4);
+                out_client_addr->ipv4.port = htons(a.peer_port);
+            }
+        }
+        if (out_local_addr) {
+            memset(out_local_addr, 0, sizeof(*out_local_addr));
+            out_local_addr->domain = handle->sock.domain;
+            if (handle->sock.domain == PAL_IPV6) {
+                out_local_addr->ipv6.addr[10] = 0xff;
+                out_local_addr->ipv6.addr[11] = 0xff;
+                memcpy(&out_local_addr->ipv6.addr[12], a.local_addr, 4);
+                out_local_addr->ipv6.port = htons(a.local_port);
+            } else {
+                memcpy(&out_local_addr->ipv4.addr, a.local_addr, 4);
+                out_local_addr->ipv4.port = htons(a.local_port);
+            }
+        }
+        *out_client = cli;
+        return 0;
+    }
 }
 
 static uint64_t iov_total(struct iovec* iov, size_t iov_len) {
@@ -2877,7 +3355,7 @@ bool pal_svsm_sock_readable(PAL_HANDLE handle) {
      * startup (DSB bring-up, 2026-11-10). The blocking accept never needed
      * this; sock_wait_ready makes the same test for it. Loads only. */
     if (handle->sock.listening)
-        return handle->sock.closed || accept_find(NULL, NULL) != 0;
+        return handle->sock.closed || accept_find(NULL, NULL) != 0 || inb_ready(handle);
     if (!sock_has_chan(handle))
         return false;
     /* What a previous read could not take is readable too, or a poll
@@ -2977,7 +3455,8 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle) {
  * on every pass for as long as its ring stays full. */
 pal_wait_flags_t pal_svsm_sock_wait_ready(PAL_HANDLE handle, pal_wait_flags_t want) {
     if (handle->sock.listening)
-        return (want & PAL_WAIT_READ) && (handle->sock.closed || accept_find(NULL, NULL))
+        return (want & PAL_WAIT_READ)
+                       && (handle->sock.closed || accept_find(NULL, NULL) || inb_ready(handle))
                ? PAL_WAIT_READ : 0;
     /* Another thread's shutdown or close: the waits it ends are over before
      * anything is asked of the rings - which may be gone. */
@@ -3110,6 +3589,8 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
+    inb_unlisten(handle);           /* a listener never shut down: tell the service */
+    inb_conn_gone(handle);
     if (handle->sock.peer_route) {
         /* Its [[svsm.peer]] entry's open count (the `conns` cap). */
         __atomic_sub_fetch(&g_pal_svsm_peers[handle->sock.peer_route - 1].conns, 1,
@@ -3169,6 +3650,17 @@ static int sock_half_close(PAL_HANDLE handle) {
 }
 
 static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
+    if (handle->sock.listening && handle->sock.inbound) {
+        /* An INBOUND listener owns a connection id, not a connection: no
+         * half-close (Linux ignores SHUT_WR on a listener), and any other
+         * shutdown or the close ends it - the service stops listening and
+         * every parked accept is over. */
+        if (mode == PAL_DELETE_WRITE)
+            return 0;
+        handle->sock.closed = true;
+        inb_unlisten(handle);
+        return 0;
+    }
     if (sock_shares(handle)) {
         /* The mode matters here and was ignored: shutdown(SHUT_WR) sent the
          * same FIN as close(2) and released the id, so the service dropped
@@ -3204,6 +3696,7 @@ static int sock_delete(PAL_HANDLE handle, enum pal_delete_mode mode) {
         }
         pal_svsm_mux_release(handle->sock.conn_id);
         handle->sock.conn_id = 0;
+        inb_conn_gone(handle);
         /* And its frames go back to the vault's pool now, not at close(2):
          * with the id released it is out of mux_grant's walk, so buffers it
          * kept would be pool nobody's claim covers (review by jamie). Every
