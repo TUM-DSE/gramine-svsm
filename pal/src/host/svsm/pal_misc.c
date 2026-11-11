@@ -12,6 +12,7 @@
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
+#include "pal_svsm_random.h"
 
 /* How fast the clock runs, and where its zero is. Asked of the monitor once
  * at startup (pal_svsm_time_init) rather than baked in, because libpal.so is
@@ -67,42 +68,36 @@ int _PalSystemTimeQuery(uint64_t* out_usec) {
     return 0;
 }
 
+/* The CPU's two instructions, 64-bit forms only (pal_svsm_random.h says
+ * why: the 16/32-bit RDSEED of some parts returns 0 with CF set). */
+static bool cpu_rdseed64(uint64_t* v) {
+    uint8_t ok;
+    __asm__ volatile("rdseed %0\n\tsetc %1" : "=r"(*v), "=qm"(ok) :: "cc");
+    return ok;
+}
+
+static bool cpu_rdrand64(uint64_t* v) {
+    uint8_t ok;
+    __asm__ volatile("rdrand %0\n\tsetc %1" : "=r"(*v), "=qm"(ok) :: "cc");
+    return ok;
+}
+
+static void cpu_pause(void) {
+    __asm__ volatile("pause");
+}
+
+static const struct pal_rng_src g_cpu_rng = {
+    .rdseed = cpu_rdseed64,
+    .rdrand = cpu_rdrand64,
+    .pause  = cpu_pause,
+};
+
+/* Up to 32 bytes: RDSEED words; more: ChaCha20 under a fresh RDSEED key per
+ * call (pal_svsm_random.h). Nothing is kept between calls, so a clone of a
+ * zygote shares no generator state with it. */
 int _PalRandomBitsRead(void* buffer, size_t size) {
-    uint8_t rnd_num[4];
-    int success = 1;
-    int retry_max = 10;
-    uint8_t* buf = buffer;
-
-    for(size_t i = 0; i < size;){
-        int retry = 0;
-        while (retry < retry_max) {
-            // Gets a 32-bit random number
-            __asm__ volatile (
-                "mov $0, %%ebx\n\t"
-                "rdseed %%eax\n\t"
-                "jc 1f\n\t"
-                "mov $1, %%ebx\n\t"
-                "1:\n\t"
-                : "=a" (rnd_num), "=b" (success));
-            if(success == 0){
-                break;
-            }
-            retry++;
-        }
-        if(success != 0) {
-            // Reached max retries here
-            pal_svsm_fail("This should not happen",0);
-        }
-
-        for(size_t j = 0; j < 4; j++){
-            buf[i] = rnd_num[j];
-            i++;
-            if(i == size)
-                break;
-        }
-
-    }
-
+    if (pal_rng_fill(&g_cpu_rng, buffer, size) < 0)
+        pal_svsm_fail("random: neither RDSEED nor RDRAND gave a usable word", (int)size);
     return 0;
 }
 
