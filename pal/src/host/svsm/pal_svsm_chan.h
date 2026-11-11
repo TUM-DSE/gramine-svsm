@@ -50,6 +50,15 @@
  * workers it forked) take turns. */
 #define PAL_CHAN_CTL_TAIL     0x000
 #define PAL_CHAN_CTL_HEAD     0x040
+/* Set by the MONITOR in a side's own control page while that side is parked
+ * on its peer's TAIL (waiting to read) or HEAD (waiting for room), and
+ * cleared when it is claimed to run (sched/queue.rs `disarm`). A writer that
+ * publishes the index the peer is parked on sees it and Notifies, so the
+ * wake is a post the scheduler acts on at once instead of a moved word only
+ * a scan of the service core finds - which waited ~2 ms whenever the service
+ * core was running another service (DONATING-CALL.md (A), wakelat). */
+#define PAL_CHAN_CTL_WAIT_TAIL 0x080
+#define PAL_CHAN_CTL_WAIT_HEAD 0x0C0
 #define PAL_CHAN_CTL_TX_LOCK  0x100
 #define PAL_CHAN_CTL_RX_LOCK  0x140
 
@@ -68,6 +77,8 @@ struct pal_chan_ring {
     volatile uint32_t* head;       /* mine, when consuming */
     volatile uint32_t* peer_tail;
     volatile uint32_t* peer_head;
+    volatile uint32_t* peer_waits_tail;   /* the peer is parked on my tail */
+    volatile uint32_t* peer_waits_head;   /* the peer is parked on my head */
     unsigned char* slots;
     uint32_t slot, depth;
     unsigned long window;
@@ -132,6 +143,8 @@ static inline void pal_chan_ring_init(struct pal_chan_ring* r, unsigned long win
     r->serial    = pal_chan_u64(PAL_CHAN_DIR_VADDR, PAL_CHAN_DIR_SERIAL);
     r->peer_tail = (volatile uint32_t*)(peer + PAL_CHAN_CTL_TAIL);
     r->peer_head = (volatile uint32_t*)(peer + PAL_CHAN_CTL_HEAD);
+    r->peer_waits_tail = (volatile uint32_t*)(peer + PAL_CHAN_CTL_WAIT_TAIL);
+    r->peer_waits_head = (volatile uint32_t*)(peer + PAL_CHAN_CTL_WAIT_HEAD);
 }
 
 static inline bool pal_chan_present(const struct pal_chan_ring* r) {
@@ -175,6 +188,19 @@ static inline void pal_chan_unlock(struct pal_chan_ring* r) {
  * ring is full, empty, busy or malformed - the caller decides which of
  * those is EAGAIN and which is an error, because only it knows whether the
  * ring said "not yet" or "never". */
+/* After publishing an index: if the peer is parked on it (the monitor set the
+ * flag when it parked), Notify, so the scheduler wakes it now. The fence
+ * orders the index store before the flag load: either the flag was set
+ * before this store - and is seen here - or the monitor armed the park after
+ * it, and the park's own baseline check (the value the peer last saw) finds
+ * the word moved. A cleared flag costs one load. */
+int64_t pal_svsm_channel_notify(uint64_t window);
+static inline void pal_chan_wake_peer(struct pal_chan_ring* r, volatile uint32_t* flag) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(flag, __ATOMIC_RELAXED))
+        (void)pal_svsm_channel_notify(r->window);
+}
+
 /* TWO PARTS, one message: a header and a body, concatenated into the slot.
  *
  * Exists so a caller that must prepend something - a mux frame header, a
@@ -208,6 +234,7 @@ static inline int pal_chan_send2(struct pal_chan_ring* r, const void* hdr, uint3
     memcpy(s, &len, 4);
     __atomic_store_n(r->tail, t + 1, __ATOMIC_RELEASE);
     pal_chan_unlock(r);
+    pal_chan_wake_peer(r, r->peer_waits_tail);
     return 0;
 }
 
@@ -277,6 +304,7 @@ static inline int pal_chan_recv(struct pal_chan_ring* r, void* msg, uint32_t max
         *out_len = n;
     __atomic_store_n(r->head, h + 1, __ATOMIC_RELEASE);
     pal_chan_unlock(r);
+    pal_chan_wake_peer(r, r->peer_waits_head);
     return 0;
 }
 
