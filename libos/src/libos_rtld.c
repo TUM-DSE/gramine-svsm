@@ -22,6 +22,7 @@
 #include "asan.h"
 #include "elf.h"
 #include "libos_checkpoint.h"
+#include "libos_elf_tail.h"
 #include "libos_flags_conv.h"
 #include "libos_fs.h"
 #include "libos_handle.h"
@@ -34,6 +35,7 @@
 #include "libos_vma.h"
 #include "linux_abi/errors.h"
 #include "linux_abi/memory.h"
+#include "toml_utils.h"
 
 #define INTERP_PATH_SIZE 256 /* Default shebang size */
 
@@ -97,8 +99,13 @@ struct loadcmd {
     /* Start of memory area */
     elf_addr_t start;
 
-    /* End of file data (data_end .. alloc_end should be zeroed out) */
+    /* End of file data (data_end .. alloc_end should be zeroed out, except data_end .. map_end of
+     * a read-only segment without a bss: see libos_elf_tail.h) */
     elf_addr_t data_end;
+
+    /* End of the segment in memory (p_vaddr + p_memsz, not page-aligned): data_end < mem_end iff
+     * the segment has a bss */
+    elf_addr_t mem_end;
 
     /* End of mapped file data (data_end rounded up to page size, so that we can mmap
      * start .. map_end) */
@@ -159,6 +166,7 @@ static int read_loadcmd(const elf_phdr_t* ph, struct loadcmd* c) {
 
     c->start = ALLOC_ALIGN_DOWN(ph->p_vaddr);
     c->data_end = ph->p_vaddr + ph->p_filesz;
+    c->mem_end = ph->p_vaddr + ph->p_memsz;
     c->map_end = ALLOC_ALIGN_UP(ph->p_vaddr + ph->p_filesz);
     c->alloc_end  = ALLOC_ALIGN_UP(ph->p_vaddr + ph->p_memsz);
     c->map_off = ALLOC_ALIGN_DOWN(ph->p_offset);
@@ -239,6 +247,23 @@ static int reserve_dyn(size_t total_size, void** addr) {
     return 0;
 }
 
+/* `libos.elf.zero_readonly_tail = true` asks for the zeroing of a read-only segment's file tail
+ * that Gramine did before (libos_elf_tail.h). Read once; a forked child inherits the answer. */
+static bool zero_readonly_tail(void) {
+    static int zero = -1;
+    if (zero < 0) {
+        bool z = false;
+        if (toml_bool_in(g_manifest_root, "libos.elf.zero_readonly_tail", /*defaultval=*/false,
+                         &z) < 0) {
+            log_warning("Cannot parse 'libos.elf.zero_readonly_tail' (the value must be `true` "
+                        "or `false`) - zeroing read-only tails");
+            z = true;
+        }
+        zero = z ? 1 : 0;
+    }
+    return zero;
+}
+
 /*
  * Execute a single load command: bookkeep the memory, map the file content, and make sure the area
  * not mapped to a file (ph_filesz .. ph_memsz) is zero-filled.
@@ -271,8 +296,11 @@ static int execute_loadcmd(const struct loadcmd* c, elf_addr_t base_diff,
     }
 
     /* Zero out the extra data at the end of mapped area. If necessary, temporarily remap the last
-     * page as writable. */
-    if (c->data_end < c->map_end) {
+     * page as writable. A read-only segment without a bss keeps the file's bytes there, as on
+     * Linux, and saves the two PAL calls (libos_elf_tail.h). */
+    if (c->data_end < c->map_end
+            && !elf_keep_file_tail(c->prot & PROT_WRITE, c->data_end, c->mem_end,
+                                   zero_readonly_tail())) {
         void* zero_start = (void*)(c->data_end + base_diff);
         size_t zero_size = c->map_end - c->data_end;
         void* last_page_start = ALLOC_ALIGN_DOWN_PTR(zero_start);
