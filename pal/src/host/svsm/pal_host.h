@@ -300,6 +300,12 @@ struct pal_handle_inner {
              * from bind_port, which a datagram socket and the mvnet
              * handshake mean literally. */
             uint16_t listen_port;
+            /* INBOUND (notes/net/INBOUND-TCP.md): a listener the network
+             * service was told about (LISTEN on conn_id), and, on a socket
+             * accept() made from one of its offers, that listener's id - for
+             * the per-port `max` count. */
+            bool     inbound;
+            uint32_t inb_lid;
         } sock;
 
         struct {

@@ -250,6 +250,20 @@ struct pal_svsm_peer {
 };
 extern struct pal_svsm_peer g_pal_svsm_peers[PAL_SVSM_MAX_PEERS];
 extern unsigned g_pal_svsm_npeers;
+/* [[svsm.inbound]] (notes/net/INBOUND-TCP.md in MicroVault): the ports this
+ * vault may be reached on from OUTSIDE, through the network service its
+ * [svsm.net] names. Measured: a listen() on any other port serves peer
+ * channels only and tells the service nothing. port 0 = "*", any port the
+ * application binds. max: open inbound connections on the port (0 = the
+ * PAL's own cap); backlog: offers not yet accepted (0 = listen()'s). */
+#define PAL_SVSM_MAX_INBOUND 16
+struct pal_svsm_inbound {
+    uint16_t port;
+    uint16_t max;
+    uint16_t backlog;
+};
+extern struct pal_svsm_inbound g_pal_svsm_inbound[PAL_SVSM_MAX_INBOUND];
+extern unsigned g_pal_svsm_ninbound;
 /* [svsm] address: this vault's own IPv4, what getsockname() reports on a
  * peer connection (all zero when not given). */
 extern uint8_t g_pal_svsm_self_addr[4];

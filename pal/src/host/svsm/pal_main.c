@@ -735,6 +735,51 @@ noreturn void pal_svsm_main(void)
                 }
             }
             g_pal_svsm_npeers = (unsigned)np;
+
+            /* [[svsm.inbound]]: the ports this vault may be reached on from
+             * outside, through the network service (notes/net/INBOUND-TCP.md).
+             *
+             *   [[svsm.inbound]]
+             *   port    = 8080      # or "*": any port the application binds
+             *   max     = 256       # open inbound connections on it, at most
+             *   backlog = 64        # offers not yet accepted, at most
+             *
+             * Measured, so a verifier sees every port the vault answers on.
+             * Without [svsm.net] speaking mvnet there is nobody to ask. */
+            toml_array_t* inb = toml_array_in(manifest_svsm_early, "inbound");
+            int ni = inb ? toml_array_nelem(inb) : 0;
+            if (ni > PAL_SVSM_MAX_INBOUND)
+                pal_svsm_fail("svsm.inbound has more than 16 entries", ni);
+            if (ni && !g_pal_svsm_net_protocol)
+                pal_svsm_fail("svsm.inbound needs [svsm.net] with protocol = \"mvnet\"", ni);
+            for (int i = 0; i < ni; i++) {
+                toml_table_t* t = toml_table_at(inb, i);
+                if (!t)
+                    pal_svsm_fail("svsm.inbound holds something that is not a table", i);
+                struct pal_svsm_inbound* e = &g_pal_svsm_inbound[i];
+                char* any = NULL;
+                int64_t port = -1;
+                if (toml_string_in(t, "port", &any) == 0 && any) {
+                    if (strcmp(any, "*"))
+                        pal_svsm_fail("svsm.inbound.port is not a port or \"*\"", i);
+                    free(any);
+                    port = 0;
+                } else if (toml_int_in(t, "port", -1, &port) < 0 || port < 1 || port > 65535) {
+                    pal_svsm_fail("svsm.inbound.port is not 1..65535 or \"*\"", i);
+                }
+                int64_t max = 0, backlog = 0;
+                if (toml_int_in(t, "max", 0, &max) < 0 || max < 0 || max > 65535)
+                    pal_svsm_fail("svsm.inbound.max is not 0..65535", i);
+                if (toml_int_in(t, "backlog", 0, &backlog) < 0 || backlog < 0 || backlog > 65535)
+                    pal_svsm_fail("svsm.inbound.backlog is not 0..65535", i);
+                e->port    = (uint16_t)port;
+                e->max     = (uint16_t)max;
+                e->backlog = (uint16_t)backlog;
+                for (int j = 0; j < i; j++)
+                    if (g_pal_svsm_inbound[j].port == e->port)
+                        pal_svsm_fail("svsm.inbound: two entries for one port", i);
+            }
+            g_pal_svsm_ninbound = (unsigned)ni;
         }
 
         /* [svsm.dns]: the resolver this vault uses.
