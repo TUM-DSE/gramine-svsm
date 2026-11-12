@@ -10,6 +10,7 @@
 #include "api.h"
 #include "asan.h"
 #include "gramine_entry_api.h"
+#include "libos_cpuid.h"
 #include "libos_entry.h"
 #include "libos_rwlock.h"
 #include "libos_utils.h"
@@ -135,6 +136,9 @@ long handle_libos_call(int number, unsigned long arg1, unsigned long arg2) {
         case GRAMINE_CALL_RWLOCK_WRITE_UNLOCK:
             rwlock_write_unlock((struct libos_rwlock*)arg1);
             return 0;
+
+        case GRAMINE_CALL_CPUID:
+            return libos_cpuid_call(arg1, (uint32_t*)arg2);
 
         default:
             log_warning("handle_libos_call: invalid number: %d", number);

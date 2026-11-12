@@ -71,6 +71,7 @@ glibc = custom_target('glibc',
 
     input: [
         'glibc-2.44/configure',
+        'gramine-cpuid.patch',
         'gramine-syscall.patch',
         'hp-timing.patch',
     ],
