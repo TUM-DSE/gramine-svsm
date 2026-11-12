@@ -3364,6 +3364,15 @@ bool pal_svsm_sock_readable(PAL_HANDLE handle) {
         return true;
     if (handle->sock.fin_seen)
         return true;                /* readable, and the read returns 0 */
+    /* A RESET as well: readable, and the read fails ECONNRESET. The RST frame
+     * is the router's (mux_head_step), so whichever socket routes the shared
+     * head consumes it - usually ANOTHER socket of the same poll set - and
+     * this one's own route then finds the head empty. Unlike fin_seen,
+     * `broken` was not looked at here, so an epoll server never woke for a
+     * peer's reset unless that socket happened to route the frame itself
+     * (net_inbound_teardown: host RST -> the vault saw no end, 2026-11-12). */
+    if (handle->sock.broken)
+        return true;
     struct pal_chan_ring in;
     ring_for(handle, &in, NULL);
     if (sock_shares(handle)) {
