@@ -29,6 +29,8 @@ bool g_pal_svsm_is_service = false;
  * TRUSTLET (pal_svsm_app_ensure), never from the zygote: the class is per
  * process, and the trustlets are clones. */
 bool g_pal_svsm_is_app = false;
+/* [svsm.app] core, or -1: unpinned. */
+int64_t g_pal_svsm_app_core = -1;
 #define MANIFEST_START (void*)0x10000000000
 typedef void (*loader_callback)(void);
 
@@ -380,6 +382,14 @@ noreturn void pal_svsm_main(void)
             if (toml_bool_in(app, "resident", false, &resident) < 0)
                 pal_svsm_fail("svsm.app.resident is not a boolean", 0);
             g_pal_svsm_is_app = resident;
+            /*   core = N   (optional): pin the app to processor N - its home
+             * never moves, nobody steals it. Measured; the monitor refuses a
+             * core that is not an eligible home (the service core, a driver
+             * domain's processor). Absent: spread, and rebalanced by load. */
+            int64_t core = -1;
+            if (toml_int_in(app, "core", -1, &core) < 0 || core < -1 || core > 63)
+                pal_svsm_fail("svsm.app.core is not a processor 0..63", 0);
+            g_pal_svsm_app_core = core;
         }
     }
 

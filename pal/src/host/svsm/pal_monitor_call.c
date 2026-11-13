@@ -482,13 +482,15 @@ int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec) {
 }
 
 /* AppResident (0x4FFFFFAC, RESIDENT-APPS R1): this vault becomes a resident
- * app -> rcx = 0, or a negative status (-2 BAD_STATE: already one; others:
- * refused - a service, a device holder, a lineage member, multi-VC, the
- * host's limit). */
+ * app -> rcx = 0, or a negative status (-2 BAD_STATE: already one; -4 BAD_ARGS:
+ * a pin to a core that is not an eligible home; others: refused - a service, a
+ * device holder, a lineage member, multi-VC, the host's limit). */
 int64_t pal_svsm_app_resident(void) {
+    extern int64_t g_pal_svsm_app_core;
     struct monitor_call_data data;
     data.rax = 0x4FFFFFAC;
-    data.rbx = 0;
+    /* bit 63: pinned to the core in the low bits ([svsm.app] core). */
+    data.rbx = g_pal_svsm_app_core >= 0 ? (1ULL << 63) | (uint64_t)g_pal_svsm_app_core : 0;
     data.rcx = 0;
     data.rdx = 0;
     monitor_call(&data);
