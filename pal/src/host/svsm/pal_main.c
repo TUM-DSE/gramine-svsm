@@ -31,6 +31,11 @@ bool g_pal_svsm_is_service = false;
 bool g_pal_svsm_is_app = false;
 /* [svsm.app] core, or -1: unpinned. */
 int64_t g_pal_svsm_app_core = -1;
+/* [svsm.app] dedicated = true: this app must run on a processor of its own
+ * (AppResident rbx bit 62). The monitor keeps it parked until the host has
+ * dedicated a core and assigned it there (`hostctl core dedicate/assign`),
+ * and never places it on a shared one. */
+bool g_pal_svsm_app_dedicated = false;
 #define MANIFEST_START (void*)0x10000000000
 typedef void (*loader_callback)(void);
 
@@ -390,6 +395,15 @@ noreturn void pal_svsm_main(void)
             if (toml_int_in(app, "core", -1, &core) < 0 || core < -1 || core > 63)
                 pal_svsm_fail("svsm.app.core is not a processor 0..63", 0);
             g_pal_svsm_app_core = core;
+            /*   dedicated = true   (optional): a processor of its own. Measured,
+             * so the requirement is in the vault's identity; WHICH core is host
+             * policy (`hostctl core assign`). Only for a resident app. */
+            bool dedicated = false;
+            if (toml_bool_in(app, "dedicated", false, &dedicated) < 0)
+                pal_svsm_fail("svsm.app.dedicated is not a boolean", 0);
+            if (dedicated && !resident)
+                pal_svsm_fail("svsm.app.dedicated needs svsm.app.resident = true", 0);
+            g_pal_svsm_app_dedicated = dedicated;
         }
     }
 

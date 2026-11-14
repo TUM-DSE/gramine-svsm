@@ -487,10 +487,14 @@ int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec) {
  * device holder, a lineage member, multi-VC, the host's limit). */
 int64_t pal_svsm_app_resident(void) {
     extern int64_t g_pal_svsm_app_core;
+    extern bool g_pal_svsm_app_dedicated;
     struct monitor_call_data data;
     data.rax = 0x4FFFFFAC;
-    /* bit 63: pinned to the core in the low bits ([svsm.app] core). */
+    /* bit 63: pinned to the core in the low bits ([svsm.app] core); bit 62:
+     * needs a dedicated core ([svsm.app] dedicated). */
     data.rbx = g_pal_svsm_app_core >= 0 ? (1ULL << 63) | (uint64_t)g_pal_svsm_app_core : 0;
+    if (g_pal_svsm_app_dedicated)
+        data.rbx |= 1ULL << 62;
     data.rcx = 0;
     data.rdx = 0;
     monitor_call(&data);

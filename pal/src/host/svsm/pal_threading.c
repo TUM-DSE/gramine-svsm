@@ -242,10 +242,15 @@ static size_t gather_arms_for(uint64_t* arms, size_t max, bool* partial, bool li
 static bool g_app_done = false;
 void pal_svsm_app_ensure(void) {
     extern bool g_pal_svsm_is_app;
+    extern bool g_pal_svsm_app_dedicated;
     if (!g_pal_svsm_is_app || g_app_done)
         return;
     g_app_done = true;
     int64_t st = pal_svsm_app_resident();
+    /* A dedicated app never runs as a service on shared processors: a refusal
+     * (a pin that is not its assigned core, the host's limit, ...) ends it. */
+    if (st != 0 && st != -2 && g_pal_svsm_app_dedicated)
+        pal_svsm_fail("svsm.app.dedicated: the monitor refused AppResident", (int)st);
     if (st != 0 && st != -2)
         log_warning("svsm.app: the monitor refused AppResident (%ld); parking as before", (long)st);
 }
