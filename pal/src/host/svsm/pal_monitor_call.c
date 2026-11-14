@@ -482,7 +482,8 @@ int64_t pal_svsm_park(const uint64_t* arms, uint64_t count, uint64_t usec) {
 }
 
 /* AppResident (0x4FFFFFAC, RESIDENT-APPS R1): this vault becomes a resident
- * app -> rcx = 0, or a negative status (-2 BAD_STATE: already one; -4 BAD_ARGS:
+ * app -> rcx = 0, or a negative status (-3 BAD_STATE: already one; -13 RETRY:
+ * called in the zygote, which is no app - each trustlet calls; -4 BAD_ARGS:
  * a pin to a core that is not an eligible home; others: refused - a service, a
  * device holder, a lineage member, multi-VC, the host's limit). */
 int64_t pal_svsm_app_resident(void) {

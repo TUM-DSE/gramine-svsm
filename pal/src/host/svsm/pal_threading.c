@@ -245,13 +245,18 @@ void pal_svsm_app_ensure(void) {
     extern bool g_pal_svsm_app_dedicated;
     if (!g_pal_svsm_is_app || g_app_done)
         return;
-    g_app_done = true;
     int64_t st = pal_svsm_app_resident();
+    /* -13 RETRY: this is the zygote, which is no app - and whose "done" every
+     * trustlet would inherit (the trustlets then parked as services: jamie
+     * pin smoke 2026-11-14). Left undone, so each trustlet makes its own. */
+    if (st == -13)
+        return;
+    g_app_done = true;
     /* A dedicated app never runs as a service on shared processors: a refusal
      * (a pin that is not its assigned core, the host's limit, ...) ends it. */
-    if (st != 0 && st != -2 && g_pal_svsm_app_dedicated)
+    if (st != 0 && st != -3 && g_pal_svsm_app_dedicated)
         pal_svsm_fail("svsm.app.dedicated: the monitor refused AppResident", (int)st);
-    if (st != 0 && st != -2)
+    if (st != 0 && st != -3)
         log_warning("svsm.app: the monitor refused AppResident (%ld); parking as before", (long)st);
 }
 
