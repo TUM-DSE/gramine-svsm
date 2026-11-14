@@ -484,12 +484,36 @@ static bool sock_rd_over(PAL_HANDLE h) {
     return h->sock.rd_shut || h->sock.closed || !sock_has_chan(h);
 }
 
+/* Has the SERVICE let this connection go? On a shared channel the service's
+ * FIN is always a full close (netsvc mvmux.h MVMUX_FIN_HALF: "the service's
+ * FIN is always a full one"): its session is freed with it, so nothing this
+ * socket sends can arrive anywhere and no CREDIT will ever come for it. A
+ * stream socket's writing is then over, as on Linux after the peer's reset:
+ * send says EPIPE at once and poll says writable, so the writer finds out.
+ *
+ * Before this a send past its window waited for that credit for ever. That
+ * is every reply in flight when a client closes: wrk2 ending a run past
+ * saturation (all 64 connections with a request outstanding) left the
+ * frontend's handlers parked in write(), so Go never closed the sockets.
+ * Each kept its mux id, its listener count and a pool buffer; at 174 open
+ * the PAL's frame pool (PAL_MUX_POOL) was spent, the shared head blocked
+ * (MUX_HEAD_BLOCKED) and nothing was routed again - offers timed out, the
+ * service's FINs were lost; at 256 the id table was full and accept()
+ * failed ENOMEM, which Go's http.Server ends on (DeathStarBench vault-tcp,
+ * jamie 2026-11-13/14; MicroVault notes/net/OVERLOAD-RECOVER.md).
+ *
+ * Streams only: a datagram session's FIN is the service reaping it idle,
+ * and the datagram paths answer that themselves (udp_recv). */
+static bool sock_peer_done(PAL_HANDLE h) {
+    return h->sock.fin_seen && h->sock.type == PAL_SOCKET_TCP && sock_shares(h);
+}
+
 /* The same for writing: shutdown(SHUT_WR)'s FIN out, or the same close. A
  * send parked across another thread's SHUT_WR must not put DATA behind its
  * FIN; one that gets in while the FIN still waits for room goes before it,
  * which is where Linux puts it too. */
 static bool sock_wr_over(PAL_HANDLE h) {
-    return h->sock.wr_shut || h->sock.closed || !sock_has_chan(h);
+    return h->sock.wr_shut || h->sock.closed || !sock_has_chan(h) || sock_peer_done(h);
 }
 
 /* --------------------------------------------------- the frame pool, client
