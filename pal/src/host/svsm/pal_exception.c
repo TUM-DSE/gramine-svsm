@@ -301,6 +301,45 @@ noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CON
     pal_svsm_exception_resume(context, xsave_area);
 }
 
+/* The raw-syscall fast-entry block (SYSCALL-FASTPATH.md), CPL3 code the
+ * monitor enters directly for a vault that asked:
+ *   +0   option 2 (svsm.ud_direct): the #UD trap gate's target, with the
+ *        hardware frame (rip, cs, rflags, rsp, ss) on this thread's stack.
+ *        A `syscall` (0F 05): rcx = rip + 2 and r11 = rflags, as SYSCALL
+ *        sets them, the stack put back, and into the LibOS's entry (the
+ *        sequence Gramine's glibc uses). Anything else: `int $0x82`, and
+ *        the monitor delivers the #UD as ever (SIGILL).
+ *   +64  option 2b (svsm.syscall_direct): the monitor stub's iretq lands
+ *        here with rcx = the return address: the LibOS's entry. */
+__asm__(
+    ".pushsection .text\n"
+    ".global pal_svsm_fast_entries\n"
+    ".align 64\n"
+    "pal_svsm_fast_entries:\n"
+    "    pushq %rax\n"
+    "    movq 8(%rsp), %rax\n"
+    "    cmpw $0x050f, (%rax)\n"
+    "    popq %rax\n"
+    "    jne 1f\n"
+    "    movq (%rsp), %rcx\n"
+    "    addq $2, %rcx\n"
+    "    movq 16(%rsp), %r11\n"
+    "    movq 24(%rsp), %rsp\n"
+    "    jmpq *%gs:24\n"
+    "1:  int $0x82\n"
+    "    ud2\n"
+    "    .org pal_svsm_fast_entries + 64\n"
+    "pal_svsm_fast_syscall:\n"
+    "    jmpq *%gs:24\n"
+    ".popsection\n");
+extern char pal_svsm_fast_entries[];
+
+uint64_t pal_svsm_exception_ask_fast(uint64_t bits) {
+    return pal_svsm_set_exception_entry_fast(&pal_svsm_exception_trampoline,
+                                             offsetof(PAL_SVSM_TCB, alt_stack_top),
+                                             &g_pal_svsm_preempt, bits, pal_svsm_fast_entries);
+}
+
 void pal_svsm_exception_init(void) {
     g_pal_text_start = (uintptr_t)&__text_start;
     g_pal_text_end   = (uintptr_t)&__text_end;

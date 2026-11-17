@@ -182,6 +182,8 @@ void pal_svsm_app_ensure(void);
  * that thread's alternate stack - the stack a fault is delivered on, which
  * must not be the one it interrupted. `preempt_ctl` is the three-word block
  * that governs preemption (struct pal_svsm_preempt_ctl). */
+uint64_t pal_svsm_set_exception_entry_fast(void* entry, uint64_t tcb_alt_stack_offset,
+                                           void* preempt_ctl, uint64_t bits, void* block);
 uint64_t pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset,
                                       void* preempt_ctl);
 /* ExceptionReturn (0x4FFFFFE8): resume from `context`. Does not return -

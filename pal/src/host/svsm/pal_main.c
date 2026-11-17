@@ -407,6 +407,36 @@ noreturn void pal_svsm_main(void)
         }
     }
 
+    /* Raw `syscall` fast paths (MicroVault notes/sched/SYSCALL-FASTPATH.md;
+     * owner 2026-11-17: each opt-in, measured):
+     *
+     *   [svsm]
+     *   ud_direct = true        # option 2: #UD straight to this PAL's
+     *                           # trampoline at CPL3 (no monitor). Go-only:
+     *                           # the hardware frame lands below rsp, in a
+     *                           # SysV red zone (vaultkraft enforces it)
+     *   syscall_direct = true   # option 2b: SYSCALL enabled, through a
+     *                           # monitor stub straight to the LibOS entry
+     *
+     * Asked with a second SetExceptionEntry now that the manifest is read;
+     * a monitor without them grants nothing and every raw syscall keeps
+     * the #UD path (the fallback), so this only warns. */
+    if (manifest_svsm_early) {
+        bool ud_direct = false, syscall_direct = false;
+        if (toml_bool_in(manifest_svsm_early, "ud_direct", false, &ud_direct) < 0)
+            pal_svsm_fail("svsm.ud_direct is not a boolean", 0);
+        if (toml_bool_in(manifest_svsm_early, "syscall_direct", false, &syscall_direct) < 0)
+            pal_svsm_fail("svsm.syscall_direct is not a boolean", 0);
+        if (ud_direct || syscall_direct) {
+            uint64_t want = (ud_direct ? 1 : 0) | (syscall_direct ? 2 : 0);
+            uint64_t got = pal_svsm_exception_ask_fast(want);
+            if ((want & 1) && !(got & PAL_SVSM_CAP_UD_DIRECT))
+                log_warning("svsm.ud_direct: the monitor did not grant it (raw syscalls trap as before)");
+            if ((want & 2) && !(got & PAL_SVSM_CAP_SYSCALL_DIRECT))
+                log_warning("svsm.syscall_direct: the monitor did not grant it (raw syscalls trap as before)");
+        }
+    }
+
     /* Does this image compile code at run time?
      *
      *   [svsm.jit]

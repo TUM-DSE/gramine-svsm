@@ -128,6 +128,12 @@ extern struct pal_svsm_preempt_ctl g_pal_svsm_preempt;
  * LineageWait/LineageWake, Wait's child generation) - monitor signals.rs
  * PAL_CAP_LINEAGE. Never for a hosted vault. */
 #define PAL_SVSM_CAP_LINEAGE 2
+/* The raw-syscall fast paths granted (SYSCALL-FASTPATH.md): option 2
+ * (svsm.ud_direct) and option 2b (svsm.syscall_direct). */
+#define PAL_SVSM_CAP_UD_DIRECT 4
+#define PAL_SVSM_CAP_SYSCALL_DIRECT 8
+/* Ask for them (pal_exception.c): bits 1 ud_direct, 2 syscall_direct. */
+uint64_t pal_svsm_exception_ask_fast(uint64_t bits);
 
 /* Set once at startup from the capability word. A byte rather than the whole
  * word because the only reader is three instructions of assembly on the

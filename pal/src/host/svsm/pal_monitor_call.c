@@ -566,6 +566,23 @@ uint64_t pal_svsm_set_exception_entry(void* entry, uint64_t tcb_alt_stack_offset
     return data.rcx;
 }
 
+/* SetExceptionEntry again, with the raw-syscall fast paths asked for
+ * (SYSCALL-FASTPATH.md): the same three words, r8 = the "VSFA" tag | the
+ * bits (1 ud_direct, 2 syscall_direct), r9 = the fast-entry block (the #UD
+ * trampoline at +0, the SYSCALL entry at +64). -> the capability bits. */
+uint64_t pal_svsm_set_exception_entry_fast(void* entry, uint64_t tcb_alt_stack_offset,
+                                           void* preempt_ctl, uint64_t bits, void* block) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFE9;
+    data.rbx = (uint64_t)entry;
+    data.rcx = tcb_alt_stack_offset;
+    data.rdx = (uint64_t)preempt_ctl;
+    data.r8 = (0x56534641ULL << 32) | bits;
+    data.r9 = (uint64_t)block;
+    extended_monitor_call(&data);
+    return data.rcx;
+}
+
 /* ExceptionReturn (0x4FFFFFE8): rbx = the context. The monitor overwrites
  * this process's registers from it, so nothing after the call runs. */
 noreturn void pal_svsm_exception_return(PAL_CONTEXT* context) {
