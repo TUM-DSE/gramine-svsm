@@ -1254,8 +1254,7 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
             mux_pool_put_ptr(into);
         return MUX_HEAD_EMPTY;
     }
-    if (was_full)
-        pal_svsm_channel_notify(sock_widx(handle));
+    (void)was_full;   /* pal_chan_recv Notifies a blocked writer itself */
 
     if (pooled && got > PAL_MVMUX_HDR_BYTES) {
         if (!mux_sink_buf(target, into, got, PAL_MVMUX_HDR_BYTES)) {
@@ -2698,8 +2697,6 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                 if (mh != MUX_HEAD_BLOCKED) {
                     rc = mux_recv_mine(handle, &in, mh, handle->sock.rx, in.slot, &got);
                     if (rc == 0) {
-                        if (was_full)
-                            pal_svsm_channel_notify(sock_widx(handle));
                         if (got < PAL_MVMUX_HDR_BYTES) {
                             handle->sock.broken = true;
                             return -PAL_ERROR_CONNFAILED;
@@ -2722,8 +2719,6 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         } else {
             rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
             if (rc == 0) {
-                if (was_full)
-                    pal_svsm_channel_notify(sock_widx(handle));
                 handle->sock.rx_len = got;
                 handle->sock.rx_off = 0;
             }
@@ -3194,8 +3189,6 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
         int rc = mux_recv_mine(handle, &in, mh, handle->sock.rx, in.slot, &got);
         if (rc == 0) {
-            if (was_full)
-                pal_svsm_channel_notify(sock_widx(handle));
             handle->sock.rx_len = got;
             handle->sock.rx_off = 0;
             if (handle->sock.muxed) {

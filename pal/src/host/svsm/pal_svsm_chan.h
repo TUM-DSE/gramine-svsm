@@ -347,7 +347,21 @@ static inline int pal_chan_recv(struct pal_chan_ring* r, void* msg, uint32_t max
         *out_len = n;
     __atomic_store_n(r->head, h + 1, __ATOMIC_RELEASE);
     pal_chan_unlock(r);
-    pal_chan_wake_peer(r, r->peer_waits_head);
+    /* Room for a blocked writer: Notify if it is parked on this head (the
+     * monitor's WAIT_HEAD flag) OR the ring was full when this message was
+     * taken - decided from the peer's tail loaded AFTER the head store, never
+     * from one loaded before the read. A writer that filled the ring in
+     * between and blocked without an arm (a partial park, a thread-level
+     * block) was otherwise missed and waited for an unrelated wake (vaultkraft
+     * ryan/vk-native-net TestPALWasFullGap: 1-75 per 200k messages). The
+     * fence orders the head store before the loads; the writer publishes its
+     * tail before it looks at the head, so either it sees this room or this
+     * sees its full ring. Since the tail only grows, a ring full BEFORE the
+     * read is covered too: at most one Notify per full episode. */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(r->peer_waits_head, __ATOMIC_RELAXED)
+            || (uint32_t)(__atomic_load_n(r->peer_tail, __ATOMIC_ACQUIRE) - h) >= r->depth)
+        (void)pal_svsm_channel_notify(r->window);
     return 0;
 }
 
