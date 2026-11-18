@@ -716,6 +716,18 @@ ssize_t do_sendmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
         goto out;
     }
 
+    /* A NATIVE-ATTACHED socket (getsockopt SOL_MVCHAN, MVCHAN_ATTACH): the program writes the
+     * channel ring itself, so this sends nothing - not even the 0-length message a 0-length send
+     * would put in the ring, which the peer would read as end of stream - and answers EBUSY. It
+     * re-arms EPOLLET for writing as an EAGAIN would: the program's own EAGAIN never passes
+     * through here, and Go's netpoller registers with EPOLLET, so this zero-length send before
+     * each write wait is what lets epoll report the socket writable again
+     * (VAULT-NATIVE-AGENTS.md addendum 2/2a). */
+    if (__atomic_load_n(&sock->mv_native, __ATOMIC_ACQUIRE)) {
+        maybe_epoll_et_trigger(handle, -EAGAIN, /*in=*/false, /*was_partial=*/false);
+        return -EBUSY;
+    }
+
     size_t total_size = 0;
     for (size_t i = 0; i < iov_len; i++) {
         total_size += iov[i].iov_len;
@@ -881,6 +893,15 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
     }
 
     /* We ignore `sock->can_be_read` here - there might be some pending data in the host OS. */
+
+    /* A NATIVE-ATTACHED socket: the program reads the channel ring itself, so nothing is read here
+     * (the PAL would refuse anyway) - EBUSY, and EPOLLET re-armed for reading as an EAGAIN would
+     * (see do_sendmsg). Before the size-0 case below: a zero-length recv is how the program
+     * re-arms before each read wait, and read(fd, buf, 0) would otherwise answer 0 without it. */
+    if (__atomic_load_n(&sock->mv_native, __ATOMIC_ACQUIRE)) {
+        maybe_epoll_et_trigger(handle, -EAGAIN, /*in=*/true, /*was_partial=*/false);
+        return -EBUSY;
+    }
 
     size_t total_size = 0;
     for (size_t i = 0; i < iov_len; i++) {

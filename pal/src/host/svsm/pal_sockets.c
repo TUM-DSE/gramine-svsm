@@ -2848,6 +2848,8 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                    struct pal_socket_addr* addr, bool force_nonblocking) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_NOTCONNECTION;
+    if (handle->sock.native)
+        return -PAL_ERROR_DENIED;           /* the program owns the ring (NativeAttach) */
     if (handle->sock.type == PAL_SOCKET_UDP)
         return udp_send(handle, iov, iov_len, out_size, addr, force_nonblocking);
     __UNUSED(addr);
@@ -3057,6 +3059,8 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                    struct pal_socket_addr* addr, bool force_nonblocking) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
         return -PAL_ERROR_NOTCONNECTION;
+    if (handle->sock.native)
+        return -PAL_ERROR_DENIED;           /* the program owns the ring (NativeAttach) */
     if (handle->sock.broken)
         return -PAL_ERROR_CONNFAILED;
     if (handle->sock.type == PAL_SOCKET_UDP)
@@ -3337,6 +3341,75 @@ mux_blocked:
  * Returns the number of arms written (0 or 1). A socket with residue
  * already buffered writes none and reports itself ready instead.
  */
+/*
+ * THE VAULT-NATIVE ATTACH (MicroVault notes/sched/VAULT-NATIVE-RPC.md 2.1,
+ * frozen): tell the program where this socket's ring is, and stop using it
+ * here. Go's net.Conn then reads and writes the ring itself; the fd stays a
+ * socket for epoll readiness (pal_svsm_sock_readable/writable read the same
+ * words and consume nothing), WAITERS counting, shutdown and close.
+ *
+ * Only a socket that OWNS a DIRECT channel: one connect() was granted to a
+ * [[svsm.peer]] (or a raw [svsm.net]) or accept() took from the directory,
+ * whose every message is raw payload. A muxed socket (netsvc TCP, with or
+ * without a shared channel), an inbound one, a listener and a datagram socket
+ * carry framing or have no ring of their own: NOTSUPPORT, and the LibOS
+ * answers ENOPROTOOPT, the transport's "stay a socket".
+ *
+ * Nothing is consumed by attaching, and nothing already consumed may be lost:
+ * a message recv took off the ring and did not hand out in full (`rx`, and the
+ * queue behind it) refuses the attach with DENIED -> EBUSY (addendum 1).
+ * Both rings must be there: the transport writes and reads.
+ *
+ * PAL text is not preempted, so no recv of this handle runs between the
+ * checks and `native`.
+ */
+int _PalSocketNativeAttach(PAL_HANDLE handle, struct pal_socket_native_attach* out) {
+    if (handle->hdr.type != PAL_TYPE_SOCKET)
+        return -PAL_ERROR_NOTSUPPORT;
+    if (handle->sock.type != PAL_SOCKET_TCP || handle->sock.listening || handle->sock.muxed
+            || handle->sock.inbound || handle->sock.conn_id || sock_shares(handle))
+        return -PAL_ERROR_NOTSUPPORT;
+    if (handle->sock.native)
+        return -PAL_ERROR_DENIED;
+    if (!handle->sock.win || handle->sock.closed || handle->sock.broken
+            || handle->sock.rd_shut || handle->sock.wr_shut)
+        return -PAL_ERROR_NOTCONNECTION;
+    if (handle->sock.rx_len != 0 || handle->sock.q_count)
+        return -PAL_ERROR_DENIED;           /* bytes the PAL holds would be lost */
+
+    unsigned long win = handle->sock.win;
+    int side          = handle->sock.side;
+    struct pal_chan_ring in, outr;
+    pal_chan_ring_init(&in, win, side, /*producing=*/0);
+    pal_chan_ring_init(&outr, win, side, /*producing=*/1);
+    if (!pal_chan_present(&in) || !pal_chan_present(&outr) || in.slot < 4 || outr.slot < 4)
+        return -PAL_ERROR_NOTSUPPORT;
+
+    const unsigned char* peer = (const unsigned char*)win + PAL_CHAN_CTL_PAGE(1 - side);
+    uint32_t feat = __atomic_load_n((const volatile uint32_t*)(peer + PAL_CHAN_CTL_FEATURES),
+                                    __ATOMIC_RELAXED);
+    memset(out, 0, sizeof(*out));
+    out->abi        = MVCHAN_ATTACH_ABI;
+    out->side       = (uint32_t)side;
+    out->window_va  = win;
+    out->window_idx = handle->sock.widx;
+    out->slot       = in.slot;
+    out->depth      = in.depth;
+    out->flags      = (feat & PAL_CHAN_FEAT_WAITERS) ? MVCHAN_F_PEER_WAITERS : 0;
+    handle->sock.native = true;
+    return 0;
+}
+
+_Static_assert(sizeof(struct pal_socket_native_attach) == sizeof(struct mvchan_attach),
+               "VAULT-NATIVE-RPC.md 2.1: the PAL's struct is the ABI's");
+_Static_assert(offsetof(struct pal_socket_native_attach, window_va)
+                   == offsetof(struct mvchan_attach, window_va)
+               && offsetof(struct pal_socket_native_attach, slot)
+                   == offsetof(struct mvchan_attach, slot)
+               && offsetof(struct pal_socket_native_attach, flags)
+                   == offsetof(struct mvchan_attach, flags),
+               "VAULT-NATIVE-RPC.md 2.1: same layout");
+
 int pal_svsm_sock_arm(PAL_HANDLE handle, pal_wait_flags_t want, uint64_t* out_arm) {
     if (handle->hdr.type != PAL_TYPE_SOCKET || !sock_has_chan(handle))
         return 0;   /* nothing to arm: a channel-less socket has no rings */

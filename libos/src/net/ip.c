@@ -641,12 +641,71 @@ static int get_socket_option(struct libos_handle* handle, int optname, void* opt
     return 0;
 }
 
+/*
+ * getsockopt(fd, SOL_MVCHAN, MVCHAN_ATTACH): the vault-native transport (MicroVault
+ * notes/sched/VAULT-NATIVE-RPC.md section 2.1, frozen). The optval is the 40-byte
+ * `struct mvchan_attach` of pal_svsm_chan.h, which the PAL fills as `struct
+ * pal_socket_native_attach` (same layout). From a successful attach on, send/recv on this socket
+ * answer EBUSY (libos_socket.c); readiness, shutdown and close are unchanged.
+ *
+ * Errors: ENOPROTOOPT - not a direct channel (muxed/netsvc, inbound, listening, UDP, a PAL without
+ * channels): the program keeps the ordinary socket; ENOTCONN; EBUSY - already attached, or bytes
+ * already taken off the ring and not yet read (the PAL's residue, or this LibOS's MSG_PEEK
+ * buffer), which an attach would lose; EINVAL - optlen < 40.
+ *
+ * Attach before the socket is read: a recv racing the attach on another thread may consume a
+ * message between the checks here and the PAL's (Go attaches in connect/accept, before the fd is
+ * handed out).
+ */
+#define SOL_MVCHAN        0x4D56
+#define MVCHAN_ATTACH     1
+
+static_assert(sizeof(struct pal_socket_native_attach) == 40, "VAULT-NATIVE-RPC.md 2.1");
+
+static int mvchan_attach(struct libos_handle* handle, int optname, void* optval, size_t* len) {
+    struct libos_sock_handle* sock = &handle->info.sock;
+    if (optname != MVCHAN_ATTACH)
+        return -ENOPROTOOPT;
+    if (*len < sizeof(struct pal_socket_native_attach))
+        return -EINVAL;
+    if (sock->type != SOCK_STREAM || sock->state == SOCK_LISTENING)
+        return -ENOPROTOOPT;
+    if (sock->state != SOCK_CONNECTED)
+        return -ENOTCONN;
+    if (__atomic_load_n(&sock->mv_native, __ATOMIC_ACQUIRE))
+        return -EBUSY;
+    if (__atomic_load_n(&sock->peek.data_size, __ATOMIC_ACQUIRE))
+        return -EBUSY;
+
+    struct pal_socket_native_attach at = { 0 };
+    int ret = PalSocketNativeAttach(sock->pal_handle, &at);
+    switch (ret) {
+        case 0:
+            break;
+        case -PAL_ERROR_NOTIMPLEMENTED:
+        case -PAL_ERROR_NOTSUPPORT:
+            return -ENOPROTOOPT;
+        case -PAL_ERROR_NOTCONNECTION:
+            return -ENOTCONN;
+        case -PAL_ERROR_DENIED:
+            return -EBUSY;
+        default:
+            return pal_to_unix_errno(ret);
+    }
+    __atomic_store_n(&sock->mv_native, true, __ATOMIC_RELEASE);
+    *len = sizeof(at);
+    memcpy(optval, &at, sizeof(at));
+    return 0;
+}
+
 static int getsockopt(struct libos_handle* handle, int level, int optname, void* optval,
                       size_t* len) {
     struct libos_sock_handle* sock = &handle->info.sock;
     assert(locked(&sock->lock));
 
     switch (level) {
+        case SOL_MVCHAN:
+            return mvchan_attach(handle, optname, optval, len);
         case SOL_SOCKET:
             return get_socket_option(handle, optname, optval, len);
         case IPPROTO_IP:
@@ -754,6 +813,8 @@ static int send(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
 
     int ret = PalSocketSend(sock->pal_handle, iov, iov_len, out_size, addr ? &pal_ip_addr : NULL,
                             force_nonblocking);
+    if (ret == -PAL_ERROR_DENIED && __atomic_load_n(&sock->mv_native, __ATOMIC_ACQUIRE))
+        return -EBUSY;      /* native-attached (getsockopt SOL_MVCHAN): the PAL's refusal */
     ret = (ret == -PAL_ERROR_TOOLONG) ? -EMSGSIZE : pal_to_unix_errno(ret);
     return ret;
 }
@@ -779,6 +840,9 @@ static int recv(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
     int ret = PalSocketRecv(handle->info.sock.pal_handle, iov, iov_len, out_total_size,
                             addr ? &pal_ip_addr : NULL, force_nonblocking);
     if (ret < 0) {
+        if (ret == -PAL_ERROR_DENIED
+                && __atomic_load_n(&handle->info.sock.mv_native, __ATOMIC_ACQUIRE))
+            return -EBUSY;  /* native-attached (getsockopt SOL_MVCHAN): the PAL's refusal */
         return pal_to_unix_errno(ret);
     }
 

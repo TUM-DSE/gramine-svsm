@@ -22,6 +22,7 @@
  */
 #define _GNU_SOURCE
 #include <setjmp.h>
+#include <stddef.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -487,6 +488,49 @@ static void t_ring_init_inside(void) {
         }
 }
 
+/* The vault-native attach ABI (VAULT-NATIVE-RPC.md 2.1) as pal_svsm_chan.h
+ * exports it is the rule pal_chan_ring_init follows: a program that builds the
+ * ring from struct mvchan_attach with the exported constants reaches the same
+ * words and slots as the PAL. Two different geometries, so a swapped ring
+ * index shows. */
+static void t_attach_layout(void) {
+    reset();
+    unsigned n;
+    unsigned w = grant(4096, 16, 1024, 64, &n, true);
+    unsigned long base = (unsigned long)win_addr(w);
+    CHECK(offsetof(struct mvchan_attach, window_va) == 8
+          && offsetof(struct mvchan_attach, window_idx) == 16
+          && offsetof(struct mvchan_attach, slot) == 24
+          && offsetof(struct mvchan_attach, depth) == 28
+          && offsetof(struct mvchan_attach, flags) == 32,
+          "struct mvchan_attach offsets as section 2.1");
+    for (int side = 0; side < 2; side++) {
+        struct pal_chan_ring in, out;
+        pal_chan_ring_init(&in, base, side, 0);
+        pal_chan_ring_init(&out, base, side, 1);
+        int rx = PAL_CHAN_RING_RX(side), tx = PAL_CHAN_RING_TX(side);
+        uint32_t rslot = pal_chan_u32(base, PAL_CHAN_HDR_RING(rx));
+        uint32_t rdepth = pal_chan_u32(base, PAL_CHAN_HDR_RING(rx) + 4);
+        unsigned long rslots = base + (unsigned long)pal_chan_u32(base, PAL_CHAN_HDR_RING(rx) + 8) * 4096;
+        unsigned long tslots = base + (unsigned long)pal_chan_u32(base, PAL_CHAN_HDR_RING(tx) + 8) * 4096;
+        CHECK(in.slot == rslot && in.depth == rdepth && (unsigned long)in.slots == rslots,
+              "side %d: the read ring is HDR_RING(RING_RX)", side);
+        CHECK((unsigned long)out.slots == tslots && out.slot == pal_chan_u32(base, PAL_CHAN_HDR_RING(tx)),
+              "side %d: the write ring is HDR_RING(RING_TX)", side);
+        unsigned long mine = base + PAL_CHAN_CTL_PAGE(side), peer = base + PAL_CHAN_CTL_PAGE(1 - side);
+        CHECK((unsigned long)out.tail == mine + PAL_CHAN_CTL_TAIL
+              && (unsigned long)in.head == mine + PAL_CHAN_CTL_HEAD
+              && (unsigned long)in.peer_tail == peer + PAL_CHAN_CTL_TAIL
+              && (unsigned long)out.peer_head == peer + PAL_CHAN_CTL_HEAD
+              && (unsigned long)out.peer_waiters == peer + PAL_CHAN_CTL_WAITERS
+              && (unsigned long)out.peer_features == peer + PAL_CHAN_CTL_FEATURES
+              && (unsigned long)out.lock == mine + PAL_CHAN_CTL_TX_LOCK
+              && (unsigned long)in.lock == mine + PAL_CHAN_CTL_RX_LOCK,
+              "side %d: control words at CTL_PAGE(side) / CTL_PAGE(1 - side)", side);
+        CHECK(in.window == w, "side %d: window index", side);
+    }
+}
+
 int main(void) {
     /* At the PAL's own address (PML4 slot 16): pal_chan_ring_init reads the
      * directory at PAL_CHAN_DIR_VADDR, not at an address it is given. */
@@ -509,6 +553,7 @@ int main(void) {
     t_reuse_after_close();
     t_malformed();
     t_ring_init_inside();
+    t_attach_layout();
 
     printf("chan_accept_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
