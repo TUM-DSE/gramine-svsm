@@ -45,3 +45,8 @@ int PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* 
     assert(handle->hdr.type == PAL_TYPE_SOCKET);
     return _PalSocketRecv(handle, iov, iov_len, out_total_size, addr, force_nonblocking);
 }
+
+int PalSocketNativeAttach(PAL_HANDLE handle, struct pal_socket_native_attach* out) {
+    assert(handle->hdr.type == PAL_TYPE_SOCKET);
+    return _PalSocketNativeAttach(handle, out);
+}

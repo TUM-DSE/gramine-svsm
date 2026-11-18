@@ -35,6 +35,7 @@ PalSocketAccept
 PalSocketConnect
 PalSocketSend
 PalSocketRecv
+PalSocketNativeAttach
 PalSendHandle
 PalReceiveHandle
 PalStreamWaitForClient

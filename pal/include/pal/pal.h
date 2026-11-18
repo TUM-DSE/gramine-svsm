@@ -989,6 +989,35 @@ int PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* 
 int PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* out_total_size,
                   struct pal_socket_addr* addr, bool force_nonblocking);
 
+/*!
+ * \brief Hand a socket's channel ring to the program (vault-native transport).
+ *
+ * MicroVault notes/sched/VAULT-NATIVE-RPC.md section 2.1; the LibOS answers
+ * getsockopt(SOL_MVCHAN, MVCHAN_ATTACH) with it. The layout is the svsm PAL's
+ * `struct mvchan_attach` (pal_svsm_chan.h), 40 bytes, and must stay so.
+ *
+ * \param      handle  A connected stream socket.
+ * \param[out] out     Where the ring is: window, side, the read ring's geometry.
+ *
+ * \returns 0 on success, and from then on PalSocketSend/PalSocketRecv on \p handle fail with
+ *          -PAL_ERROR_DENIED and consume nothing (readiness, shutdown and close are unchanged);
+ *          -PAL_ERROR_NOTSUPPORT if the socket is not a direct channel (muxed, inbound, a listener,
+ *          a datagram socket); -PAL_ERROR_NOTCONNECTION if it has no channel (not connected,
+ *          shut down, closed, reset); -PAL_ERROR_DENIED if it is already attached or the PAL holds
+ *          bytes of it that a recv has not handed out yet; -PAL_ERROR_NOTIMPLEMENTED on a PAL
+ *          without channels.
+ */
+struct pal_socket_native_attach {
+    uint32_t abi;           /* 1 */
+    uint32_t side;          /* 0 = requester, 1 = target */
+    uint64_t window_va;     /* the channel's header page */
+    uint64_t window_idx;    /* the Notify argument */
+    uint32_t slot, depth;   /* of the ring this side reads */
+    uint32_t flags;         /* bit 0: the peer keeps WAITERS */
+    uint32_t pad;
+};
+int PalSocketNativeAttach(PAL_HANDLE handle, struct pal_socket_native_attach* out);
+
 /*
  * Thread creation
  */

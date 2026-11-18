@@ -693,3 +693,12 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
     }
     return handle->sock.ops->recv(handle, iov, iov_len, out_total_size, addr, force_nonblocking);
 }
+
+/* The vault-native attach (MicroVault VAULT-NATIVE-RPC.md 2.1) is the svsm
+ * PAL's: here there is no channel ring to hand out, and the LibOS answers
+ * ENOPROTOOPT, so the program keeps using the socket as it is. */
+int _PalSocketNativeAttach(PAL_HANDLE handle, struct pal_socket_native_attach* out) {
+    __UNUSED(handle);
+    __UNUSED(out);
+    return -PAL_ERROR_NOTIMPLEMENTED;
+}

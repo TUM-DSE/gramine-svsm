@@ -306,6 +306,11 @@ struct pal_handle_inner {
              * the per-port `max` count. */
             bool     inbound;
             uint32_t inb_lid;
+            /* The program reads and writes this socket's ring itself
+             * (_PalSocketNativeAttach, MicroVault VAULT-NATIVE-RPC.md 2.1):
+             * send and recv refuse DENIED and consume nothing; the readiness
+             * tests, WAITERS counting, shutdown and close are as before. */
+            bool     native;
         } sock;
 
         struct {

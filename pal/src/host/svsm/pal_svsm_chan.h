@@ -74,6 +74,44 @@
 #define PAL_CHAN_CTL_FEATURES 0x1C0
 #define PAL_CHAN_FEAT_WAITERS 1u
 
+/*
+ * THE VAULT-NATIVE ATTACH ABI (MicroVault notes/sched/VAULT-NATIVE-RPC.md
+ * section 2.1, frozen 2026-11-18). getsockopt(fd, SOL_MVCHAN, MVCHAN_ATTACH)
+ * on a socket that owns a direct channel (not muxed, not inbound, not a
+ * listener, a stream) hands the program the ring's location and geometry, and
+ * from then on the PAL refuses to read or write that ring itself: send/recv
+ * answer EBUSY, readiness and close are unchanged. The layout constants above
+ * are the reference for a reader of the ring outside the PAL:
+ *   header at window_va (PAL_CHAN_HDR_*), this side's control page at
+ *   window_va + PAL_CHAN_CTL_PAGE(side), the peer's at PAL_CHAN_CTL_PAGE(1 - side);
+ *   the ring this side writes PAL_CHAN_RING_TX(side), reads PAL_CHAN_RING_RX(side),
+ *   geometry {slot, depth, off_pages} at PAL_CHAN_HDR_RING(ring), slots at
+ *   window_va + off_pages * 4096; a message is a u32 length (LE, <= slot - 4)
+ *   then the bytes, in slot idx & (depth - 1);
+ *   the peer is gone when PAL_CHAN_HDR_STATE has bit (1 - side);
+ *   Notify: VMMCALL rax = PAL_CHAN_CALL_NOTIFY, rbx = window_idx.
+ * pal_chan_ring_init is the same rule in code.
+ */
+#define SOL_MVCHAN            0x4D56          /* "MV" */
+#define MVCHAN_ATTACH         1
+#define MVCHAN_ATTACH_ABI     1u
+#define MVCHAN_F_PEER_WAITERS 1u              /* the peer keeps WAITERS (FEATURES seen) */
+struct mvchan_attach {                        /* the getsockopt optval, little-endian */
+    uint32_t abi;                             /* MVCHAN_ATTACH_ABI */
+    uint32_t side;                            /* 0 = requester, 1 = target */
+    uint64_t window_va;                       /* the header page */
+    uint64_t window_idx;                      /* the Notify argument (rbx) */
+    uint32_t slot, depth;                     /* of the ring this side READS */
+    uint32_t flags;                           /* MVCHAN_F_* (informational) */
+    uint32_t pad;
+};
+_Static_assert(sizeof(struct mvchan_attach) == 40, "VAULT-NATIVE-RPC.md 2.1: 40 bytes");
+#define PAL_CHAN_CTL_PAGE(side)  (4096u * (1u + (unsigned)(side)))
+#define PAL_CHAN_RING_TX(side)   ((side) == 0 ? 0 : 1)
+#define PAL_CHAN_RING_RX(side)   ((side) == 0 ? 1 : 0)
+#define PAL_CHAN_MSG_LEN_BYTES   4u
+#define PAL_CHAN_CALL_NOTIFY     0x4FFFFFE2u
+
 /* Which of the peer's indices a park waits on. */
 #define PAL_CHAN_ARM_TAIL 0u
 #define PAL_CHAN_ARM_HEAD 1u

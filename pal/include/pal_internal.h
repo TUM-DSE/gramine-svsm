@@ -196,6 +196,7 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
                    struct pal_socket_addr* addr, bool force_nonblocking);
 int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* out_total_size,
                    struct pal_socket_addr* addr, bool force_nonblocking);
+int _PalSocketNativeAttach(PAL_HANDLE handle, struct pal_socket_native_attach* out);
 
 /* PalProcess and PalThread calls */
 int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param);

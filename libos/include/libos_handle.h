@@ -112,6 +112,11 @@ struct libos_sock_handle {
     bool reuseaddr;
     bool reuseport;
     bool broadcast;
+    /* getsockopt(SOL_MVCHAN, MVCHAN_ATTACH) succeeded (MicroVault VAULT-NATIVE-RPC.md 2.1): the
+     * program reads and writes the channel ring itself, and send/recv here answer EBUSY - after
+     * re-arming EPOLLET as an EAGAIN would (VAULT-NATIVE-AGENTS.md addendum 2). Set once, under
+     * `lock`; read atomically. */
+    bool mv_native;
 };
 
 struct libos_dir_handle {
