@@ -265,3 +265,6 @@ int init_stack(const char* const* argv, const char* const* envp, char*** out_arg
  * The implementation of this function depends on the used architecture.
  */
 noreturn void call_elf_entry(elf_addr_t entry, void* argp);
+
+/* The syscall profile (libos_syscalls.c; MicroVault notes/sched/LIBOS-SYSCALL-PROFILE.md). */
+void libos_sysprof_init(void);

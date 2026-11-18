@@ -63,3 +63,13 @@ double _PalGetBogomips(void) {
     /* this has to be implemented */
     return 0.0;
 }
+
+/* The syscall profile is the svsm host's (LIBOS-SYSCALL-PROFILE.md): never here. */
+uint64_t* _PalProfileSyscallTable(void) {
+    return NULL;
+}
+
+void _PalProfileThreadCycles(uint64_t* monitor, uint64_t* park) {
+    *monitor = 0;
+    *park = 0;
+}

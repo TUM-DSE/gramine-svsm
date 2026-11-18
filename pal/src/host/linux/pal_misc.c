@@ -79,3 +79,13 @@ int _PalGetSpecialKey(const char* name, void* key, size_t* key_size) {
     __UNUSED(key_size);
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
+
+/* The syscall profile is the svsm host's (LIBOS-SYSCALL-PROFILE.md): never here. */
+uint64_t* _PalProfileSyscallTable(void) {
+    return NULL;
+}
+
+void _PalProfileThreadCycles(uint64_t* monitor, uint64_t* park) {
+    *monitor = 0;
+    *park = 0;
+}

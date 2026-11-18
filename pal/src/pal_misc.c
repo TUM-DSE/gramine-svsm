@@ -17,6 +17,14 @@ int PalRandomBitsRead(void* buffer, size_t size) {
 }
 
 #if defined(__x86_64__)
+uint64_t* PalProfileSyscallTable(void) {
+    return _PalProfileSyscallTable();
+}
+
+void PalProfileThreadCycles(uint64_t* monitor, uint64_t* park) {
+    _PalProfileThreadCycles(monitor, park);
+}
+
 int PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr) {
     return _PalSegmentBaseGet(reg, addr);
 }

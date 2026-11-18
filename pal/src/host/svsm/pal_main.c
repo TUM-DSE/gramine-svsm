@@ -407,6 +407,27 @@ noreturn void pal_svsm_main(void)
         }
     }
 
+    /* The syscall profile (MicroVault notes/sched/LIBOS-SYSCALL-PROFILE.md):
+     *
+     *   [svsm]
+     *   debug = true              # [vault] debug (vaultkraft writes it): required
+     *   syscall_profile = true
+     *
+     * Per syscall number the count and the wall, monitor-call and park time,
+     * published to the monitor's GetStat (VAULT_PROF) - so only for a debug
+     * vault, which says so in its measured manifest. */
+    if (manifest_svsm_early) {
+        bool debug = false, profile = false;
+        if (toml_bool_in(manifest_svsm_early, "debug", false, &debug) < 0)
+            pal_svsm_fail("svsm.debug is not a boolean", 0);
+        if (toml_bool_in(manifest_svsm_early, "syscall_profile", false, &profile) < 0)
+            pal_svsm_fail("svsm.syscall_profile is not a boolean", 0);
+        if (profile && !debug)
+            pal_svsm_fail("svsm.syscall_profile needs svsm.debug = true (a [vault] debug vault)", 0);
+        if (profile && !pal_svsm_profile_start())
+            log_warning("svsm.syscall_profile: the monitor did not take the table (not a debug_calls build) - no profile");
+    }
+
     /* Raw `syscall` fast paths (MicroVault notes/sched/SYSCALL-FASTPATH.md;
      * owner 2026-11-17: each opt-in, measured):
      *

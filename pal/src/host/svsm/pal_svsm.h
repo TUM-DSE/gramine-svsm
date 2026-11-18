@@ -35,11 +35,18 @@ typedef struct pal_svsm_tcb {
          * counted for a fork, but still held - so this context never waits at
          * the fork's gate while it has any. */
         int64_t    paused_holds;
+        /* The syscall profile (pal_monitor_call.c): this thread's TSC ticks
+         * in monitor calls and in parks/waits so far. */
+        uint64_t   prof_monitor;
+        uint64_t   prof_park;
     };
 } PAL_SVSM_TCB;
 
 extern bool g_pal_svsm_fork_report;
 extern bool g_pal_svsm_console_monitor;   /* [svsm] console = "monitor" */
+/* The syscall profile (LIBOS-SYSCALL-PROFILE.md): on only for a debug vault that asked. */
+extern bool g_pal_svsm_prof_on;
+bool pal_svsm_profile_start(void);
 void pal_svsm_console_write(const void* buf, size_t size);   /* pal_monitor_call.c */
 void pal_svsm_threads_report_holds(int64_t foreign);
 

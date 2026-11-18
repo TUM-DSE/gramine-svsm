@@ -21,11 +21,29 @@ typedef arch_syscall_arg_t (*six_args_syscall_t)(arch_syscall_arg_t, arch_syscal
  * `context` is expected to be placed at the bottom of Gramine-internal stack.
  * If you change this function please also look at `libos_syscall_rt_sigsuspend`!
  */
+/* The syscall profile (MicroVault notes/sched/LIBOS-SYSCALL-PROFILE.md): the
+ * PAL's table, 512 rows of {count, wall, monitor, park} TSC ticks, or NULL
+ * (the default: one predicted branch per syscall). Set once at init. */
+static uint64_t* g_libos_sysprof = NULL;
+
+void libos_sysprof_init(void) {
+    g_libos_sysprof = PalProfileSyscallTable();
+}
+
+static inline uint64_t sysprof_tsc(void) {
+    return __builtin_ia32_rdtsc();
+}
+
 noreturn void libos_emulate_syscall(PAL_CONTEXT* context) {
     LIBOS_TCB_SET(context.regs, context);
 
     unsigned long sysnr = pal_context_get_syscall(context);
     arch_syscall_arg_t ret = 0;
+    uint64_t prof_t0 = 0, prof_m0 = 0, prof_p0 = 0;
+    if (g_libos_sysprof) {
+        prof_t0 = sysprof_tsc();
+        PalProfileThreadCycles(&prof_m0, &prof_p0);
+    }
 
     if (sysnr == GRAMINE_CUSTOM_SYSCALL_NR) {
         unsigned long args[] = { ALL_SYSCALL_ARGS(context) };
@@ -71,6 +89,16 @@ out:
 
     LIBOS_TCB_SET(context.syscall_nr, -1);
     LIBOS_TCB_SET(context.regs, NULL);
+
+    if (prof_t0 && sysnr < 512) {
+        uint64_t m1, p1;
+        PalProfileThreadCycles(&m1, &p1);
+        uint64_t* row = &g_libos_sysprof[sysnr * 4];
+        __atomic_fetch_add(&row[0], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&row[1], sysprof_tsc() - prof_t0, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&row[2], m1 - prof_m0, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&row[3], p1 - prof_p0, __ATOMIC_RELAXED);
+    }
 
     return_from_syscall(context);
 }

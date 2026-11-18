@@ -1262,6 +1262,19 @@ enum pal_segment_reg {
 int PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr);
 
 /*!
+ * \brief The syscall profile (MicroVault notes/sched/LIBOS-SYSCALL-PROFILE.md; svsm host,
+ *        `[svsm] syscall_profile` in a debug vault): the per-syscall table the LibOS fills -
+ *        512 rows of {count, wall, monitor, park} TSC ticks - or NULL when not profiling.
+ */
+uint64_t* PalProfileSyscallTable(void);
+
+/*!
+ * \brief This thread's TSC ticks spent in monitor calls and in parks (waits) so far, for the
+ *        LibOS to split a syscall's time. Zeros when not profiling.
+ */
+void PalProfileThreadCycles(uint64_t* monitor, uint64_t* park);
+
+/*!
  * \brief Set segment register.
  *
  * \param reg   The register base to be set (#pal_segment_reg).

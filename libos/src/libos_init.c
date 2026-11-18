@@ -413,6 +413,7 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
     RUN_INIT(init_vma);
     RUN_INIT(init_r_debug);
     RUN_INIT(init_slab);
+    libos_sysprof_init();   /* the syscall profile's table, or none (LIBOS-SYSCALL-PROFILE.md) */
     RUN_INIT(read_environs, envp);
     RUN_INIT(init_rlimit);
     RUN_INIT(init_fs);

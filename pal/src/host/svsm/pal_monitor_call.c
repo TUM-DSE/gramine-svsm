@@ -1,4 +1,6 @@
 #include "pal_monitor_call.h"
+#include "pal_internal.h"
+#include "pal_svsm.h"
 #include <string.h>
 
 /* The instruction that carries a monitor call (VC_REFLECT_DESIGN.md stage 3).
@@ -67,8 +69,80 @@ static inline void monitor_call_check(uint64_t code, uint64_t rax) {
         monitor_call_forged();
 }
 
+/* The syscall profile (MicroVault notes/sched/LIBOS-SYSCALL-PROFILE.md;
+ * `[svsm] syscall_profile` in a `[svsm] debug` vault only): one table in this
+ * vault's memory, registered with the monitor (ProfileRegister, debug_calls
+ * builds), which GetStat prints as VAULT_PROF. The LibOS fills the syscall
+ * rows (PalProfileSyscallTable); the monitor-call rows are filled here, and
+ * each call's ticks are added to the calling thread's monitor or park total
+ * (PalProfileThreadCycles), so the LibOS can split a syscall's time. Off:
+ * one predicted branch per monitor call. */
+struct pal_svsm_prof {
+    uint64_t magic, nsys, nmc, reserved;
+    uint64_t sys[512][4];   /* count, wall, monitor, park (TSC ticks) */
+    uint64_t mc[256][2];    /* by the call code's low byte: count, ticks */
+};
+static struct pal_svsm_prof g_pal_svsm_prof __attribute__((aligned(4096)));
+bool g_pal_svsm_prof_on = false;
+
+static inline uint64_t prof_tsc(void) {
+    return __builtin_ia32_rdtsc();
+}
+
+static inline bool prof_is_park(uint64_t code) {
+    /* Park, Sleep, Wait: the thread waits in the monitor. */
+    return code == 0x4FFFFFE1 || code == 0x4FFFFFDE || code == 0x4FFFFFD5;
+}
+
+static inline void prof_account(uint64_t code, uint64_t ticks) {
+    uint64_t* row = g_pal_svsm_prof.mc[code & 0xff];
+    __atomic_fetch_add(&row[0], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&row[1], ticks, __ATOMIC_RELAXED);
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    if (prof_is_park(code))
+        tcb->prof_park += ticks;
+    else
+        tcb->prof_monitor += ticks;
+}
+
+uint64_t* _PalProfileSyscallTable(void) {
+    return g_pal_svsm_prof_on ? &g_pal_svsm_prof.sys[0][0] : NULL;
+}
+
+void _PalProfileThreadCycles(uint64_t* monitor, uint64_t* park) {
+    if (!g_pal_svsm_prof_on) {
+        *monitor = 0;
+        *park = 0;
+        return;
+    }
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    *monitor = tcb->prof_monitor;
+    *park = tcb->prof_park;
+}
+
+void monitor_call(struct monitor_call_data* data);
+
+/* Register the table (ProfileRegister, 0x4FFFFFA4) and turn the profile on.
+ * -> false: the monitor refused it (not a debug_calls build), and it stays off. */
+bool pal_svsm_profile_start(void) {
+    g_pal_svsm_prof.magic = 0x3130464f52504b56ULL;   /* "VKPROF01" */
+    g_pal_svsm_prof.nsys = 512;
+    g_pal_svsm_prof.nmc = 256;
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFA4;
+    data.rbx = (uint64_t)&g_pal_svsm_prof;
+    data.rcx = sizeof(g_pal_svsm_prof);
+    data.rdx = 0;
+    monitor_call(&data);
+    if (data.rcx != 0)
+        return false;
+    g_pal_svsm_prof_on = true;
+    return true;
+}
+
 void monitor_call(struct monitor_call_data* data){
     uint64_t code = data->rax;
+    uint64_t prof_t0 = g_pal_svsm_prof_on ? prof_tsc() : 0;
 
     /* r8 and r9: the monitor writes r8 for some calls (DeviceMmio,
      * service_calls.rs) whichever helper issued them. memory: it reads
@@ -82,6 +156,8 @@ void monitor_call(struct monitor_call_data* data){
         );
 
     monitor_call_check(code, data->rax);
+    if (prof_t0)
+        prof_account(code, prof_tsc() - prof_t0);
 }
 
 void extended_monitor_call(struct monitor_call_data* data) {
@@ -90,6 +166,7 @@ void extended_monitor_call(struct monitor_call_data* data) {
     // since the Monitor receives the whole
     // VMSA regardless
     uint64_t code = data->rax;
+    uint64_t prof_t0 = g_pal_svsm_prof_on ? prof_tsc() : 0;
 
     /* r8 and r9 come BACK too: the monitor answers in them for some calls
      * (DeviceMmio: r8 the BAR's physical address, r9 the granted function).
@@ -109,6 +186,8 @@ void extended_monitor_call(struct monitor_call_data* data) {
         );
 
     monitor_call_check(code, data->rax);
+    if (prof_t0)
+        prof_account(code, prof_tsc() - prof_t0);
 }
 
 size_t max_string_length = 100;
