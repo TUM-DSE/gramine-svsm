@@ -450,6 +450,51 @@ void pal_svsm_stall_note_taker(PAL_HANDLE ev) {
     }
 }
 
+/* A parked context's call chain, as far as a scan can say: the words between
+ * its saved rsp and the top of the stack it is on (the LibOS's per-thread
+ * stack while in a syscall) that fall in the LibOS image or the PAL's text,
+ * as libos+off / pal+off for addr2line against libsysdb.so / libpal.so. */
+extern char __text_start;
+extern char __text_end;
+static void stall_chain(PAL_HANDLE t) {
+    uintptr_t base, lo, hi;
+    pal_entrypoint_range(&base, &lo, &hi);
+    uintptr_t sp = (uintptr_t)t->thread.rsp, top = 0;
+    PAL_TCB* pt = (PAL_TCB*)t->thread.tcb;
+    if (pt)
+        memcpy(&top, (const char*)pt->libos_tcb + 24, sizeof top);   /* libos_stack_bottom */
+    if (!sp || (sp & 7))
+        return;
+    if (!top || top <= sp || top - sp > (64UL << 10))
+        top = sp + (16UL << 10);
+    char b[400];
+    size_t bl = 0;
+    unsigned n = 0;
+    for (uintptr_t a = sp; a + 8 <= top && n < 48; a += 8) {
+        uint64_t w = *(const uint64_t*)a;
+        const char* tag = NULL;
+        uint64_t off = 0;
+        if (w >= lo && w < hi) {
+            tag = "libos";
+            off = w - base;
+        } else if (w >= (uint64_t)&__text_start && w < (uint64_t)&__text_end) {
+            tag = "pal";
+            off = w;
+        }
+        if (!tag)
+            continue;
+        bl += snprintf(b + bl, sizeof(b) - bl, " %s+%#lx", tag, (unsigned long)off);
+        n++;
+        if (bl > sizeof(b) - 32) {
+            log_error("stall-report: chain %p:%s", t, b);
+            bl = 0;
+            b[0] = '\0';
+        }
+    }
+    if (bl)
+        log_error("stall-report: chain %p:%s", t, b);
+}
+
 /*
  * svsm.stall_report: when a thread has been blocked STALL_AFTER_US and the
  * last report is STALL_EVERY_US old, say for every such thread what it is in:
@@ -514,6 +559,8 @@ static void stall_report(uint64_t now) {
                       "now state %d", top->event.taker, top->event.taker_prefix,
                       top->event.taker_nr, alive ? "still on the ring" : "NO LONGER ON THE RING",
                       alive ? (int)top->event.taker->thread.state : -1);
+            if (alive && top->event.taker != g_current)
+                stall_chain(top->event.taker);
         }
         if (top && lo && hi > lo) {
             unsigned hits = 0;
