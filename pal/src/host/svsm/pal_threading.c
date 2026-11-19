@@ -466,9 +466,11 @@ static void stall_report(uint64_t now) {
     size_t lines = 0;
     t = g_current;
     do {
-        if (t->thread.state != PAL_SVSM_THREAD_BLOCKED
-                || now - t->thread.blocked_at_us < STALL_AFTER_US)
-            goto next;
+        /* EVERY context, not only the stalled: the one holding what the
+         * stalled wait for is usually not stalled itself (runnable, or in a
+         * wait it keeps re-entering). */
+        bool stalled_t = t->thread.state == PAL_SVSM_THREAD_BLOCKED
+                         && now - t->thread.blocked_at_us >= STALL_AFTER_US;
         if (lines++ >= STALL_MAX_LINES) {
             log_error("stall-report: ... more not shown");
             break;
@@ -514,18 +516,26 @@ static void stall_report(uint64_t now) {
                 found++;
             }
         }
-        log_error("stall-report: %s ctx %p blocked %lu ms on %p(type %d) deadline %ld ms "
-                  "nr %ld args %#lx %#lx %#lx rip %#lx rsp %#lx arms %u%s watch %lu%s |%s",
-                  prefix, t, (unsigned long)((now - t->thread.blocked_at_us) / 1000),
-                  t->thread.waiting_on,
-                  t->thread.waiting_on ? (int)t->thread.waiting_on->hdr.type : -1,
+        PAL_SVSM_TCB* st = (PAL_SVSM_TCB*)t->thread.tcb;
+        PAL_HANDLE on = t->thread.waiting_on;
+        char ev[48] = "";
+        if (on && on->hdr.type == PAL_TYPE_EVENT)
+            snprintf(ev, sizeof ev, " ev sig %u waiters %u%s",
+                     (unsigned)__atomic_load_n(&on->event.signaled, __ATOMIC_RELAXED),
+                     (unsigned)on->event.waiters_cnt, on->event.auto_clear ? " auto" : "");
+        log_error("stall-report: %s%s ctx %p state %u holds %ld/%ld blocked %lu ms on %p(type %d)%s "
+                  "deadline %ld ms nr %ld args %#lx %#lx %#lx rip %#lx rsp %#lx arms %u%s watch %lu%s |%s",
+                  stalled_t ? "STALLED " : "", prefix, t, (unsigned)t->thread.state,
+                  st ? (long)st->lock_holds : -1L, st ? (long)st->paused_holds : -1L,
+                  t->thread.state == PAL_SVSM_THREAD_BLOCKED
+                      ? (unsigned long)((now - t->thread.blocked_at_us) / 1000) : 0UL,
+                  on, on ? (int)on->hdr.type : -1, ev,
                   t->thread.has_deadline ? (long)((int64_t)(t->thread.deadline_us - now) / 1000)
                                          : -1L,
                   nr, regs ? (unsigned long)regs->rdi : 0UL, regs ? (unsigned long)regs->rsi : 0UL,
                   regs ? (unsigned long)regs->rdx : 0UL, regs ? (unsigned long)regs->rip : 0UL,
                   regs ? (unsigned long)regs->rsp : 0UL, (unsigned)t->thread.n_arms,
                   t->thread.arms_partial ? "+" : "", (unsigned long)t->thread.n_watch, w, f);
-next:
         t = t->thread.next;
     } while (t != g_current);
 }
