@@ -39,6 +39,16 @@ typedef struct pal_svsm_tcb {
 } PAL_SVSM_TCB;
 
 extern bool g_pal_svsm_fork_report;
+/* svsm.stall_report (pal_main.c): when every thread has been blocked a while,
+ * say what each is blocked in (pal_threading.c). Diagnosis only. */
+extern bool g_pal_svsm_stall_report;
+#define PAL_SVSM_DBG_MAPS 16
+struct pal_svsm_dbg_map {
+    uintptr_t addr;
+    char      name[48];
+};
+extern struct pal_svsm_dbg_map g_pal_svsm_dbg_maps[PAL_SVSM_DBG_MAPS];
+extern size_t g_pal_svsm_dbg_maps_n;
 extern bool g_pal_svsm_console_monitor;   /* [svsm] console = "monitor" */
 void pal_svsm_console_write(const void* buf, size_t size);   /* pal_monitor_call.c */
 void pal_svsm_threads_report_holds(int64_t foreign);

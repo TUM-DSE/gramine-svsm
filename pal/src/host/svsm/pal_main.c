@@ -445,6 +445,16 @@ noreturn void pal_svsm_main(void)
             pal_svsm_fail("svsm.fork_report is not a boolean", 0);
         g_pal_svsm_fork_report = fr;
     }
+    /* The wedge diagnosis (socialNetwork pilot, 2026-11-19), never in
+     * production: `svsm.stall_report = true` makes a vault whose threads have
+     * all been blocked for 5 s say what each one is blocked in, at most every
+     * 30 s (pal_svsm_stall_report). */
+    if (manifest_svsm_early) {
+        bool sr = false;
+        if (toml_bool_in(manifest_svsm_early, "stall_report", false, &sr) < 0)
+            pal_svsm_fail("svsm.stall_report is not a boolean", 0);
+        g_pal_svsm_stall_report = sr;
+    }
 
     /* Does this image run with AVX-512?
      *

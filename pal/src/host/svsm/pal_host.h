@@ -97,6 +97,7 @@ struct pal_handle_inner {
             PAL_HANDLE next;         /* round-robin ring, never NULL */
             PAL_HANDLE waiting_on;   /* what it is parked on, NULL if nothing */
             uint64_t   deadline_us;  /* absolute wake time, 0 = no deadline */
+            uint64_t   blocked_at_us; /* when it last blocked (svsm.stall_report) */
             uint32_t   state;        /* enum pal_svsm_thread_state */
             bool       has_deadline;
             bool       interrupted;  /* _PalThreadResume landed */
