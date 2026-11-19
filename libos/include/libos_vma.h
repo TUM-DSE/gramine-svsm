@@ -140,3 +140,6 @@ size_t get_peak_memory_usage(void);
 
 /* Returns total memory usage */
 size_t get_total_memory_usage(void);
+
+/* gramine_run_test("vma_mgr_reentry") (libos_vma.c). */
+int run_test_vma_mgr_reentry(void);

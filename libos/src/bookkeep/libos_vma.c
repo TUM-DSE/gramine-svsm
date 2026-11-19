@@ -631,6 +631,56 @@ static void free_vma(struct libos_vma* vma) {
     unlock(&vma_mgr_lock);
 }
 
+/* gramine_run_test("vma_mgr_reentry"): what the socialNetwork pilot's
+ * social-graph-service deadlocked on - alloc_vma and free_vma by the thread
+ * that already holds vma_mgr_lock, with the thread cache empty, from the
+ * manager and then (manager drained) from the reserve. Before the fix the
+ * first alloc_vma waited on the lock its own thread held: the call never
+ * returns. 0 when every allocation succeeded and the reserve was used. */
+#define REENTRY_DRAIN_MAX 65536
+int run_test_vma_mgr_reentry(void) {
+    struct libos_vma* cached = NULL;
+    struct libos_vma* v;
+    while ((v = get_from_thread_vma_cache())) {
+        v->next_free = cached;
+        cached = v;
+    }
+    int ret = 0;
+    lock(&vma_mgr_lock);
+    struct libos_vma* first = alloc_vma();     /* from the manager */
+    if (!first)
+        ret = -1;
+    struct libos_vma* drained = NULL;
+    size_t n = 0;
+    while (ret == 0 && n < REENTRY_DRAIN_MAX && (v = get_mem_obj_from_mgr(vma_mgr))) {
+        v->next_free = drained;
+        drained = v;
+        n++;
+    }
+    struct libos_vma* from_reserve = ret == 0 ? alloc_vma() : NULL;   /* the reserve */
+    if (ret == 0 && (!from_reserve || !vma_is_reserve(from_reserve)))
+        ret = -2;
+    if (from_reserve)
+        free_vma(from_reserve);
+    if (first)
+        free_vma(first);
+    while (drained) {
+        v = drained;
+        drained = v->next_free;
+        free_mem_obj_to_mgr(vma_mgr, v);
+    }
+    unlock(&vma_mgr_lock);
+    while (cached) {
+        v = cached;
+        cached = v->next_free;
+        v->next_free = NULL;
+        free_vma(v);
+    }
+    log_always("vma_mgr_reentry: drained %lu, reserve %s, ret %d", (unsigned long)n,
+               ret == -2 ? "NOT used" : "used", ret);
+    return ret;
+}
+
 static void free_vmas_freelist(struct libos_vma* vma) {
     while (vma) {
         struct libos_vma* next = vma->next_free;
