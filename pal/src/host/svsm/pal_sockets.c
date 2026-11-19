@@ -40,10 +40,36 @@
 /* Spins before parking. A peer that is running answers in far less than the
  * monitor entry a park costs (PLAN.md's channel plan, D1). */
 #define PAL_SOCK_SPINS 200
-/* How many times a grant may be re-asked when the target is mid-dispatch.
- * Each try waits ~200 us, so this is about a tenth of a second - longer
- * than any dispatch and shorter than a client would notice. */
-#define PAL_GRANT_TRIES 500
+/* How long a grant may be re-asked while the target is mid-dispatch
+ * (STATUS_BAD_STATE: the monitor needs the target's entry lock, which a
+ * resident service holds through every dispatch).
+ *
+ * It was 500 tries of ~200 us - a tenth of a second, "longer than any
+ * dispatch". A dispatch, yes; not a service that is dispatched back to back.
+ * The socialNetwork pilot's services were busy for most of every 100 ms
+ * under load, so a cold pool's first burst of connects lost some (4 of 962
+ * registrations refused, each then ~150 follows "not registered"; 134842
+ * busy refusals in the run). On Linux the same connect waits in the
+ * listener's backlog and succeeds. So: by time, 2 s - a connect timeout's
+ * order, not a dispatch's - the first 10 ms at 200 us a try (what a free
+ * slot costs to find), then 1 ms a try, so a long wait is ~2000 monitor
+ * calls rather than 10000. */
+#define PAL_GRANT_BUSY_US      2000000UL
+#define PAL_GRANT_BUSY_FAST_US   10000UL
+
+static int sock_block(PAL_HANDLE handle, pal_wait_flags_t want, const uint64_t* arms,
+                      size_t n_arms, uint64_t max_us, bool interruptible);
+
+/* Wait before the next try at a busy target; false once the budget that
+ * started at `t0` is spent. */
+static bool grant_busy_wait(uint64_t t0) {
+    uint64_t el = pal_svsm_now_usec() - t0;
+    if (el >= PAL_GRANT_BUSY_US)
+        return false;
+    (void)sock_block(NULL, 0, NULL, 0, el < PAL_GRANT_BUSY_FAST_US ? 200 : 1000,
+                     /*interruptible=*/false);
+    return true;
+}
 /* RATE_LIMITED is a different wait: the monitor refills a vault's grant
  * bucket at 1000/s, so one token time is 1 ms, and the budget is its own -
  * a busy target's tries are not spent on pacing, nor the other way round.
@@ -1949,7 +1975,8 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
 
     if (granting)
         g_mux_granting = true;
-    for (int busy = 0, paced = 0; busy < PAL_GRANT_TRIES && paced < PAL_GRANT_RATE_TRIES;) {
+    uint64_t busy_t0 = 0;
+    for (int paced = 0; paced < PAL_GRANT_RATE_TRIES;) {
         win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
         if (win == PAL_SVSM_STATUS_RATE_LIMITED) {
             /* This vault's own grant rate: a token comes back in 1 ms. */
@@ -1961,8 +1988,10 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
             break;
         /* Nothing here announces the target's dispatch ending: the bound
          * alone, and the vault's other threads run meanwhile. */
-        busy++;
-        (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
+        if (!busy_t0)
+            busy_t0 = pal_svsm_now_usec();
+        if (!grant_busy_wait(busy_t0))
+            break;
     }
     /* Cleared here, and nothing below yields before g_pal_svsm_mux_open is
      * set (or this returns): PAL text is not preempted, so a waiter next
@@ -2143,7 +2172,8 @@ static int mux_ensure(void) {
     uint64_t addr_out = 0;
     int64_t win = -1;
     g_mux_granting = true;
-    for (int busy = 0, paced = 0; busy < PAL_GRANT_TRIES && paced < PAL_GRANT_RATE_TRIES;) {
+    uint64_t busy_t0 = 0;
+    for (int paced = 0; paced < PAL_GRANT_RATE_TRIES;) {
         win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
         if (win == PAL_SVSM_STATUS_RATE_LIMITED) {
             paced++;
@@ -2152,8 +2182,10 @@ static int mux_ensure(void) {
         }
         if (win != PAL_SVSM_STATUS_BAD_STATE)
             break;
-        busy++;
-        (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
+        if (!busy_t0)
+            busy_t0 = pal_svsm_now_usec();
+        if (!grant_busy_wait(busy_t0))
+            break;
     }
     g_mux_granting = false;
     if (win < 0)
