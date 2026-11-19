@@ -112,6 +112,10 @@ struct libos_sock_handle {
     bool reuseaddr;
     bool reuseport;
     bool broadcast;
+    /* TCP_DEFER_ACCEPT as set (seconds): accepted and returned, otherwise a no-op - a connection
+     * reaches accept() before its first data, and its first read waits, which is what the option
+     * permits Linux to do too (it is a hint). Thrift's TServerSocket fails listen() without it. */
+    int tcp_defer_accept;
 };
 
 struct libos_dir_handle {

@@ -112,6 +112,7 @@ struct cmsghdr {
 #define TCP_KEEPIDLE 4      /* Start keeplives after this period */
 #define TCP_KEEPINTVL 5     /* Interval between keepalives */
 #define TCP_KEEPCNT 6       /* Number of keepalives before death */
+#define TCP_DEFER_ACCEPT 9  /* Wake up listener only when data arrive */
 #define TCP_USER_TIMEOUT 18 /* How long for loss retry before timeout */
 
 #define MAX_TCP_KEEPIDLE 32767

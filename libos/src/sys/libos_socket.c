@@ -991,6 +991,10 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
 
         /* If this is not a peek recv, we could also query PAL for more data, but it's cumbersome
          * to implement. Instead just let the user app handle the partial read. */
+        if (!(*flags & MSG_PEEK)) {
+            /* a read served from the peek buffer re-arms EPOLLET too (maybe_epoll_et_trigger) */
+            maybe_epoll_et_trigger(handle, /*ret=*/0, /*in=*/true, /*was_partial=*/false);
+        }
         ret = size;
         goto out;
     }
