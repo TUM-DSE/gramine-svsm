@@ -302,6 +302,19 @@ struct pal_handle_inner {
              * for [svsm.net] (DSB M1): a raw channel of its own, counted in
              * that entry's `conns` until destroyed. */
             uint8_t  peer_route;
+            /* A NON-BLOCKING connect to a [[svsm.peer]] whose target was busy
+             * (the grant answered BAD_STATE): connect() returned EINPROGRESS
+             * and the grant is retried from this socket's poll, in the
+             * polling thread's own context, until it lands (writable) or
+             * the budget runs out (`conn_failed`: hang-up, ECONNREFUSED).
+             * `conn_req` is the saved grant request (pal_sockets.c), owned
+             * here while pending. The social livelock fix (2026-11-19). */
+            bool     conn_pending;
+            bool     conn_failed;
+            uint8_t  conn_peer;          /* 1 + the peer entry, as peer_route */
+            uint64_t conn_t0_us;         /* first BAD_STATE */
+            uint64_t conn_next_us;       /* not before this */
+            void*    conn_req;
             /* A STREAM socket's bound port, as a label only (what accept
              * reports as the local end; nothing is bound on it). Kept apart
              * from bind_port, which a datagram socket and the mvnet
