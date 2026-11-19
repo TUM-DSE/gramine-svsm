@@ -515,6 +515,29 @@ noreturn void pal_svsm_main(void)
         g_pal_svsm_console_monitor = console == 1;
     }
     /* end of svsm.console */
+
+    /* The reservation table's cap (notes/mem/RESERVATION-CHUNKS.md):
+     *
+     *   [svsm]
+     *   max_reservation_pages = N     # 1..64 pages of 170 entries; default 7
+     *
+     * A thread costs two entries (its stack and the guard below it), so a
+     * thread-per-connection server with ~600 live threads wants more than the
+     * default. Declared once, in the zygote; the monitor seals it at Finalize
+     * and the clones inherit it. Absent: nothing is declared, the monitor's
+     * default applies (and a monitor without the call is not asked). */
+    if (manifest_svsm_early) {
+        int64_t rp = -1;
+        if (toml_int_in(manifest_svsm_early, "max_reservation_pages", -1, &rp) < 0)
+            pal_svsm_fail("svsm.max_reservation_pages is not an integer", 0);
+        if (rp != -1) {
+            if (rp < 1 || rp > 64)
+                pal_svsm_fail("svsm.max_reservation_pages must be 1..64", (int)rp);
+            if (pal_svsm_resv_cap_declare((uint64_t)rp) < 0)
+                pal_svsm_fail("svsm.max_reservation_pages: the monitor refused the declaration",
+                              (int)rp);
+        }
+    }
 #line 427
 
     /* What the APPS on this base image may claim in their own frames -
