@@ -209,6 +209,23 @@ void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on);
  * against the whole class and re-tests when woken. pal_svsm_poll_wake is
  * what a pipe write (or close) calls. */
 enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us);
+
+/* A blocked reader's count on a channel ring (MicroVault notes/sched/
+ * NOTIFY-ELISION.md): pal_svsm_poll_block counts the thread into WAITERS of
+ * every socket it waits to read, before it blocks, and out again after - only
+ * if the handle still holds the same channel (window, live bit, the header's
+ * region and epoch). A count it cannot take back stays: too high only costs
+ * a writer a Notify, too low could cost a wake, so every doubt goes high. */
+struct pal_svsm_waiter {
+    PAL_HANDLE handle;
+    unsigned long win;
+    uint64_t region;
+    volatile uint32_t* word;
+};
+#define PAL_SVSM_WAITER_MARKS 16
+size_t pal_svsm_sock_waiters_add(PAL_HANDLE* handles, const uint32_t* events, size_t count,
+                                 struct pal_svsm_waiter* marks, size_t max);
+void pal_svsm_sock_waiters_drop(const struct pal_svsm_waiter* marks, size_t n);
 /* What the calling thread is about to wait on, so that the PAL's
  * scheduler can ask the monitor to watch those words rather than giving
  * the processor back blind. See pal_threading.c. */

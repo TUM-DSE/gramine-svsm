@@ -61,6 +61,18 @@
 #define PAL_CHAN_CTL_WAIT_HEAD 0x0C0
 #define PAL_CHAN_CTL_TX_LOCK  0x100
 #define PAL_CHAN_CTL_RX_LOCK  0x140
+/* Written by the PAL of a side on its OWN control page, never by the monitor
+ * (MicroVault notes/sched/NOTIFY-ELISION.md). WAITERS: how many threads of
+ * this side are blocked waiting to READ this ring (pal_svsm_poll_block with
+ * the socket in its watch set, read interest), an atomic counter. FEATURES
+ * bit 0: this side keeps WAITERS - set before its first count, never cleared.
+ * A writer Notifies when the reader is parked on the index (WAIT_TAIL), or has
+ * a thread waiting (WAITERS), or does not keep the count (FEATURES clear: an
+ * older PAL, or a reader that has not waited yet). The page comes zeroed from
+ * the monitor's arena, so an old reader reads as "no FEATURES". */
+#define PAL_CHAN_CTL_WAITERS  0x180
+#define PAL_CHAN_CTL_FEATURES 0x1C0
+#define PAL_CHAN_FEAT_WAITERS 1u
 
 /* Which of the peer's indices a park waits on. */
 #define PAL_CHAN_ARM_TAIL 0u
@@ -79,6 +91,8 @@ struct pal_chan_ring {
     volatile uint32_t* peer_head;
     volatile uint32_t* peer_waits_tail;   /* the peer is parked on my tail */
     volatile uint32_t* peer_waits_head;   /* the peer is parked on my head */
+    volatile uint32_t* peer_waiters;      /* the peer's threads waiting to read (NOTIFY-ELISION) */
+    volatile uint32_t* peer_features;     /* the peer keeps peer_waiters (bit 0) */
     unsigned char* slots;
     uint32_t slot, depth;
     unsigned long window;
@@ -145,6 +159,8 @@ static inline void pal_chan_ring_init(struct pal_chan_ring* r, unsigned long win
     r->peer_head = (volatile uint32_t*)(peer + PAL_CHAN_CTL_HEAD);
     r->peer_waits_tail = (volatile uint32_t*)(peer + PAL_CHAN_CTL_WAIT_TAIL);
     r->peer_waits_head = (volatile uint32_t*)(peer + PAL_CHAN_CTL_WAIT_HEAD);
+    r->peer_waiters    = (volatile uint32_t*)(peer + PAL_CHAN_CTL_WAITERS);
+    r->peer_features   = (volatile uint32_t*)(peer + PAL_CHAN_CTL_FEATURES);
 }
 
 static inline bool pal_chan_present(const struct pal_chan_ring* r) {
@@ -214,8 +230,8 @@ static inline void pal_chan_wake_peer(struct pal_chan_ring* r, volatile uint32_t
  * half a message.
  *
  * `hdr` may be NULL with hdr_len 0, which makes this exactly pal_chan_send. */
-static inline int pal_chan_send2(struct pal_chan_ring* r, const void* hdr, uint32_t hdr_len,
-                                 const void* body, uint32_t body_len) {
+static inline int pal_chan_send2_wake(struct pal_chan_ring* r, const void* hdr, uint32_t hdr_len,
+                                      const void* body, uint32_t body_len, bool wake) {
     uint32_t len = hdr_len + body_len;
     if (!pal_chan_present(r) || r->slot < 4 || len > r->slot - 4 || len < hdr_len)
         return -1;                      /* the < hdr_len test catches overflow */
@@ -234,8 +250,35 @@ static inline int pal_chan_send2(struct pal_chan_ring* r, const void* hdr, uint3
     memcpy(s, &len, 4);
     __atomic_store_n(r->tail, t + 1, __ATOMIC_RELEASE);
     pal_chan_unlock(r);
-    pal_chan_wake_peer(r, r->peer_waits_tail);
+    if (wake)
+        pal_chan_wake_peer(r, r->peer_waits_tail);
     return 0;
+}
+
+static inline int pal_chan_send2(struct pal_chan_ring* r, const void* hdr, uint32_t hdr_len,
+                                 const void* body, uint32_t body_len) {
+    return pal_chan_send2_wake(r, hdr, hdr_len, body, body_len, /*wake=*/true);
+}
+
+/* The one Notify of a socket send (NOTIFY-ELISION.md), after
+ * pal_chan_send2_wake(..., false) published the tail: Notify window `widx`
+ * if the reader is parked on the index (WAIT_TAIL, the monitor's), or has a
+ * thread waiting to read (WAITERS), or does not keep WAITERS (an older PAL,
+ * or one that has not waited on this ring yet). The fence orders the tail
+ * store before the loads; the reader increments WAITERS before it re-tests
+ * the ring (pal_svsm_poll_block -> pick_next), so either it sees this message
+ * or this sees its count. Before, every send made the gated Notify AND an
+ * unconditional one, and the second found the reader awake two times in
+ * three (IPC_NOTIFY pending_only, jamie 2026-11-18). */
+static inline bool pal_chan_notify_reader(struct pal_chan_ring* r, unsigned long widx) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(r->peer_waits_tail, __ATOMIC_RELAXED)
+            || __atomic_load_n(r->peer_waiters, __ATOMIC_RELAXED)
+            || !(__atomic_load_n(r->peer_features, __ATOMIC_RELAXED) & PAL_CHAN_FEAT_WAITERS)) {
+        (void)pal_svsm_channel_notify(widx);
+        return true;
+    }
+    return false;
 }
 
 static inline int pal_chan_send(struct pal_chan_ring* r, const void* msg, uint32_t len) {
@@ -304,7 +347,21 @@ static inline int pal_chan_recv(struct pal_chan_ring* r, void* msg, uint32_t max
         *out_len = n;
     __atomic_store_n(r->head, h + 1, __ATOMIC_RELEASE);
     pal_chan_unlock(r);
-    pal_chan_wake_peer(r, r->peer_waits_head);
+    /* Room for a blocked writer: Notify if it is parked on this head (the
+     * monitor's WAIT_HEAD flag) OR the ring was full when this message was
+     * taken - decided from the peer's tail loaded AFTER the head store, never
+     * from one loaded before the read. A writer that filled the ring in
+     * between and blocked without an arm (a partial park, a thread-level
+     * block) was otherwise missed and waited for an unrelated wake (vaultkraft
+     * ryan/vk-native-net TestPALWasFullGap: 1-75 per 200k messages). The
+     * fence orders the head store before the loads; the writer publishes its
+     * tail before it looks at the head, so either it sees this room or this
+     * sees its full ring. Since the tail only grows, a ring full BEFORE the
+     * read is covered too: at most one Notify per full episode. */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(r->peer_waits_head, __ATOMIC_RELAXED)
+            || (uint32_t)(__atomic_load_n(r->peer_tail, __ATOMIC_ACQUIRE) - h) >= r->depth)
+        (void)pal_svsm_channel_notify(r->window);
     return 0;
 }
 

@@ -418,6 +418,66 @@ static bool sock_chan_gone(PAL_HANDLE handle) {
     return pal_chan_peer_gone(sock_win(handle), sock_side(handle));
 }
 
+/* The reader's half of NOTIFY-ELISION.md: count this thread into WAITERS of
+ * every socket in its watch set that it waits to READ, and say once (FEATURES)
+ * that this side keeps the count. Called by pal_svsm_poll_block BEFORE it
+ * blocks: the scheduler re-tests the set after this (pick_next, before any
+ * park), so a writer that published before the count is seen by the re-test,
+ * and one after it sees the count and Notifies. Loads and stores on this
+ * vault's own control pages; no heap (it runs where pal_svsm_poller_ready
+ * does). */
+size_t pal_svsm_sock_waiters_add(PAL_HANDLE* handles, const uint32_t* events, size_t count,
+                                 struct pal_svsm_waiter* marks, size_t max) {
+    size_t k = 0;
+    for (size_t i = 0; i < count; i++) {
+        PAL_HANDLE h = handles[i];
+        if (!h || h->hdr.type != PAL_TYPE_SOCKET || !(events[i] & PAL_WAIT_READ))
+            continue;
+        if (h->sock.listening || !sock_has_chan(h))
+            continue;
+        unsigned long win = sock_win(h);
+        unsigned char* mine = (unsigned char*)win + 4096 * (1 + sock_side(h));
+        volatile uint32_t* feat = (volatile uint32_t*)(mine + PAL_CHAN_CTL_FEATURES);
+        volatile uint32_t* cnt  = (volatile uint32_t*)(mine + PAL_CHAN_CTL_WAITERS);
+        if (!(__atomic_load_n(feat, __ATOMIC_RELAXED) & PAL_CHAN_FEAT_WAITERS))
+            (void)__atomic_fetch_or(feat, PAL_CHAN_FEAT_WAITERS, __ATOMIC_SEQ_CST);
+        (void)__atomic_fetch_add(cnt, 1, __ATOMIC_SEQ_CST);
+        if (k < max) {
+            marks[k].handle = h;
+            marks[k].win    = win;
+            marks[k].region = pal_chan_u64(win, PAL_CHAN_HDR_REGION);
+            marks[k].word   = cnt;
+            k++;
+        }
+        /* Past `max`: counted and never taken back - too high, which costs
+         * the writer a Notify and nothing else. */
+    }
+    return k;
+}
+
+/* After the block: take the counts back, but only from the channel they were
+ * put on. The handle may have lost its channel meanwhile (closed by another
+ * thread) and the window may hold another channel now; then the count is left
+ * alone - the old page went back to the arena zeroed, and decrementing a new
+ * channel's count could hide its reader from its writer. */
+void pal_svsm_sock_waiters_drop(const struct pal_svsm_waiter* marks, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        PAL_HANDLE h      = marks[i].handle;
+        unsigned long win = marks[i].win;
+        if (!sock_has_chan(h) || sock_win(h) != win)
+            continue;
+        unsigned w = (unsigned)((win - PAL_CHAN_START_VADDR) >> PAL_CHAN_WINDOW_SHIFT);
+        if (!pal_chan_dir_live(PAL_CHAN_DIR_VADDR, w))
+            continue;
+        if (pal_chan_u64(win, PAL_CHAN_HDR_REGION) != marks[i].region)
+            continue;
+        uint32_t c = __atomic_load_n(marks[i].word, __ATOMIC_RELAXED);
+        while (c && !__atomic_compare_exchange_n(marks[i].word, &c, c - 1, /*weak=*/false,
+                                                 __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+            ;
+    }
+}
+
 static void ring_for(PAL_HANDLE handle, struct pal_chan_ring* in,
                      struct pal_chan_ring* out) {
     unsigned long win = sock_win(handle);
@@ -1194,8 +1254,7 @@ static enum mux_head mux_head_step(PAL_HANDLE handle, struct pal_chan_ring* in,
             mux_pool_put_ptr(into);
         return MUX_HEAD_EMPTY;
     }
-    if (was_full)
-        pal_svsm_channel_notify(sock_widx(handle));
+    (void)was_full;   /* pal_chan_recv Notifies a blocked writer itself */
 
     if (pooled && got > PAL_MVMUX_HDR_BYTES) {
         if (!mux_sink_buf(target, into, got, PAL_MVMUX_HDR_BYTES)) {
@@ -2543,8 +2602,11 @@ static int udp_send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
             mux_poll_route(handle, &in);     /* which is what collects it */
             continue;
         }
-        if (pal_chan_send2(&out, fh, fhl, buf, (uint32_t)(sizeof(hdr) + payload)) == 0) {
-            pal_svsm_channel_notify(sock_widx(handle));
+        if (pal_chan_send2_wake(&out, fh, fhl, buf, (uint32_t)(sizeof(hdr) + payload),
+                                /*wake=*/false) == 0) {
+            /* One gated Notify, not the ring's own plus an unconditional one
+             * (NOTIFY-ELISION.md). */
+            pal_chan_notify_reader(&out, sock_widx(handle));
             if (sock_shares(handle))
                 handle->sock.tx_sent++;
             /* The PAYLOAD, not the frame: the caller sent a datagram, not
@@ -2635,8 +2697,6 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
                 if (mh != MUX_HEAD_BLOCKED) {
                     rc = mux_recv_mine(handle, &in, mh, handle->sock.rx, in.slot, &got);
                     if (rc == 0) {
-                        if (was_full)
-                            pal_svsm_channel_notify(sock_widx(handle));
                         if (got < PAL_MVMUX_HDR_BYTES) {
                             handle->sock.broken = true;
                             return -PAL_ERROR_CONNFAILED;
@@ -2659,8 +2719,6 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
         } else {
             rc = pal_chan_recv(&in, handle->sock.rx, in.slot, &got);
             if (rc == 0) {
-                if (was_full)
-                    pal_svsm_channel_notify(sock_widx(handle));
                 handle->sock.rx_len = got;
                 handle->sock.rx_off = 0;
             }
@@ -2943,10 +3001,16 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
         /* Header and body in one message, without building a combined buffer:
          * that buffer was a slot-sized malloc (16,380 bytes then) that missed the PAL slab and
          * cost an mmap and a munmap through the monitor on every send. */
-        if (pal_chan_send2(&out, fh, fhl, msg, (uint32_t)total) == 0) {
-            /* The peer may be parked on this index; the monitor turns that
-             * into one dispatch however many messages went in. */
-            pal_svsm_channel_notify(sock_widx(handle));
+        if (pal_chan_send2_wake(&out, fh, fhl, msg, (uint32_t)total, /*wake=*/false) == 0) {
+            /* The peer may be parked on this index, or have a thread waiting
+             * to read it: then ONE Notify (the monitor turns it into one
+             * dispatch however many messages went in). A reader that is
+             * neither - busy, or blocked on something else - gets none: it
+             * finds the message when it next looks. Before, every send made
+             * the ring's gated Notify AND an unconditional one, and the
+             * second found the reader awake two times in three
+             * (NOTIFY-ELISION.md, IPC_NOTIFY pending_only). */
+            pal_chan_notify_reader(&out, sock_widx(handle));
             if (sock_shares(handle))
                 handle->sock.tx_sent++;
             PAL_SVSM_NET_CTR_INC(sends);
@@ -3125,8 +3189,6 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
         int rc = mux_recv_mine(handle, &in, mh, handle->sock.rx, in.slot, &got);
         if (rc == 0) {
-            if (was_full)
-                pal_svsm_channel_notify(sock_widx(handle));
             handle->sock.rx_len = got;
             handle->sock.rx_off = 0;
             if (handle->sock.muxed) {

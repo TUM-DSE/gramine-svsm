@@ -958,7 +958,20 @@ static const char g_poll_token_storage;
 #define POLL_TOKEN ((PAL_HANDLE)(void*)&g_poll_token_storage)
 
 enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
-    return pal_svsm_thread_block(POLL_TOKEN, deadline_us);
+    /* Counted into the WAITERS of every socket ring this thread waits to read
+     * before it blocks (NOTIFY-ELISION.md): the writers then Notify only
+     * while someone waits. The watch set is read here because
+     * pal_svsm_thread_block clears it on the way out. */
+    struct pal_svsm_waiter marks[PAL_SVSM_WAITER_MARKS];
+    size_t nmarks = 0;
+    if (g_current && g_current->thread.n_watch)
+        nmarks = pal_svsm_sock_waiters_add(g_current->thread.watch_handles,
+                                           g_current->thread.watch_events,
+                                           g_current->thread.n_watch, marks,
+                                           PAL_SVSM_WAITER_MARKS);
+    enum pal_svsm_wait_result r = pal_svsm_thread_block(POLL_TOKEN, deadline_us);
+    pal_svsm_sock_waiters_drop(marks, nmarks);
+    return r;
 }
 
 /*
