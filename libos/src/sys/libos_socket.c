@@ -855,9 +855,13 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
     if (handle->type != TYPE_SOCK) {
         return -ENOTSOCK;
     }
-    if (!WITHIN_MASK(*flags, MSG_PEEK | MSG_DONTWAIT | MSG_TRUNC)) {
+    if (!WITHIN_MASK(*flags, MSG_PEEK | MSG_DONTWAIT | MSG_TRUNC | MSG_NOSIGNAL)) {
         return -EOPNOTSUPP;
     }
+    /* MSG_NOSIGNAL means nothing on a receive and Linux ignores it there; libmemcached passes it to
+     * every recv(), and refusing it (EOPNOTSUPP) failed every memcached reply - SYSTEM ERROR, then
+     * a reconnect per call (MicroVault socialNetwork pilot, 2026-11-19). */
+    *flags &= ~MSG_NOSIGNAL;
 
     /* Note this only indicates whether this operation was requested to be nonblocking. If it's
      * `false`, but the handle is in nonblocking mode, this read won't block. */
