@@ -42,6 +42,7 @@ extern bool g_pal_svsm_fork_report;
 /* svsm.stall_report (pal_main.c): when every thread has been blocked a while,
  * say what each is blocked in (pal_threading.c). Diagnosis only. */
 extern bool g_pal_svsm_stall_report;
+void pal_svsm_stall_note_taker(PAL_HANDLE event);   /* pal_threading.c */
 #define PAL_SVSM_DBG_MAPS 16
 struct pal_svsm_dbg_map {
     uintptr_t addr;

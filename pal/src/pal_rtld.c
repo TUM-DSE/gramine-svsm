@@ -559,8 +559,11 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
         size_t map_size = c->map_end - c->start;
         if (!g_entrypoint_lo || (uintptr_t)map_addr < g_entrypoint_lo)
             g_entrypoint_lo = (uintptr_t)map_addr;
-        if ((uintptr_t)map_addr + map_size > g_entrypoint_hi)
-            g_entrypoint_hi = (uintptr_t)map_addr + map_size;
+        /* alloc_end, not map_end: the .bss (where the LibOS's static locks
+         * are) is the zero-filled tail past the file's data. */
+        uintptr_t seg_hi = (uintptr_t)(c->alloc_end + g_entrypoint_map.l_base_diff);
+        if (seg_hi > g_entrypoint_hi)
+            g_entrypoint_hi = seg_hi;
 
         /* Writable segments need a private copy (relocations, .data); read-only
            and text segments are mapped as they are, so a LibOS that comes from

@@ -433,6 +433,23 @@ static const struct pal_svsm_dbg_map* stall_map_of(uint64_t a) {
 #define LIBOS_TCB_NR_OFF     40
 #define LIBOS_TCB_PREFIX_OFF 72
 
+/* An auto-clear event was just taken by the running context: remember who, so
+ * a stall on it can name its holder even when the lock is inside a heap
+ * object and even when the holder has since exited (stall_report). */
+void pal_svsm_stall_note_taker(PAL_HANDLE ev) {
+    PAL_HANDLE me = g_current;
+    ev->event.taker = me;
+    ev->event.taker_nr = -1;
+    ev->event.taker_prefix[0] = '\0';
+    PAL_TCB* pt = me ? (PAL_TCB*)me->thread.tcb : NULL;
+    if (pt) {
+        const char* lt = (const char*)pt->libos_tcb;
+        memcpy(&ev->event.taker_nr, lt + LIBOS_TCB_NR_OFF, sizeof(long));
+        memcpy(ev->event.taker_prefix, lt + LIBOS_TCB_PREFIX_OFF, sizeof(ev->event.taker_prefix) - 1);
+        ev->event.taker_prefix[sizeof(ev->event.taker_prefix) - 1] = '\0';
+    }
+}
+
 /*
  * svsm.stall_report: when a thread has been blocked STALL_AFTER_US and the
  * last report is STALL_EVERY_US old, say for every such thread what it is in:
@@ -485,6 +502,19 @@ static void stall_report(uint64_t now) {
         pal_entrypoint_range(&base, &lo, &hi);
         log_error("stall-report: libos base %#lx image %#lx..%#lx; busiest event %p waiters %u",
                   (unsigned long)base, (unsigned long)lo, (unsigned long)hi, top, top_w);
+        if (top) {
+            bool alive = false;
+            PAL_HANDLE v = g_current;
+            do {
+                if (v == top->event.taker)
+                    alive = true;
+                v = v->thread.next;
+            } while (v != g_current);
+            log_error("stall-report: busiest event last taken by ctx %p %s (nr %ld then), %s; "
+                      "now state %d", top->event.taker, top->event.taker_prefix,
+                      top->event.taker_nr, alive ? "still on the ring" : "NO LONGER ON THE RING",
+                      alive ? (int)top->event.taker->thread.state : -1);
+        }
         if (top && lo && hi > lo) {
             unsigned hits = 0;
             for (uintptr_t a = ALIGN_UP(lo, 8); a + 16 <= hi && hits < 4; a += 8) {

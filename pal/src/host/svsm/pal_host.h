@@ -72,6 +72,12 @@ struct pal_handle_inner {
             uint32_t waiters_cnt;
             uint32_t signaled;
             bool auto_clear;
+            /* svsm.stall_report only: who last took this auto-clear event (a
+             * LibOS lock's holder, while it is unsignaled), the syscall it was
+             * in, and its LibOS prefix. */
+            PAL_HANDLE taker;
+            long       taker_nr;
+            char       taker_prefix[24];
         } event;
 
         /* An in-process eventfd (pal_eventfd.c): the counter itself. A

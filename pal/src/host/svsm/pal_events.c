@@ -81,6 +81,8 @@ int _PalEventWait(PAL_HANDLE handle, uint64_t* timeout_us) {
         }
 
         if (!needs_sleep) {
+            if (handle->event.auto_clear && g_pal_svsm_stall_report)
+                pal_svsm_stall_note_taker(handle);
             ret = 0;
             break;
         }
