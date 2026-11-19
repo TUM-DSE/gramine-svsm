@@ -463,6 +463,40 @@ static void stall_report(uint64_t now) {
     for (size_t i = 0; i < g_pal_svsm_dbg_maps_n; i++)
         log_error("stall-report: map %#lx %s", (unsigned long)g_pal_svsm_dbg_maps[i].addr,
                   g_pal_svsm_dbg_maps[i].name);
+    /* The event most of the stalled wait on, if it is a LibOS lock's: a
+     * `struct libos_lock` is { PAL_HANDLE lock; unsigned int owner; }, so the
+     * word after the handle's address in the LibOS image is the owner's tid -
+     * who is holding it - and the offset from the LibOS base names the lock
+     * (nm libsysdb.so). A lock inside a heap object is not found this way. */
+    {
+        PAL_HANDLE top = NULL;
+        uint32_t top_w = 0;
+        PAL_HANDLE u = g_current;
+        do {
+            PAL_HANDLE on = u->thread.state == PAL_SVSM_THREAD_BLOCKED ? u->thread.waiting_on : NULL;
+            if (on && on->hdr.type == PAL_TYPE_EVENT && on->event.waiters_cnt > top_w) {
+                top = on;
+                top_w = on->event.waiters_cnt;
+            }
+            u = u->thread.next;
+        } while (u != g_current);
+        uintptr_t base, lo, hi;
+        pal_entrypoint_range(&base, &lo, &hi);
+        log_error("stall-report: libos base %#lx image %#lx..%#lx; busiest event %p waiters %u",
+                  (unsigned long)base, (unsigned long)lo, (unsigned long)hi, top, top_w);
+        if (top && lo && hi > lo) {
+            unsigned hits = 0;
+            for (uintptr_t a = ALIGN_UP(lo, 8); a + 16 <= hi && hits < 4; a += 8) {
+                if (*(const uint64_t*)a != (uint64_t)top)
+                    continue;
+                hits++;
+                log_error("stall-report: busiest event held at libos+%#lx owner tid %u",
+                          (unsigned long)(a - base), *(const uint32_t*)(a + 8));
+            }
+            if (!hits)
+                log_error("stall-report: busiest event not in the LibOS image (a heap lock)");
+        }
+    }
     size_t lines = 0;
     t = g_current;
     do {

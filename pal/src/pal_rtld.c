@@ -50,6 +50,14 @@ extern const elf_ehdr_t __ehdr_start __attribute__((visibility("hidden")));
 static const char* g_pal_soname = NULL;
 static struct link_map g_pal_map;
 static struct link_map g_entrypoint_map;
+/* The entrypoint's (the LibOS's) load base and extent, for host diagnostics
+ * that must find LibOS data without a debug build (svsm.stall_report). */
+static uintptr_t g_entrypoint_lo, g_entrypoint_hi;
+void pal_entrypoint_range(uintptr_t* base, uintptr_t* lo, uintptr_t* hi) {
+    *base = g_entrypoint_map.l_base_diff;
+    *lo   = g_entrypoint_lo;
+    *hi   = g_entrypoint_hi;
+}
 
 static const unsigned char g_expected_elf_header[EI_NIDENT] = {
     [EI_MAG0] = ELFMAG0,
@@ -549,6 +557,10 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
 
         void*  map_addr = (void*)(c->start + g_entrypoint_map.l_base_diff);
         size_t map_size = c->map_end - c->start;
+        if (!g_entrypoint_lo || (uintptr_t)map_addr < g_entrypoint_lo)
+            g_entrypoint_lo = (uintptr_t)map_addr;
+        if ((uintptr_t)map_addr + map_size > g_entrypoint_hi)
+            g_entrypoint_hi = (uintptr_t)map_addr + map_size;
 
         /* Writable segments need a private copy (relocations, .data); read-only
            and text segments are mapped as they are, so a LibOS that comes from
