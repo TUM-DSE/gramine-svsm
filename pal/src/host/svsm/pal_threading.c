@@ -283,6 +283,8 @@ size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial) {
     return gather_arms(arms, max, partial);
 }
 
+static void stall_report(uint64_t now);   /* svsm.stall_report, below */
+
 /* Give the vCPU back until `deadline_us`, in slices, so that the monitor and
  * the host both still get a turn while this vault has nothing to run. */
 static void idle_until(uint64_t deadline_us) {

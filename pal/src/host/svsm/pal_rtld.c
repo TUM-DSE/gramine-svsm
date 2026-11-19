@@ -8,6 +8,8 @@
 #include <asm/errno.h>
 
 #include "api.h"
+#include "pal.h"
+#include "pal_internal.h"
 #include "pal_rtld.h"
 #include "pal_svsm.h"
 
