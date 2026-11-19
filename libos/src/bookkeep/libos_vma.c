@@ -646,8 +646,13 @@ int run_test_vma_mgr_reentry(void) {
         cached = v;
     }
     int ret = 0;
+    log_always("vma_mgr_reentry: cache drained, locking (owner %u, me %u)",
+               (unsigned)vma_mgr_lock.owner, (unsigned)get_cur_tid());
     lock(&vma_mgr_lock);
+    log_always("vma_mgr_reentry: locked (owner %u); alloc from the manager",
+               (unsigned)vma_mgr_lock.owner);
     struct libos_vma* first = alloc_vma();     /* from the manager */
+    log_always("vma_mgr_reentry: first %p; draining", first);
     if (!first)
         ret = -1;
     struct libos_vma* drained = NULL;
@@ -657,7 +662,9 @@ int run_test_vma_mgr_reentry(void) {
         drained = v;
         n++;
     }
+    log_always("vma_mgr_reentry: drained %lu; alloc from the reserve", (unsigned long)n);
     struct libos_vma* from_reserve = ret == 0 ? alloc_vma() : NULL;   /* the reserve */
+    log_always("vma_mgr_reentry: from_reserve %p; freeing", from_reserve);
     if (ret == 0 && (!from_reserve || !vma_is_reserve(from_reserve)))
         ret = -2;
     if (from_reserve)
@@ -669,6 +676,7 @@ int run_test_vma_mgr_reentry(void) {
         drained = v->next_free;
         free_mem_obj_to_mgr(vma_mgr, v);
     }
+    log_always("vma_mgr_reentry: freed; unlocking");
     unlock(&vma_mgr_lock);
     while (cached) {
         v = cached;
