@@ -40,6 +40,7 @@
 #include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
+#include "pal_rtld.h"
 #include "pal_svsm.h"
 #include "pal_svsm_chan.h"
 
