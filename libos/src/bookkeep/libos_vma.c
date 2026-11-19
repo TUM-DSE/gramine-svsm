@@ -519,6 +519,18 @@ static struct libos_vma* alloc_vma(void) {
     }
 
     lock(&vma_mgr_lock);
+    /* LOOK AGAIN: the cache was empty before the lock, but taking the lock
+     * can block, and on the svsm PAL a block runs the scheduler on this very
+     * thread, which frees exited threads' stacks (pal_threading.c reap_stack)
+     * - and that free comes back through free_vma into THIS thread's cache.
+     * The enlarge below needs the cache empty (it lends one tmp vma through
+     * it); a cache refilled behind its back made add_to_thread_vma_cache
+     * fail and BUG() (socialNetwork pilot run21, social-graph-service,
+     * 2026-11-19: "Failed to add tmp vma to cache!"). A vma that turned up
+     * there is simply the one to use. */
+    vma = get_from_thread_vma_cache();
+    if (vma)
+        goto out_unlock;
     vma = get_mem_obj_from_mgr(vma_mgr);
     if (!vma) {
         /* `enlarge_mem_mgr` below will call _vma_malloc, which uses at most 1 vma - so we
