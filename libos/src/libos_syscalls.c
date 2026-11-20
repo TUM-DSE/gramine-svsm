@@ -34,13 +34,20 @@ static inline uint64_t sysprof_tsc(void) {
     return __builtin_ia32_rdtsc();
 }
 
-noreturn void libos_emulate_syscall(PAL_CONTEXT* context) {
+/* The body, specialised twice by `prof` (a constant at both call sites): the
+ * profile-off copy is exactly the dispatcher without the profile - no extra
+ * live values across the syscall, no spill - and the profiled one is out of
+ * line. Step 25 put the profile's work in the one body, guarded by a branch:
+ * UnixBench's syscall test lost 3.4% with the profile OFF (ledger end
+ * benchmark 18 -> 29, bisected to step 25's PAL pair, 2026-11-20). */
+static inline __attribute__((always_inline)) noreturn void emulate_syscall(PAL_CONTEXT* context,
+                                                                           const bool prof) {
     LIBOS_TCB_SET(context.regs, context);
 
     unsigned long sysnr = pal_context_get_syscall(context);
     arch_syscall_arg_t ret = 0;
     uint64_t prof_t0 = 0, prof_m0 = 0, prof_p0 = 0;
-    if (g_libos_sysprof) {
+    if (prof) {
         prof_t0 = sysprof_tsc();
         PalProfileThreadCycles(&prof_m0, &prof_p0);
     }
@@ -90,7 +97,7 @@ out:
     LIBOS_TCB_SET(context.syscall_nr, -1);
     LIBOS_TCB_SET(context.regs, NULL);
 
-    if (prof_t0 && sysnr < 512) {
+    if (prof && prof_t0 && sysnr < 512) {
         uint64_t m1, p1;
         PalProfileThreadCycles(&m1, &p1);
         uint64_t* row = &g_libos_sysprof[sysnr * 4];
@@ -101,6 +108,18 @@ out:
     }
 
     return_from_syscall(context);
+}
+
+static noreturn __attribute__((noinline, cold)) void libos_emulate_syscall_prof(PAL_CONTEXT* context) {
+    emulate_syscall(context, true);
+}
+
+noreturn void libos_emulate_syscall(PAL_CONTEXT* context) {
+    /* One load and a predicted-not-taken branch: the profile is off in every
+     * vault but a [svsm] debug one that asked for it. */
+    if (__builtin_expect(g_libos_sysprof != NULL, 0))
+        libos_emulate_syscall_prof(context);
+    emulate_syscall(context, false);
 }
 
 __attribute_no_sanitize_address

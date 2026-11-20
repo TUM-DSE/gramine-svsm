@@ -140,9 +140,15 @@ bool pal_svsm_profile_start(void) {
     return true;
 }
 
-void monitor_call(struct monitor_call_data* data){
+/* Each call's body twice, specialised by `prof` (a constant at both call
+ * sites): the profile-off copy is the call without the profile - no TSC read,
+ * no extra value live across the instruction - and the profiled one is out
+ * of line (step 25's single body cost every vault's syscalls with the profile
+ * OFF: UnixBench syscall -3.4%, pipe -2.5%; 2026-11-20). */
+static inline __attribute__((always_inline)) void monitor_call_body(struct monitor_call_data* data,
+                                                                    const bool prof) {
     uint64_t code = data->rax;
-    uint64_t prof_t0 = g_pal_svsm_prof_on ? prof_tsc() : 0;
+    uint64_t prof_t0 = prof ? prof_tsc() : 0;
 
     /* r8 and r9: the monitor writes r8 for some calls (DeviceMmio,
      * service_calls.rs) whichever helper issued them. memory: it reads
@@ -156,17 +162,30 @@ void monitor_call(struct monitor_call_data* data){
         );
 
     monitor_call_check(code, data->rax);
-    if (prof_t0)
+    if (prof)
         prof_account(code, prof_tsc() - prof_t0);
 }
 
-void extended_monitor_call(struct monitor_call_data* data) {
+static __attribute__((noinline, cold)) void monitor_call_prof(struct monitor_call_data* data) {
+    monitor_call_body(data, true);
+}
+
+void monitor_call(struct monitor_call_data* data){
+    if (__builtin_expect(g_pal_svsm_prof_on, 0)) {
+        monitor_call_prof(data);
+        return;
+    }
+    monitor_call_body(data, false);
+}
+
+static inline __attribute__((always_inline)) void extended_monitor_call_body(
+        struct monitor_call_data* data, const bool prof) {
     // Additional registers are used
     // This only affects the gramine side
     // since the Monitor receives the whole
     // VMSA regardless
     uint64_t code = data->rax;
-    uint64_t prof_t0 = g_pal_svsm_prof_on ? prof_tsc() : 0;
+    uint64_t prof_t0 = prof ? prof_tsc() : 0;
 
     /* r8 and r9 come BACK too: the monitor answers in them for some calls
      * (DeviceMmio: r8 the BAR's physical address, r9 the granted function).
@@ -186,8 +205,20 @@ void extended_monitor_call(struct monitor_call_data* data) {
         );
 
     monitor_call_check(code, data->rax);
-    if (prof_t0)
+    if (prof)
         prof_account(code, prof_tsc() - prof_t0);
+}
+
+static __attribute__((noinline, cold)) void extended_monitor_call_prof(struct monitor_call_data* data) {
+    extended_monitor_call_body(data, true);
+}
+
+void extended_monitor_call(struct monitor_call_data* data) {
+    if (__builtin_expect(g_pal_svsm_prof_on, 0)) {
+        extended_monitor_call_prof(data);
+        return;
+    }
+    extended_monitor_call_body(data, false);
 }
 
 size_t max_string_length = 100;
