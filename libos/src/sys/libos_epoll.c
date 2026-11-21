@@ -172,7 +172,19 @@ void maybe_epoll_et_trigger(struct libos_handle* handle, int ret, bool in, bool 
     switch (handle->type) {
         case TYPE_SOCK:
         case TYPE_PIPE:
-            needs_et = ret == -EAGAIN || was_partial;
+            /*
+             * Re-arm the read side after EVERY successful read too, not only after EAGAIN or a
+             * partial read. A read that takes exactly the bytes asked for can drain the handle
+             * (nginx reads a request body of Content-Length bytes, checks FIONREAD, and then waits
+             * for the next edge on a keep-alive connection): Linux reports new data after that
+             * as a new edge, but without the re-arm this handle was never polled for reading
+             * again and the next request sat unread until the peer closed (MicroVault
+             * socialNetwork pilot, 2026-11-19). Re-arming only lets epoll look at the handle
+             * again; PAL still reports EPOLLIN only for data that is there, so a drained handle
+             * produces no spurious event (an undrained one may be reported again, which an
+             * EPOLLET reader handles like any edge).
+             */
+            needs_et = ret == -EAGAIN || was_partial || (in && ret == 0);
             break;
         case TYPE_EVENTFD:
             needs_et = handle->info.eventfd.is_semaphore ? ret == -EAGAIN : true;

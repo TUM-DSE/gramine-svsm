@@ -360,6 +360,58 @@ static struct libos_lock vma_mgr_lock;
 static MEM_MGR vma_mgr = NULL;
 
 /*
+ * `alloc_vma`/`free_vma` re-entered by the thread that already holds
+ * `vma_mgr_lock` (svsm, the socialNetwork pilot, 2026-11-19).
+ *
+ * `alloc_vma` enlarges the manager under the lock and lends `_vma_malloc` the
+ * one vma it needs through the thread cache. On the svsm PAL more can happen
+ * inside that window: the PAL's own heap grows, and its bookkeeping upcall
+ * (`pal_mem_bkeep_alloc` -> `bkeep_mmap_any`) wants a SECOND vma - which found
+ * the cache empty, locked `vma_mgr_lock` again, and the thread waited on
+ * itself. Every other thread then piled up behind it (clone, mmap, recvfrom,
+ * a fault: 31 waiters), and social-graph-service never answered again.
+ *
+ * So a holder never locks again: it takes from the manager directly (it holds
+ * the lock), and if the manager is empty - it is, mid-enlarge - from this
+ * small reserve, which it refills afterwards. Reserve objects go back to the
+ * reserve when freed, never to the manager. The holder is known by the lock's
+ * owner tid, which only the holder can see equal to its own.
+ */
+#define VMA_RESERVE 8
+static struct libos_vma g_vma_reserve[VMA_RESERVE];
+static bool g_vma_reserve_used[VMA_RESERVE];
+static bool g_vma_reentry_logged;
+
+static bool vma_mgr_held_by_me(void) {
+    unsigned int me = get_cur_tid();
+    return me != 0 && __atomic_load_n(&vma_mgr_lock.owner, __ATOMIC_RELAXED) == me;
+}
+
+static bool vma_is_reserve(struct libos_vma* vma) {
+    return vma >= &g_vma_reserve[0] && vma < &g_vma_reserve[VMA_RESERVE];
+}
+
+/* Under `vma_mgr_lock`, held by the caller. */
+static struct libos_vma* alloc_vma_reentrant(void* caller) {
+    if (!g_vma_reentry_logged) {
+        g_vma_reentry_logged = true;
+        log_warning("alloc_vma re-entered under vma_mgr_lock (caller %p): served without "
+                    "re-locking", caller);
+    }
+    struct libos_vma* vma = get_mem_obj_from_mgr(vma_mgr);
+    if (vma)
+        return vma;
+    for (size_t i = 0; i < VMA_RESERVE; i++) {
+        if (!g_vma_reserve_used[i]) {
+            g_vma_reserve_used[i] = true;
+            return &g_vma_reserve[i];
+        }
+    }
+    log_error("alloc_vma re-entered under vma_mgr_lock with the reserve exhausted");
+    return NULL;
+}
+
+/*
  * We use a following per-thread caching mechanism of VMAs:
  * Each thread has a singly linked list of free VMAs, with maximal length of 3.
  * Allocation first checks if there is a cached VMA, deallocation adds it to cache, unless it is
@@ -461,7 +513,24 @@ static struct libos_vma* alloc_vma(void) {
         goto out;
     }
 
+    if (vma_mgr_held_by_me()) {
+        vma = alloc_vma_reentrant(__builtin_return_address(0));
+        goto out;
+    }
+
     lock(&vma_mgr_lock);
+    /* LOOK AGAIN: the cache was empty before the lock, but taking the lock
+     * can block, and on the svsm PAL a block runs the scheduler on this very
+     * thread, which frees exited threads' stacks (pal_threading.c reap_stack)
+     * - and that free comes back through free_vma into THIS thread's cache.
+     * The enlarge below needs the cache empty (it lends one tmp vma through
+     * it); a cache refilled behind its back made add_to_thread_vma_cache
+     * fail and BUG() (socialNetwork pilot run21, social-graph-service,
+     * 2026-11-19: "Failed to add tmp vma to cache!"). A vma that turned up
+     * there is simply the one to use. */
+    vma = get_from_thread_vma_cache();
+    if (vma)
+        goto out_unlock;
     vma = get_mem_obj_from_mgr(vma_mgr);
     if (!vma) {
         /* `enlarge_mem_mgr` below will call _vma_malloc, which uses at most 1 vma - so we
@@ -500,6 +569,33 @@ static struct libos_vma* alloc_vma(void) {
         }
         remove_from_thread_vma_cache(&tmp_vma);
 
+        /* And the reserve: whatever a re-entry inside that enlarge took from it
+         * moves to manager memory now that there is some, so the reserve is
+         * whole again for the next time (alloc_vma_reentrant). */
+        for (size_t i = 0; i < VMA_RESERVE; i++) {
+            if (!__atomic_load_n(&g_vma_reserve_used[i], __ATOMIC_ACQUIRE))
+                continue;
+            struct libos_vma* r = &g_vma_reserve[i];
+            struct libos_vma* m = get_mem_obj_from_mgr(vma_mgr);
+            if (!m)
+                break;
+            bool moved = false;
+            spinlock_lock(&vma_tree_lock);
+            struct avl_tree_node* rn = &r->tree_node;
+            if (rn->parent || vma_tree.root == rn) {
+                copy_vma(r, m);
+                avl_tree_swap_node(&vma_tree, rn, &m->tree_node);
+                moved = true;
+            }
+            spinlock_unlock(&vma_tree_lock);
+            if (moved) {
+                __atomic_store_n(&g_vma_reserve_used[i], false, __ATOMIC_RELEASE);
+            } else {
+                /* Taken but not (yet) in the tree: its taker still has it. */
+                free_mem_obj_to_mgr(vma_mgr, m);
+            }
+        }
+
         vma = get_mem_obj_from_mgr(vma_mgr);
     }
 
@@ -523,13 +619,84 @@ static void free_vma(struct libos_vma* vma) {
         put_handle(vma->file);
     }
 
+    if (vma_is_reserve(vma)) {
+        /* Not the manager's memory: back to the reserve. The flag is only
+         * ever set and cleared under `vma_mgr_lock`... except here, where the
+         * freeing thread may not hold it - so a plain store of `false`, which
+         * the next taker (under the lock) sees or does not; at worst one slot
+         * stays used a little longer. */
+        __atomic_store_n(&g_vma_reserve_used[vma - g_vma_reserve], false, __ATOMIC_RELEASE);
+        return;
+    }
+
     if (add_to_thread_vma_cache(vma)) {
+        return;
+    }
+
+    if (vma_mgr_held_by_me()) {
+        free_mem_obj_to_mgr(vma_mgr, vma);
         return;
     }
 
     lock(&vma_mgr_lock);
     free_mem_obj_to_mgr(vma_mgr, vma);
     unlock(&vma_mgr_lock);
+}
+
+/* gramine_run_test("vma_mgr_reentry"): what the socialNetwork pilot's
+ * social-graph-service deadlocked on - alloc_vma and free_vma by the thread
+ * that already holds vma_mgr_lock, with the thread cache empty, from the
+ * manager and then (manager drained) from the reserve. Before the fix the
+ * first alloc_vma waited on the lock its own thread held: the call never
+ * returns. 0 when every allocation succeeded and the reserve was used. */
+#define REENTRY_DRAIN_MAX 65536
+int run_test_vma_mgr_reentry(void) {
+    /* Empty this thread's vma cache through the API (alloc_vma takes from it
+     * first), so the allocations under the lock below must take the
+     * re-entrant path rather than the cache. */
+    struct libos_vma* pre[VMA_CACHE_SIZE];
+    size_t npre = 0;
+    while (npre < VMA_CACHE_SIZE && cache2size(LIBOS_TCB_GET(vma_cache)) > 0) {
+        pre[npre] = alloc_vma();
+        if (!pre[npre])
+            break;
+        npre++;
+    }
+    log_always("vma_mgr_reentry: cache emptied (%lu taken, %lu left); locking",
+               (unsigned long)npre, (unsigned long)cache2size(LIBOS_TCB_GET(vma_cache)));
+    int ret = 0;
+    lock(&vma_mgr_lock);
+    struct libos_vma* first = alloc_vma();     /* under the lock: the manager */
+    if (!first)
+        ret = -1;
+    log_always("vma_mgr_reentry: first %p; draining the manager", first);
+    struct libos_vma* drained = NULL;
+    size_t n = 0;
+    struct libos_vma* v;
+    while (ret == 0 && n < REENTRY_DRAIN_MAX && (v = get_mem_obj_from_mgr(vma_mgr))) {
+        v->next_free = drained;
+        drained = v;
+        n++;
+    }
+    struct libos_vma* from_reserve = ret == 0 ? alloc_vma() : NULL;   /* the reserve */
+    log_always("vma_mgr_reentry: drained %lu; from_reserve %p", (unsigned long)n, from_reserve);
+    if (ret == 0 && (!from_reserve || !vma_is_reserve(from_reserve)))
+        ret = -2;
+    if (from_reserve)
+        free_vma(from_reserve);
+    if (first)
+        free_vma(first);
+    while (drained) {
+        v = drained;
+        drained = v->next_free;
+        free_mem_obj_to_mgr(vma_mgr, v);
+    }
+    unlock(&vma_mgr_lock);
+    for (size_t k = 0; k < npre; k++)
+        free_vma(pre[k]);
+    log_always("vma_mgr_reentry: drained %lu, reserve %s, ret %d", (unsigned long)n,
+               ret == -2 ? "NOT used" : "used", ret);
+    return ret;
 }
 
 static void free_vmas_freelist(struct libos_vma* vma) {

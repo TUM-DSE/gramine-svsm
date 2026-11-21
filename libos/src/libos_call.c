@@ -14,6 +14,7 @@
 #include "libos_entry.h"
 #include "libos_rwlock.h"
 #include "libos_utils.h"
+#include "libos_vma.h"
 
 /* Test: do nothing, return success */
 static int run_test_pass(void) {
@@ -68,6 +69,7 @@ static const struct libos_test {
     int (*func)(void);
 } tests[] = {
     { "pass", &run_test_pass },
+    { "vma_mgr_reentry", &run_test_vma_mgr_reentry },
 #ifdef UBSAN
     { "ubsan_int_overflow", &run_test_ubsan_int_overflow },
 #endif

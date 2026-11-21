@@ -40,10 +40,36 @@
 /* Spins before parking. A peer that is running answers in far less than the
  * monitor entry a park costs (PLAN.md's channel plan, D1). */
 #define PAL_SOCK_SPINS 200
-/* How many times a grant may be re-asked when the target is mid-dispatch.
- * Each try waits ~200 us, so this is about a tenth of a second - longer
- * than any dispatch and shorter than a client would notice. */
-#define PAL_GRANT_TRIES 500
+/* How long a grant may be re-asked while the target is mid-dispatch
+ * (STATUS_BAD_STATE: the monitor needs the target's entry lock, which a
+ * resident service holds through every dispatch).
+ *
+ * It was 500 tries of ~200 us - a tenth of a second, "longer than any
+ * dispatch". A dispatch, yes; not a service that is dispatched back to back.
+ * The socialNetwork pilot's services were busy for most of every 100 ms
+ * under load, so a cold pool's first burst of connects lost some (4 of 962
+ * registrations refused, each then ~150 follows "not registered"; 134842
+ * busy refusals in the run). On Linux the same connect waits in the
+ * listener's backlog and succeeds. So: by time, 2 s - a connect timeout's
+ * order, not a dispatch's - the first 10 ms at 200 us a try (what a free
+ * slot costs to find), then 1 ms a try, so a long wait is ~2000 monitor
+ * calls rather than 10000. */
+#define PAL_GRANT_BUSY_US      2000000UL
+#define PAL_GRANT_BUSY_FAST_US   10000UL
+
+static int sock_block(PAL_HANDLE handle, pal_wait_flags_t want, const uint64_t* arms,
+                      size_t n_arms, uint64_t max_us, bool interruptible);
+
+/* Wait before the next try at a busy target; false once the budget that
+ * started at `t0` is spent. */
+static bool grant_busy_wait(uint64_t t0) {
+    uint64_t el = pal_svsm_now_usec() - t0;
+    if (el >= PAL_GRANT_BUSY_US)
+        return false;
+    (void)sock_block(NULL, 0, NULL, 0, el < PAL_GRANT_BUSY_FAST_US ? 200 : 1000,
+                     /*interruptible=*/false);
+    return true;
+}
 /* RATE_LIMITED is a different wait: the monitor refills a vault's grant
  * bucket at 1000/s, so one token time is 1 ms, and the budget is its own -
  * a busy target's tries are not spent on pacing, nor the other way round.
@@ -181,6 +207,12 @@ void pal_svsm_net_ctr_report(void) {
                c.connect_refused[3], c.connect_refused[4], c.connect_refused[5],
                c.connect_refused[6], c.connect_refused[7]);
 #line 96
+    uint64_t ca = __atomic_load_n(&g_pal_svsm_net_ctr.conn_async, __ATOMIC_RELAXED);
+    if (ca)
+        log_always("pal_net: conn_async %lu ok %lu failed %lu retries %lu", ca,
+                   __atomic_load_n(&g_pal_svsm_net_ctr.conn_async_ok, __ATOMIC_RELAXED),
+                   __atomic_load_n(&g_pal_svsm_net_ctr.conn_async_failed, __ATOMIC_RELAXED),
+                   __atomic_load_n(&g_pal_svsm_net_ctr.conn_async_retries, __ATOMIC_RELAXED));
 }
 
 /* A forked child has the parent's counts in its copy of this page; start
@@ -1865,6 +1897,105 @@ static void sock_report_local(PAL_HANDLE handle, struct pal_socket_addr* out) {
  * records a default destination. `addr` may be NULL, which is how a sendto
  * on a socket nobody connected gets its channel - see udp_send.
  */
+/* A NON-BLOCKING connect to a [[svsm.peer]] does not wait for a busy target.
+ *
+ * The grant needs the target's entry lock, and a resident service holds it
+ * through every dispatch (SHM-3). Waiting for it in-line - F7's 2 s by time -
+ * is right for a blocking connect, but an event loop's connect is
+ * non-blocking precisely so that it never waits: nginx's did, and every
+ * other connection it served waited with it (the full socialNetwork's wrk2
+ * runs, 2026-11-19: 0 requests in 30 s). So: EINPROGRESS at once, and the
+ * grant retried from this socket's poll (pal_svsm_sock_connect_state), paced
+ * as the in-line loop is, within the same budget. It lands as writable; the
+ * budget spent, or any refusal, is a hang-up, which the LibOS's
+ * check_connect_inprogress_on_poll turns into SO_ERROR ECONNREFUSED. */
+static int connect_go_pending(PAL_HANDLE handle, const struct pal_sock_grant* req, int peer,
+                              struct pal_socket_addr* out_local_addr, bool* out_inprogress) {
+    struct pal_sock_grant* saved = malloc(sizeof(*saved));
+    if (!saved) {
+        __atomic_sub_fetch(&g_pal_svsm_peers[peer].conns, 1, __ATOMIC_ACQ_REL);
+        return -PAL_ERROR_NOMEM;
+    }
+    memcpy(saved, req, sizeof(*saved));
+    uint64_t now = pal_svsm_now_usec();
+    handle->sock.conn_req     = saved;
+    handle->sock.conn_peer    = (uint8_t)(peer + 1);
+    handle->sock.conn_t0_us   = now;
+    handle->sock.conn_next_us = now + 200;
+    handle->sock.conn_failed  = false;
+    handle->sock.conn_pending = true;
+    PAL_SVSM_NET_CTR_INC(conn_async);
+    sock_report_local(handle, out_local_addr);
+    if (out_inprogress)
+        *out_inprogress = true;
+    return 0;
+}
+
+/* The pending connect is over: the saved request goes; a failure gives back
+ * the peer entry's `conns` (a success keeps it until sock_destroy, as a
+ * connect that granted in-line does). */
+static void connect_pending_end(PAL_HANDLE handle, bool failed) {
+    free(handle->sock.conn_req);
+    handle->sock.conn_req     = NULL;
+    handle->sock.conn_pending = false;
+    handle->sock.conn_failed  = failed;
+    if (failed) {
+        __atomic_sub_fetch(&g_pal_svsm_peers[handle->sock.conn_peer - 1].conns, 1,
+                           __ATOMIC_ACQ_REL);
+        PAL_SVSM_NET_CTR_INC(conn_async_failed);
+    } else {
+        PAL_SVSM_NET_CTR_INC(conn_async_ok);
+    }
+}
+
+int pal_svsm_sock_connect_state(PAL_HANDLE handle) {
+    if (!handle || handle->hdr.type != PAL_TYPE_SOCKET)
+        return 0;
+    if (handle->sock.conn_failed)
+        return 2;
+    if (!handle->sock.conn_pending)
+        return 0;
+    /* Only the polling thread itself, outside an upcall: a grant is a monitor
+     * call, and the end of one frees the saved request. The scheduler's
+     * re-test of a blocked poller just says "not yet"; the poller's own wait
+     * is bounded by conn_next_us (pal_object.c) and asks again then. */
+    if (pal_svsm_heap_unsafe() || handle->sock.closed)
+        return 1;
+    uint64_t now = pal_svsm_now_usec();
+    if (now < handle->sock.conn_next_us)
+        return 1;
+    uint64_t addr_out = 0;
+    int64_t win = pal_svsm_channel_grant(handle->sock.conn_req, sizeof(struct pal_sock_grant),
+                                         &addr_out);
+    if (win == PAL_SVSM_STATUS_BAD_STATE || win == PAL_SVSM_STATUS_RATE_LIMITED) {
+        uint64_t el = now - handle->sock.conn_t0_us;
+        if (el < PAL_GRANT_BUSY_US) {
+            handle->sock.conn_next_us = now + (win == PAL_SVSM_STATUS_RATE_LIMITED ? PAL_GRANT_TOKEN_US
+                                               : el < PAL_GRANT_BUSY_FAST_US ? 200 : 1000);
+            PAL_SVSM_NET_CTR_INC(conn_async_retries);
+            return 1;
+        }
+    }
+    if (win >= 0) {
+        /* As the in-line connect takes a granted window (_PalSocketConnect). */
+        uint32_t nwin = 0;
+        int why = pal_chan_hdr_check(addr_out, (unsigned)win, &nwin);
+        if (why == PAL_CHAN_HDR_OK) {
+            sock_claim((unsigned)win, nwin);
+            handle->sock.peer_route = handle->sock.conn_peer;
+            handle->sock.win  = addr_out;
+            handle->sock.widx = (unsigned long)win;
+            handle->sock.side = 0;
+            connect_pending_end(handle, /*failed=*/false);
+            return 0;
+        }
+        sock_refuse((unsigned)win, why, pal_chan_u64(addr_out, PAL_CHAN_HDR_REGION));
+        pal_svsm_channel_close((uint64_t)win);
+    }
+    connect_pending_end(handle, /*failed=*/true);
+    return 2;
+}
+
 int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
                       struct pal_socket_addr* out_local_addr, bool* out_inprogress) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
@@ -2008,8 +2139,13 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
 
     if (granting)
         g_mux_granting = true;
-    for (int busy = 0, paced = 0; busy < PAL_GRANT_TRIES && paced < PAL_GRANT_RATE_TRIES;) {
+    uint64_t busy_t0 = 0;
+    /* Non-blocking, to a peer: never waits here (connect_go_pending). */
+    bool async = pr && !mvnet && handle->sock.is_nonblocking;
+    for (int paced = 0; paced < PAL_GRANT_RATE_TRIES;) {
         win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
+        if (async && (win == PAL_SVSM_STATUS_BAD_STATE || win == PAL_SVSM_STATUS_RATE_LIMITED))
+            return connect_go_pending(handle, &req, peer, out_local_addr, out_inprogress);
         if (win == PAL_SVSM_STATUS_RATE_LIMITED) {
             /* This vault's own grant rate: a token comes back in 1 ms. */
             paced++;
@@ -2020,8 +2156,10 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
             break;
         /* Nothing here announces the target's dispatch ending: the bound
          * alone, and the vault's other threads run meanwhile. */
-        busy++;
-        (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
+        if (!busy_t0)
+            busy_t0 = pal_svsm_now_usec();
+        if (!grant_busy_wait(busy_t0))
+            break;
     }
     /* Cleared here, and nothing below yields before g_pal_svsm_mux_open is
      * set (or this returns): PAL text is not preempted, so a waiter next
@@ -2202,7 +2340,8 @@ static int mux_ensure(void) {
     uint64_t addr_out = 0;
     int64_t win = -1;
     g_mux_granting = true;
-    for (int busy = 0, paced = 0; busy < PAL_GRANT_TRIES && paced < PAL_GRANT_RATE_TRIES;) {
+    uint64_t busy_t0 = 0;
+    for (int paced = 0; paced < PAL_GRANT_RATE_TRIES;) {
         win = pal_svsm_channel_grant(&req, sizeof(req), &addr_out);
         if (win == PAL_SVSM_STATUS_RATE_LIMITED) {
             paced++;
@@ -2211,8 +2350,10 @@ static int mux_ensure(void) {
         }
         if (win != PAL_SVSM_STATUS_BAD_STATE)
             break;
-        busy++;
-        (void)sock_block(NULL, 0, NULL, 0, 200, /*interruptible=*/false);
+        if (!busy_t0)
+            busy_t0 = pal_svsm_now_usec();
+        if (!grant_busy_wait(busy_t0))
+            break;
     }
     g_mux_granting = false;
     if (win < 0)
@@ -3684,6 +3825,15 @@ static int sock_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static void sock_destroy(PAL_HANDLE handle) {
+    if (handle->sock.conn_pending) {
+        /* Closed while its connect was still trying: not a failure anyone
+         * will read, but the request and the peer entry's count go back. */
+        free(handle->sock.conn_req);
+        handle->sock.conn_req = NULL;
+        handle->sock.conn_pending = false;
+        __atomic_sub_fetch(&g_pal_svsm_peers[handle->sock.conn_peer - 1].conns, 1,
+                           __ATOMIC_ACQ_REL);
+    }
     inb_unlisten(handle);           /* a listener never shut down: tell the service */
     inb_conn_gone(handle);
     if (handle->sock.peer_route) {

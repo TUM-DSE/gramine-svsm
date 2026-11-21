@@ -47,6 +47,8 @@ struct link_map {
 
 /* for GDB debugging */
 void _PalDebugMapAdd(const char* name, void* addr);
+/* The entrypoint (LibOS) load base and image extent (pal_rtld.c), for host diagnostics. */
+void pal_entrypoint_range(uintptr_t* base, uintptr_t* lo, uintptr_t* hi);
 void _PalDebugMapRemove(void* addr);
 int _PalDebugDescribeLocation(uintptr_t addr, char* buf, size_t buf_size);
 

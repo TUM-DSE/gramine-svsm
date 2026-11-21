@@ -204,6 +204,7 @@ int pal_svsm_jit_declare(uint64_t want);
  * measured manifest; refused when hosted or on a host without AVX-512. */
 int pal_svsm_avx512_declare(uint64_t want);
 int pal_svsm_console_declare(uint64_t monitor);
+int pal_svsm_resv_cap_declare(uint64_t pages);
 void pal_svsm_console_write(const void* buf, size_t size);
 /* Declare what the apps on this base image may claim in their frames
  * (0x4FFFFFDC). Once, from the zygote, and it locks this image out of

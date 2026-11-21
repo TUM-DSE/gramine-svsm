@@ -72,6 +72,12 @@ struct pal_handle_inner {
             uint32_t waiters_cnt;
             uint32_t signaled;
             bool auto_clear;
+            /* svsm.stall_report only: who last took this auto-clear event (a
+             * LibOS lock's holder, while it is unsignaled), the syscall it was
+             * in, and its LibOS prefix. */
+            PAL_HANDLE taker;
+            long       taker_nr;
+            char       taker_prefix[24];
         } event;
 
         /* An in-process eventfd (pal_eventfd.c): the counter itself. A
@@ -97,6 +103,7 @@ struct pal_handle_inner {
             PAL_HANDLE next;         /* round-robin ring, never NULL */
             PAL_HANDLE waiting_on;   /* what it is parked on, NULL if nothing */
             uint64_t   deadline_us;  /* absolute wake time, 0 = no deadline */
+            uint64_t   blocked_at_us; /* when it last blocked (svsm.stall_report) */
             uint32_t   state;        /* enum pal_svsm_thread_state */
             bool       has_deadline;
             bool       interrupted;  /* _PalThreadResume landed */
@@ -295,6 +302,19 @@ struct pal_handle_inner {
              * for [svsm.net] (DSB M1): a raw channel of its own, counted in
              * that entry's `conns` until destroyed. */
             uint8_t  peer_route;
+            /* A NON-BLOCKING connect to a [[svsm.peer]] whose target was busy
+             * (the grant answered BAD_STATE): connect() returned EINPROGRESS
+             * and the grant is retried from this socket's poll, in the
+             * polling thread's own context, until it lands (writable) or
+             * the budget runs out (`conn_failed`: hang-up, ECONNREFUSED).
+             * `conn_req` is the saved grant request (pal_sockets.c), owned
+             * here while pending. The social livelock fix (2026-11-19). */
+            bool     conn_pending;
+            bool     conn_failed;
+            uint8_t  conn_peer;          /* 1 + the peer entry, as peer_route */
+            uint64_t conn_t0_us;         /* first BAD_STATE */
+            uint64_t conn_next_us;       /* not before this */
+            void*    conn_req;
             /* A STREAM socket's bound port, as a label only (what accept
              * reports as the local end; nothing is bound on it). Kept apart
              * from bind_port, which a datagram socket and the mvnet

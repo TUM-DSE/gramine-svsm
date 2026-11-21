@@ -824,6 +824,19 @@ int pal_svsm_console_declare(uint64_t monitor) {
     return data.rcx == 0 ? 0 : -1;
 }
 
+/* ResvCapDeclare (0x4FFFFFD7): this lineage's reservation-table cap in pages
+ * (rbx, 1..64; [svsm] max_reservation_pages). Made once, in the zygote's
+ * setup. -> rcx = 0 accepted. */
+int pal_svsm_resv_cap_declare(uint64_t pages) {
+    struct monitor_call_data data;
+    data.rax = 0x4FFFFFD7;
+    data.rbx = pages;
+    data.rcx = 0;
+    data.rdx = 0;
+    monitor_call(&data);
+    return data.rcx == 0 ? 0 : -1;
+}
+
 /* ConsoleWrite (0x4FFFFFD8): up to 32 bytes a call, packed little-endian
  * into rbx, rdx, r8, r9, rcx = how many; a newline ends a line. Answered
  * only for a lineage that declared "monitor". */

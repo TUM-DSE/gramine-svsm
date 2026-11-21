@@ -855,9 +855,13 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
     if (handle->type != TYPE_SOCK) {
         return -ENOTSOCK;
     }
-    if (!WITHIN_MASK(*flags, MSG_PEEK | MSG_DONTWAIT | MSG_TRUNC)) {
+    if (!WITHIN_MASK(*flags, MSG_PEEK | MSG_DONTWAIT | MSG_TRUNC | MSG_NOSIGNAL)) {
         return -EOPNOTSUPP;
     }
+    /* MSG_NOSIGNAL means nothing on a receive and Linux ignores it there; libmemcached passes it to
+     * every recv(), and refusing it (EOPNOTSUPP) failed every memcached reply - SYSTEM ERROR, then
+     * a reconnect per call (MicroVault socialNetwork pilot, 2026-11-19). */
+    *flags &= ~MSG_NOSIGNAL;
 
     /* Note this only indicates whether this operation was requested to be nonblocking. If it's
      * `false`, but the handle is in nonblocking mode, this read won't block. */
@@ -991,6 +995,10 @@ ssize_t do_recvmsg(struct libos_handle* handle, struct iovec* iov, size_t iov_le
 
         /* If this is not a peek recv, we could also query PAL for more data, but it's cumbersome
          * to implement. Instead just let the user app handle the partial read. */
+        if (!(*flags & MSG_PEEK)) {
+            /* a read served from the peek buffer re-arms EPOLLET too (maybe_epoll_et_trigger) */
+            maybe_epoll_et_trigger(handle, /*ret=*/0, /*in=*/true, /*was_partial=*/false);
+        }
         ret = size;
         goto out;
     }

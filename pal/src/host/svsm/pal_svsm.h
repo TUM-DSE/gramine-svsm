@@ -43,6 +43,17 @@ typedef struct pal_svsm_tcb {
 } PAL_SVSM_TCB;
 
 extern bool g_pal_svsm_fork_report;
+/* svsm.stall_report (pal_main.c): when every thread has been blocked a while,
+ * say what each is blocked in (pal_threading.c). Diagnosis only. */
+extern bool g_pal_svsm_stall_report;
+void pal_svsm_stall_note_taker(PAL_HANDLE event);   /* pal_threading.c */
+#define PAL_SVSM_DBG_MAPS 16
+struct pal_svsm_dbg_map {
+    uintptr_t addr;
+    char      name[48];
+};
+extern struct pal_svsm_dbg_map g_pal_svsm_dbg_maps[PAL_SVSM_DBG_MAPS];
+extern size_t g_pal_svsm_dbg_maps_n;
 extern bool g_pal_svsm_console_monitor;   /* [svsm] console = "monitor" */
 /* The syscall profile (LIBOS-SYSCALL-PROFILE.md): on only for a debug vault that asked. */
 extern bool g_pal_svsm_prof_on;
@@ -330,7 +341,17 @@ struct pal_svsm_net_ctr {
      * detail, netsvc mvnet.h MVNET_REF_*; [0] a service that does not say). */
     uint64_t connect_refused[8];
 #line 234
+    /* Non-blocking peer connects that found their target busy and went on
+     * from poll (EINPROGRESS), and how they ended; the poll-time retries. */
+    uint64_t conn_async;
+    uint64_t conn_async_ok;
+    uint64_t conn_async_failed;
+    uint64_t conn_async_retries;
 };
+/* A non-blocking peer connect still in progress (pal_sockets.c): 0 none or
+ * done, 1 pending, 2 failed. Retries the grant when one is due, in the
+ * calling thread's context only (never from the scheduler's re-test). */
+int pal_svsm_sock_connect_state(PAL_HANDLE handle);
 extern struct pal_svsm_net_ctr g_pal_svsm_net_ctr;
 #define PAL_SVSM_NET_CTR_INC(field) \
     ((void)__atomic_fetch_add(&g_pal_svsm_net_ctr.field, 1, __ATOMIC_RELAXED))

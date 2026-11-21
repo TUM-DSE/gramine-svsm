@@ -29,6 +29,10 @@ struct libos_tcb {
     void*                vma_cache;
     char                 log_prefix[32];
 };
+/* Read by the svsm PAL's stall report (pal_threading.c LIBOS_TCB_*_OFF). */
+static_assert(offsetof(struct libos_tcb, context.regs) == 32, "svsm stall_report offsets");
+static_assert(offsetof(struct libos_tcb, context.syscall_nr) == 40, "svsm stall_report offsets");
+static_assert(offsetof(struct libos_tcb, log_prefix) == 72, "svsm stall_report offsets");
 
 static_assert(offsetof(PAL_TCB, libos_tcb) + offsetof(libos_tcb_t, libos_syscall_entry)
                 == GRAMINE_SYSCALL_OFFSET, "GRAMINE_SYSCALL_OFFSET must match");

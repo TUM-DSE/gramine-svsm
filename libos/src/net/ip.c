@@ -257,6 +257,17 @@ static int disconnect(struct libos_handle* handle) {
 }
 
 static int set_tcp_option(struct libos_handle* handle, int optname, void* optval, size_t len) {
+    if (optname == TCP_DEFER_ACCEPT) {
+        /* A no-op the app can read back (libos_sock_handle.tcp_defer_accept). */
+        if (len < sizeof(int)) {
+            return -EINVAL;
+        }
+        int v;
+        memcpy(&v, optval, sizeof(v));
+        __atomic_store_n(&handle->info.sock.tcp_defer_accept, v < 0 ? 0 : v, __ATOMIC_RELAXED);
+        return 0;
+    }
+
     PAL_STREAM_ATTR attr;
     int ret = PalStreamAttributesQueryByHandle(handle->info.sock.pal_handle, &attr);
     if (ret < 0) {
@@ -536,6 +547,14 @@ static int setsockopt(struct libos_handle* handle, int level, int optname, void*
 }
 
 static int get_tcp_option(struct libos_handle* handle, int optname, void* optval, size_t* len) {
+    if (optname == TCP_DEFER_ACCEPT) {
+        int val = __atomic_load_n(&handle->info.sock.tcp_defer_accept, __ATOMIC_RELAXED);
+        if (*len > sizeof(val)) {
+            *len = sizeof(val);
+        }
+        memcpy(optval, &val, *len);
+        return 0;
+    }
     PAL_STREAM_ATTR attr;
     int ret = PalStreamAttributesQueryByHandle(handle->info.sock.pal_handle, &attr);
     if (ret < 0) {

@@ -40,6 +40,7 @@
 #include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
+#include "pal_rtld.h"
 #include "pal_svsm.h"
 #include "pal_svsm_chan.h"
 
@@ -283,6 +284,8 @@ size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial) {
     return gather_arms(arms, max, partial);
 }
 
+static void stall_report(uint64_t now);   /* svsm.stall_report, below */
+
 /* Give the vCPU back until `deadline_us`, in slices, so that the monitor and
  * the host both still get a turn while this vault has nothing to run. */
 static void idle_until(uint64_t deadline_us) {
@@ -291,6 +294,7 @@ static void idle_until(uint64_t deadline_us) {
         if (now >= deadline_us)
             return;
         uint64_t left = deadline_us - now;
+        stall_report(now);
 
         /* Every context is blocked, so there is nothing for this vault
          * to do with a processor. Ask the monitor for it back, WATCHING
@@ -403,6 +407,251 @@ static void idle_until(uint64_t deadline_us) {
     }
 }
 
+bool g_pal_svsm_stall_report = false;
+static uint64_t g_stall_last_us;
+
+#define STALL_AFTER_US  (5UL * 1000 * 1000)
+#define STALL_EVERY_US  (30UL * 1000 * 1000)
+#define STALL_MAX_LINES 400
+
+/* An address as `map+offset` against the nearest map at or below it, or NULL
+ * if no map is within 64 MiB below it (not code we know about). */
+static const struct pal_svsm_dbg_map* stall_map_of(uint64_t a) {
+    const struct pal_svsm_dbg_map* best = NULL;
+    for (size_t i = 0; i < g_pal_svsm_dbg_maps_n; i++) {
+        uintptr_t b = g_pal_svsm_dbg_maps[i].addr ? g_pal_svsm_dbg_maps[i].addr : 0x400000;
+        if (a >= b && a - b < (64UL << 20) && (!best || b > (best->addr ? best->addr : 0x400000)))
+            best = &g_pal_svsm_dbg_maps[i];
+    }
+    return best;
+}
+
+/* The LibOS's per-thread block (libos_tcb.h), as far as this reads it: the
+ * PAL cannot include the LibOS headers, so the offsets are pinned here and
+ * by a static_assert next to struct libos_tcb. */
+#define LIBOS_TCB_REGS_OFF   32
+#define LIBOS_TCB_NR_OFF     40
+#define LIBOS_TCB_PREFIX_OFF 72
+
+/* An auto-clear event was just taken by the running context: remember who, so
+ * a stall on it can name its holder even when the lock is inside a heap
+ * object and even when the holder has since exited (stall_report). */
+void pal_svsm_stall_note_taker(PAL_HANDLE ev) {
+    PAL_HANDLE me = g_current;
+    ev->event.taker = me;
+    ev->event.taker_nr = -1;
+    ev->event.taker_prefix[0] = '\0';
+    PAL_TCB* pt = me ? (PAL_TCB*)me->thread.tcb : NULL;
+    if (pt) {
+        const char* lt = (const char*)pt->libos_tcb;
+        memcpy(&ev->event.taker_nr, lt + LIBOS_TCB_NR_OFF, sizeof(long));
+        memcpy(ev->event.taker_prefix, lt + LIBOS_TCB_PREFIX_OFF, sizeof(ev->event.taker_prefix) - 1);
+        ev->event.taker_prefix[sizeof(ev->event.taker_prefix) - 1] = '\0';
+    }
+}
+
+/* A parked context's call chain, as far as a scan can say: the words between
+ * its saved rsp and the top of the stack it is on (the LibOS's per-thread
+ * stack while in a syscall) that fall in the LibOS image or the PAL's text,
+ * as libos+off / pal+off for addr2line against libsysdb.so / libpal.so. */
+extern char __text_start;
+extern char __text_end;
+static void stall_chain(PAL_HANDLE t) {
+    uintptr_t base, lo, hi;
+    pal_entrypoint_range(&base, &lo, &hi);
+    uintptr_t sp = (uintptr_t)t->thread.rsp, top = 0;
+    PAL_TCB* pt = (PAL_TCB*)t->thread.tcb;
+    if (pt)
+        memcpy(&top, (const char*)pt->libos_tcb + 24, sizeof top);   /* libos_stack_bottom */
+    if (!sp || (sp & 7))
+        return;
+    if (!top || top <= sp || top - sp > (64UL << 10))
+        top = sp + (16UL << 10);
+    char b[400];
+    size_t bl = 0;
+    unsigned n = 0;
+    for (uintptr_t a = sp; a + 8 <= top && n < 48; a += 8) {
+        uint64_t w = *(const uint64_t*)a;
+        const char* tag = NULL;
+        uint64_t off = 0;
+        if (w >= lo && w < hi) {
+            tag = "libos";
+            off = w - base;
+        } else if (w >= (uint64_t)&__text_start && w < (uint64_t)&__text_end) {
+            tag = "pal";
+            off = w;
+        }
+        if (!tag)
+            continue;
+        bl += snprintf(b + bl, sizeof(b) - bl, " %s+%#lx", tag, (unsigned long)off);
+        n++;
+        if (bl > sizeof(b) - 32) {
+            log_error("stall-report: chain %p:%s", t, b);
+            bl = 0;
+            b[0] = '\0';
+        }
+    }
+    if (bl)
+        log_error("stall-report: chain %p:%s", t, b);
+}
+
+/*
+ * svsm.stall_report: when a thread has been blocked STALL_AFTER_US and the
+ * last report is STALL_EVERY_US old, say for every such thread what it is in:
+ * its LibOS prefix (process:thread), the syscall and its first three
+ * arguments, the user rip/rsp it entered with, what the PAL has it waiting on
+ * (an event, or the sockets a poll watches and whether each is readable NOW -
+ * which is the difference between a peer that never answered and a wake that
+ * was lost), and the return addresses on its user stack that fall in a known
+ * map, as map+offset for addr2line. Diagnosis only (the socialNetwork pilot's
+ * wedge, 2026-11-19); at ERROR level because service manifests log at error.
+ */
+static void stall_report(uint64_t now) {
+    if (!g_pal_svsm_stall_report || now - g_stall_last_us < STALL_EVERY_US)
+        return;
+    size_t total = 0, stalled = 0;
+    PAL_HANDLE t = g_current;
+    do {
+        total++;
+        if (t->thread.state == PAL_SVSM_THREAD_BLOCKED
+                && now - t->thread.blocked_at_us >= STALL_AFTER_US)
+            stalled++;
+        t = t->thread.next;
+    } while (t != g_current);
+    if (!stalled)
+        return;
+    g_stall_last_us = now;
+    log_error("stall-report: %lu threads, %lu blocked >= 5 s; pal anchor stall_report=%p",
+              (unsigned long)total, (unsigned long)stalled, (void*)&stall_report);
+    for (size_t i = 0; i < g_pal_svsm_dbg_maps_n; i++)
+        log_error("stall-report: map %#lx %s", (unsigned long)g_pal_svsm_dbg_maps[i].addr,
+                  g_pal_svsm_dbg_maps[i].name);
+    /* The event most of the stalled wait on, if it is a LibOS lock's: a
+     * `struct libos_lock` is { PAL_HANDLE lock; unsigned int owner; }, so the
+     * word after the handle's address in the LibOS image is the owner's tid -
+     * who is holding it - and the offset from the LibOS base names the lock
+     * (nm libsysdb.so). A lock inside a heap object is not found this way. */
+    {
+        PAL_HANDLE top = NULL;
+        uint32_t top_w = 0;
+        PAL_HANDLE u = g_current;
+        do {
+            PAL_HANDLE on = u->thread.state == PAL_SVSM_THREAD_BLOCKED ? u->thread.waiting_on : NULL;
+            if (on && on->hdr.type == PAL_TYPE_EVENT && on->event.waiters_cnt > top_w) {
+                top = on;
+                top_w = on->event.waiters_cnt;
+            }
+            u = u->thread.next;
+        } while (u != g_current);
+        uintptr_t base, lo, hi;
+        pal_entrypoint_range(&base, &lo, &hi);
+        log_error("stall-report: libos base %#lx image %#lx..%#lx; busiest event %p waiters %u",
+                  (unsigned long)base, (unsigned long)lo, (unsigned long)hi, top, top_w);
+        if (top) {
+            bool alive = false;
+            PAL_HANDLE v = g_current;
+            do {
+                if (v == top->event.taker)
+                    alive = true;
+                v = v->thread.next;
+            } while (v != g_current);
+            log_error("stall-report: busiest event last taken by ctx %p %s (nr %ld then), %s; "
+                      "now state %d", top->event.taker, top->event.taker_prefix,
+                      top->event.taker_nr, alive ? "still on the ring" : "NO LONGER ON THE RING",
+                      alive ? (int)top->event.taker->thread.state : -1);
+            if (alive && top->event.taker != g_current)
+                stall_chain(top->event.taker);
+        }
+        if (top && lo && hi > lo) {
+            unsigned hits = 0;
+            for (uintptr_t a = ALIGN_UP(lo, 8); a + 16 <= hi && hits < 4; a += 8) {
+                if (*(const uint64_t*)a != (uint64_t)top)
+                    continue;
+                hits++;
+                log_error("stall-report: busiest event held at libos+%#lx owner tid %u",
+                          (unsigned long)(a - base), *(const uint32_t*)(a + 8));
+            }
+            if (!hits)
+                log_error("stall-report: busiest event not in the LibOS image (a heap lock)");
+        }
+    }
+    size_t lines = 0;
+    t = g_current;
+    do {
+        /* EVERY context, not only the stalled: the one holding what the
+         * stalled wait for is usually not stalled itself (runnable, or in a
+         * wait it keeps re-entering). */
+        bool stalled_t = t->thread.state == PAL_SVSM_THREAD_BLOCKED
+                         && now - t->thread.blocked_at_us >= STALL_AFTER_US;
+        if (lines++ >= STALL_MAX_LINES) {
+            log_error("stall-report: ... more not shown");
+            break;
+        }
+        PAL_TCB* pt = (PAL_TCB*)t->thread.tcb;
+        const char* lt = pt ? (const char*)pt->libos_tcb : NULL;
+        char prefix[33] = "?";
+        long nr = -1;
+        PAL_CONTEXT* regs = NULL;
+        if (lt) {
+            memcpy(prefix, lt + LIBOS_TCB_PREFIX_OFF, 32);
+            prefix[32] = '\0';
+            memcpy(&nr, lt + LIBOS_TCB_NR_OFF, sizeof nr);
+            memcpy(&regs, lt + LIBOS_TCB_REGS_OFF, sizeof regs);
+        }
+        char w[160] = "";
+        size_t wl = 0;
+        for (size_t i = 0; i < t->thread.n_watch && i < 3 && t->thread.watch_handles; i++) {
+            PAL_HANDLE h = t->thread.watch_handles[i];
+            if (!h)
+                continue;
+            bool sock = h->hdr.type == PAL_TYPE_SOCKET;
+            wl += snprintf(w + wl, sizeof(w) - wl, " w%lu:type%d%s",
+                           (unsigned long)i, (int)h->hdr.type,
+                           sock ? (pal_svsm_sock_readable(h) ? ":READABLE" : ":empty") : "");
+            if (wl >= sizeof(w))
+                break;
+        }
+        char f[320] = "";
+        size_t fl = 0;
+        unsigned found = 0;
+        if (regs && regs->rsp && (regs->rsp & 7) == 0) {
+            const uint64_t* sp = (const uint64_t*)regs->rsp;
+            /* 2 KiB: a thread's frames are well inside it, and a read past the
+             * top of a mapped stack would fault the vault. */
+            for (size_t k = 0; k < 256 && found < 10 && fl < sizeof(f) - 40; k++) {
+                const struct pal_svsm_dbg_map* m = stall_map_of(sp[k]);
+                if (!m)
+                    continue;
+                uintptr_t b = m->addr ? m->addr : 0;
+                fl += snprintf(f + fl, sizeof(f) - fl, " %s+%#lx", m->name[0] ? m->name : "?",
+                               (unsigned long)(sp[k] - b));
+                found++;
+            }
+        }
+        PAL_SVSM_TCB* st = (PAL_SVSM_TCB*)t->thread.tcb;
+        PAL_HANDLE on = t->thread.waiting_on;
+        char ev[48] = "";
+        if (on && on->hdr.type == PAL_TYPE_EVENT)
+            snprintf(ev, sizeof ev, " ev sig %u waiters %u%s",
+                     (unsigned)__atomic_load_n(&on->event.signaled, __ATOMIC_RELAXED),
+                     (unsigned)on->event.waiters_cnt, on->event.auto_clear ? " auto" : "");
+        log_error("stall-report: %s%s ctx %p state %u holds %ld/%ld blocked %lu ms on %p(type %d)%s "
+                  "deadline %ld ms nr %ld args %#lx %#lx %#lx rip %#lx rsp %#lx arms %u%s watch %lu%s |%s",
+                  stalled_t ? "STALLED " : "", prefix, t, (unsigned)t->thread.state,
+                  st ? (long)st->lock_holds : -1L, st ? (long)st->paused_holds : -1L,
+                  t->thread.state == PAL_SVSM_THREAD_BLOCKED
+                      ? (unsigned long)((now - t->thread.blocked_at_us) / 1000) : 0UL,
+                  on, on ? (int)on->hdr.type : -1, ev,
+                  t->thread.has_deadline ? (long)((int64_t)(t->thread.deadline_us - now) / 1000)
+                                         : -1L,
+                  nr, regs ? (unsigned long)regs->rdi : 0UL, regs ? (unsigned long)regs->rsi : 0UL,
+                  regs ? (unsigned long)regs->rdx : 0UL, regs ? (unsigned long)regs->rip : 0UL,
+                  regs ? (unsigned long)regs->rsp : 0UL, (unsigned)t->thread.n_arms,
+                  t->thread.arms_partial ? "+" : "", (unsigned long)t->thread.n_watch, w, f);
+        t = t->thread.next;
+    } while (t != g_current);
+}
+
 /*
  * The next context to run, or NULL when nothing will ever be runnable again.
  * Expires deadlines on the way past, and waits for the nearest one if that is
@@ -467,6 +716,7 @@ static PAL_HANDLE pick_next(void) {
              * but a thread waiting on a ring has something that can wake
              * it, and `epoll_wait(-1)` on a channel socket is the
              * ordinary shape of a server rather than a bug. */
+            stall_report(now);
             uint64_t arms[PAL_SVSM_PARK_ARMS];
             bool partial = false;
             size_t n = gather_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
@@ -926,6 +1176,8 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
     self->thread.deadline_us  = deadline_us ? *deadline_us : 0;
     self->thread.timed_out    = false;
     self->thread.state        = PAL_SVSM_THREAD_BLOCKED;
+    if (g_pal_svsm_stall_report)
+        self->thread.blocked_at_us = pal_svsm_now_usec();
     refresh_preempt_wanted();
 
     schedule();

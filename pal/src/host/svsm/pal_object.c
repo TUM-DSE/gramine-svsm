@@ -48,6 +48,20 @@ static pal_wait_flags_t poll_one(PAL_HANDLE handle, pal_wait_flags_t want) {
              * and nothing it did not ask for (pal_svsm.h). */
             if (want & PAL_SVSM_WAIT_SOCK)
                 return pal_svsm_sock_wait_ready(handle, want);
+            /* A non-blocking connect still in progress (pal_sockets.c
+             * connect_go_pending): nothing yet - or, its grant refused or its
+             * budget spent, readable, writable AND hung up, which is what a
+             * refused connect is on Linux and what the LibOS's
+             * check_connect_inprogress_on_poll reads as ECONNREFUSED. Asked
+             * here, from the polling thread, is where the grant is retried. */
+            switch (pal_svsm_sock_connect_state(handle)) {
+                case 1:
+                    return 0;
+                case 2:
+                    return (want & (PAL_WAIT_READ | PAL_WAIT_WRITE)) | PAL_WAIT_HANG_UP;
+                default:
+                    break;
+            }
             /* Two loads from the ring's control words, no monitor call -
              * which is what makes a poll over many sockets cheap. A peer
              * that has gone reads as readable, so the caller gets its
@@ -212,6 +226,20 @@ int _PalStreamsWaitEvents(size_t count, PAL_HANDLE* handle_array, pal_wait_flags
             eff_deadline = pal_svsm_now_usec() + PAL_SVSM_SHARED_PIPE_POLL_US;
             if (!dl || eff_deadline < *dl)
                 dl = &eff_deadline;
+        }
+        /* A pending non-blocking connect is retried from poll_one: the wait
+         * must end when its next try is due, or a poller with no other
+         * event would sleep through its own connect. */
+        uint64_t conn_dl = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (handle_array[i] && handle_array[i]->hdr.type == PAL_TYPE_SOCKET
+                    && handle_array[i]->sock.conn_pending) {
+                uint64_t c = handle_array[i]->sock.conn_next_us;
+                if (!dl || c < *dl) {
+                    conn_dl = c;
+                    dl = &conn_dl;
+                }
+            }
         }
         /* A LISTENING socket has no word to arm either: a new connection is
          * a window the monitor publishes, and the cause it posts for that
