@@ -94,6 +94,29 @@ static inline bool prof_is_park(uint64_t code) {
     return code == 0x4FFFFFE1 || code == 0x4FFFFFDE || code == 0x4FFFFFD5;
 }
 
+/* The vault's own run, Park to Park (SOCIAL-VAULT-KNEE.md, 2026-11-22): from
+ * the return of one park-type call to the entry of the next, whichever thread
+ * makes them - the time this vault ran, measured from inside. The monitor's
+ * counted run (sched/apps.rs run_one) brackets the same span plus its dispatch
+ * and park halves, so the two differ by the run boundaries. Kept in mc row 0x01
+ * (no monitor call has that low byte): count = intervals, ticks = their sum,
+ * so GetStat prints it as " 01:N:us" with no monitor change. A vault has one
+ * vCPU, so one clock is enough; 0 = no park returned yet. */
+#define PROF_AWAKE_ROW 0x01
+static uint64_t g_prof_awake_since;
+
+static inline void prof_awake(uint64_t code, uint64_t t0, uint64_t t1) {
+    if (!prof_is_park(code))
+        return;
+    uint64_t since = __atomic_load_n(&g_prof_awake_since, __ATOMIC_RELAXED);
+    if (since && t0 > since) {
+        uint64_t* row = g_pal_svsm_prof.mc[PROF_AWAKE_ROW];
+        __atomic_fetch_add(&row[0], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&row[1], t0 - since, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&g_prof_awake_since, t1, __ATOMIC_RELAXED);
+}
+
 static inline void prof_account(uint64_t code, uint64_t ticks) {
     uint64_t* row = g_pal_svsm_prof.mc[code & 0xff];
     __atomic_fetch_add(&row[0], 1, __ATOMIC_RELAXED);
@@ -162,8 +185,11 @@ static inline __attribute__((always_inline)) void monitor_call_body(struct monit
         );
 
     monitor_call_check(code, data->rax);
-    if (prof)
-        prof_account(code, prof_tsc() - prof_t0);
+    if (prof) {
+        uint64_t prof_t1 = prof_tsc();
+        prof_account(code, prof_t1 - prof_t0);
+        prof_awake(code, prof_t0, prof_t1);
+    }
 }
 
 static __attribute__((noinline, cold)) void monitor_call_prof(struct monitor_call_data* data) {
@@ -205,8 +231,11 @@ static inline __attribute__((always_inline)) void extended_monitor_call_body(
         );
 
     monitor_call_check(code, data->rax);
-    if (prof)
-        prof_account(code, prof_tsc() - prof_t0);
+    if (prof) {
+        uint64_t prof_t1 = prof_tsc();
+        prof_account(code, prof_t1 - prof_t0);
+        prof_awake(code, prof_t0, prof_t1);
+    }
 }
 
 static __attribute__((noinline, cold)) void extended_monitor_call_prof(struct monitor_call_data* data) {
