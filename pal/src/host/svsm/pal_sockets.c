@@ -2985,6 +2985,50 @@ static int udp_recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len,
     }
 }
 
+/* pal_chan_send2_wake with the body as an iovec: the frame header, then the
+ * first `total` bytes of iov[0..iov_len) copied straight into the ring slot,
+ * under the ring lock - where send2 copies its body and where the length check
+ * and the tail publish are, so no slot ever holds half a message. `total` is
+ * the caller's clamp (a stream send takes at most one slot; the LibOS handles
+ * the short write). This replaces the gather buffer of a writev/sendmsg send:
+ * malloc(total) above the PAL slab's top class (8,272 B) is system_malloc, an
+ * mmap and a munmap through the monitor per send - nginx answers every HTTP
+ * request with a writev, 0.66 VirtAlloc + VirtFree pairs per request at
+ * ~47 us (SOCIAL-VAULT-KNEE.md 5). One copy fewer, nothing held. */
+static int sock_chan_sendv_wake(struct pal_chan_ring* r, const void* hdr, uint32_t hdr_len,
+                                const struct iovec* iov, size_t iov_len, uint64_t total,
+                                bool wake) {
+    uint64_t len64 = (uint64_t)hdr_len + total;
+    if (!pal_chan_present(r) || r->slot < 4 || len64 > r->slot - 4)
+        return -1;
+    uint32_t len = (uint32_t)len64;
+    if (pal_chan_lock(r) != 0)
+        return -1;
+    uint32_t t = *r->tail, h = *r->peer_head;
+    if (t - h >= r->depth) {
+        pal_chan_unlock(r);
+        return -1;
+    }
+    unsigned char* s = r->slots + (unsigned long)(t & (r->depth - 1)) * r->slot;
+    if (hdr_len)
+        memcpy(s + 4, hdr, hdr_len);
+    uint64_t off = 0;
+    for (size_t i = 0; i < iov_len && off < total; i++) {
+        uint64_t take = iov[i].iov_len;
+        if (take > total - off)
+            take = total - off;
+        if (take)
+            memcpy(s + 4 + hdr_len + off, iov[i].iov_base, take);
+        off += take;
+    }
+    memcpy(s, &len, 4);
+    __atomic_store_n(r->tail, t + 1, __ATOMIC_RELEASE);
+    pal_chan_unlock(r);
+    if (wake)
+        pal_chan_wake_peer(r, r->peer_waits_tail);
+    return 0;
+}
+
 int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* out_size,
                    struct pal_socket_addr* addr, bool force_nonblocking) {
     if (handle->hdr.type != PAL_TYPE_SOCKET)
@@ -3041,26 +3085,10 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
      * pal_chan_send copies out of it into the ring either way. What goes away
      * is one copy and one mmap/munmap pair.
      */
-    char* buf = NULL;
-    const void* msg;
-    if (iov_len == 1 && total) {
-        msg = iov[0].iov_base;
-    } else {
-        /* A stream socket may send less than it was given, and the LibOS
-         * handles the short write. */
-        buf = malloc(total ? total : 1);
-        if (!buf)
-            return -PAL_ERROR_NOMEM;
-        uint64_t off = 0;
-        for (size_t i = 0; i < iov_len && off < total; i++) {
-            uint64_t take = iov[i].iov_len;
-            if (take > total - off)
-                take = total - off;
-            memcpy(buf + off, iov[i].iov_base, take);
-            off += take;
-        }
-        msg = buf;
-    }
+    /* No gather buffer for several iovecs any more: sock_chan_sendv_wake
+     * copies the pieces straight into the slot (above). One iovec keeps
+     * pal_chan_send2_wake. */
+    const void* msg = (iov_len == 1) ? iov[0].iov_base : NULL;
 
     struct pal_mvmux_hdr mh;
     memset(&mh, 0, sizeof mh);
@@ -3142,7 +3170,10 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
         /* Header and body in one message, without building a combined buffer:
          * that buffer was a slot-sized malloc (16,380 bytes then) that missed the PAL slab and
          * cost an mmap and a munmap through the monitor on every send. */
-        if (pal_chan_send2_wake(&out, fh, fhl, msg, (uint32_t)total, /*wake=*/false) == 0) {
+        int sent = (iov_len == 1)
+                   ? pal_chan_send2_wake(&out, fh, fhl, msg, (uint32_t)total, /*wake=*/false)
+                   : sock_chan_sendv_wake(&out, fh, fhl, iov, iov_len, total, /*wake=*/false);
+        if (sent == 0) {
             /* The peer may be parked on this index, or have a thread waiting
              * to read it: then ONE Notify (the monitor turns it into one
              * dispatch however many messages went in). A reader that is
@@ -3190,7 +3221,6 @@ int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
             continue;                        /* the loop's top says EPIPE */
         ring_for(handle, NULL, &out);
     }
-    free(buf);
     return ret;
 }
 
