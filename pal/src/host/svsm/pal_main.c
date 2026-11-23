@@ -428,6 +428,28 @@ noreturn void pal_svsm_main(void)
             log_warning("svsm.syscall_profile: the monitor did not take the table (not a debug_calls build) - no profile");
     }
 
+    /* Thread reuse (MicroVault notes/libos/THREAD-REUSE.md; owner 2026-11-23):
+     *
+     *   [svsm]
+     *   thread_cache = 16     # exited threads' stacks kept per process, 0..64;
+     *                         # 0 = every thread allocates and frees its own
+     *
+     * The same key sizes the LibOS's caches (libos_thread.c). In a debug vault
+     * every cached block is poisoned on the way in, so the lane can see that
+     * the scrub on the way out removed it (thread_kit_scrubbed). */
+    {
+        int64_t cap = PAL_SVSM_THREAD_CACHE_DEFAULT;
+        bool debug = false;
+        if (manifest_svsm_early) {
+            if (toml_int_in(manifest_svsm_early, "thread_cache", PAL_SVSM_THREAD_CACHE_DEFAULT,
+                            &cap) < 0 || cap < 0 || cap > PAL_SVSM_THREAD_CACHE_MAX)
+                pal_svsm_fail("svsm.thread_cache must be an integer 0..64", 0);
+            if (toml_bool_in(manifest_svsm_early, "debug", false, &debug) < 0)
+                pal_svsm_fail("svsm.debug is not a boolean", 0);
+        }
+        pal_svsm_thread_cache_init((int)cap, debug);
+    }
+
     /* Raw `syscall` fast paths (MicroVault notes/sched/SYSCALL-FASTPATH.md;
      * owner 2026-11-17: each opt-in, measured):
      *

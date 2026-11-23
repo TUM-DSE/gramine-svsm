@@ -242,6 +242,10 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
 
     if (child_id == 0) {
         /* ---- the child ---- */
+        /* The thread caches first: the child's copies of what the parent's threads released are
+         * freed, and until the steps below have let go of the rest of the parent's copies nothing
+         * is cached - a process only reuses what its own threads released (THREAD-REUSE.md). */
+        thread_cache_fork_child_begin();
         /* Before anything else looks at threads: the parent's others are
          * copies that will never run here (the PAL took them off its ring on
          * the way out of the fork), and its async worker is one of them. */
@@ -298,6 +302,7 @@ static long do_clone_cow_fork(unsigned long flags, int* set_parent_tid) {
             lo = hi = 0;                /* no block: ipc_ids_after_cow_fork says so */
         id_ranges_after_cow_fork(self_pid, lo, hi);
         get_cur_thread()->tid = self_pid;
+        thread_cache_fork_child_end();
         return 0;
     }
 

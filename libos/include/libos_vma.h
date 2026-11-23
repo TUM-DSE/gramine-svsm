@@ -40,6 +40,13 @@ struct libos_vma_info {
 /* vma is backed by a file and has been protected as writable, so it has to be checkpointed during
  * migration */
 #define VMA_TAINTED 0x40000000
+/* anonymous, and never accessible since it was mapped: nothing has written it, so it reads as zero
+ * whenever it is made accessible. Set on an anonymous PROT_NONE mmap, cleared for good by any
+ * protection change that grants access; a split keeps it. MADV_DONTNEED skips such a range: it has
+ * nothing to zero, and zeroing it meant two protection changes - glibc's thread-stack guard page,
+ * at every thread exit (MicroVault notes/libos/THREAD-REUSE.md, E). A bit no MAP_* flag uses;
+ * set only by bkeep_mark_pristine (`filter_saved_flags` drops a caller's). */
+#define VMA_PRISTINE 0x00800000
 
 int init_vma(void);
 
@@ -69,6 +76,10 @@ void bkeep_convert_tmp_vma_to_user(void* vma);
 
 /* Bookkeeping a change to memory protections. */
 int bkeep_mprotect(void* addr, size_t length, int prot, bool is_internal);
+/* An anonymous PROT_NONE mapping the mmap syscall has just made, with its old memory (if any)
+ * freed: VMA_PRISTINE on the VMAs wholly inside [addr, addr + length). Only that caller - a
+ * restored or loaded range may carry data behind PROT_NONE. */
+void bkeep_mark_pristine(void* addr, size_t length);
 
 /*
  * Bookkeeping an allocation of memory at a fixed address. `flags` must contain either MAP_FIXED or

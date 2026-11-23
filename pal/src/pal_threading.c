@@ -15,6 +15,16 @@ int PalThreadCreate(int (*callback)(void*), void* param, PAL_HANDLE* handle) {
     return _PalThreadCreate(handle, callback, param);
 }
 
+void PalThreadCacheTrim(void) {
+    _PalThreadCacheTrim();
+}
+
+void PalThreadCacheStats(uint64_t out[PAL_THREAD_CACHE_NSTATS]) {
+    for (int i = 0; i < PAL_THREAD_CACHE_NSTATS; i++)
+        out[i] = 0;
+    _PalThreadCacheStats(out);
+}
+
 /* PAL call PalThreadYieldExecution. Yield the execution of the current thread. */
 void PalThreadYieldExecution(void) {
     _PalThreadYieldExecution();

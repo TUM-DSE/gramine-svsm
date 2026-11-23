@@ -20,6 +20,7 @@
 #include "libos_lock.h"
 #include "libos_tcb.h"
 #include "libos_utils.h"
+#include "libos_thread.h"
 #include "libos_vma.h"
 #include "linux_abi/memory.h"
 #include "spinlock.h"
@@ -37,6 +38,7 @@ static int filter_saved_flags(int flags) {
                     | MAP_HUGETLB | MAP_HUGE_2MB | MAP_HUGE_1GB | MAP_STACK
                     | VMA_UNMAPPED | VMA_INTERNAL | VMA_TAINTED);
 }
+
 
 /* TODO: split flags into internal (Gramine) and Linux; also to consider: completely remove Linux
  * flags - we only need MAP_SHARED/MAP_PRIVATE and possibly MAP_STACK/MAP_GROWSDOWN */
@@ -1013,6 +1015,9 @@ int bkeep_mmap_fixed(void* addr, size_t length, int prot, int flags, struct libo
 
 static void vma_update_prot(struct libos_vma* vma, int prot) {
     vma->prot = prot & (PROT_NONE | PROT_READ | PROT_WRITE | PROT_EXEC);
+    if (vma->prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        vma->flags &= ~VMA_PRISTINE;   /* accessible now: it may be written from here on */
+    }
     if (vma->file && (prot & PROT_WRITE)) {
         vma->flags |= VMA_TAINTED;
     }
@@ -1132,6 +1137,22 @@ static int _vma_bkeep_change(uintptr_t begin, uintptr_t end, int prot, bool is_i
     avl_tree_insert(&vma_tree, &new_vma2->tree_node);
 
     return 0;
+}
+
+void bkeep_mark_pristine(void* addr, size_t length) {
+    uintptr_t begin = (uintptr_t)addr;
+    uintptr_t end = begin + length;
+    spinlock_lock(&vma_tree_lock);
+    struct libos_vma* vma = _lookup_vma(begin);
+    while (vma && vma->begin < end) {
+        if (vma->begin >= begin && vma->end <= end && !vma->file
+                && !(vma->flags & (VMA_INTERNAL | VMA_UNMAPPED))
+                && !(vma->prot & (PROT_READ | PROT_WRITE | PROT_EXEC))) {
+            vma->flags |= VMA_PRISTINE;
+        }
+        vma = _get_next_vma(vma);
+    }
+    spinlock_unlock(&vma_tree_lock);
 }
 
 int bkeep_mprotect(void* addr, size_t length, int prot, bool is_internal) {
@@ -1490,6 +1511,12 @@ static bool madvise_dontneed_visitor(struct libos_vma* vma, void* visitor_arg) {
         }
         /* MADV_DONTNEED resets file-based mappings to the original state, which is a no-op for
          * non-tainted mappings. */
+        return true;
+    }
+
+    if ((vma->flags & VMA_PRISTINE) && thread_cache_cap()) {
+        /* Never accessible: already zero, and nothing could have written it (libos_vma.h).
+         * thread_cache = 0 keeps the old path, for the A/B. */
         return true;
     }
 

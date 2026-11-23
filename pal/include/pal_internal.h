@@ -199,6 +199,8 @@ int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t*
 
 /* PalProcess and PalThread calls */
 int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param);
+void _PalThreadCacheTrim(void);
+void _PalThreadCacheStats(uint64_t out[PAL_THREAD_CACHE_NSTATS]);
 noreturn void _PalThreadExit(int* clear_child_tid);
 void _PalThreadYieldExecution(void);
 int _PalThreadResume(PAL_HANDLE thread_handle);

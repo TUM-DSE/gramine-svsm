@@ -45,16 +45,23 @@ struct libos_rt_signal_queue {
     struct libos_signal* queue[MAX_SIGNAL_LOG];
 };
 
+#define RT_SIGNAL_QUEUES_CNT (SIGS_CNT - SIGRTMIN + 1)
+
 /*
  * We store standard signals directly inside queue and real-time signals as pointers to objects
  * obtained via `malloc`.
  * `pending_mask` stores mask of signals present in this queue.
  * Accesses to this queue should be protected by a lock.
+ *
+ * The real-time queues (33 x 272 B) are allocated on the first real-time signal queued here:
+ * inline they made `struct libos_thread` ~13 KiB, past the slab's top class, so every thread's
+ * struct was a VirtAlloc and a VirtFree (MicroVault notes/libos/THREAD-REUSE.md, A). NULL means
+ * all of them are empty.
  */
 struct libos_signal_queue {
     __sigset_t pending_mask;
     struct libos_signal standard_signals[SIGRTMIN - 1];
-    struct libos_rt_signal_queue rt_signal_queues[SIGS_CNT - SIGRTMIN + 1];
+    struct libos_rt_signal_queue* rt_signal_queues;
 };
 
 #define GET_CPU_MASK_LEN() (BITS_TO_LONGS(g_pal_public_state->topo_info.threads_cnt))
@@ -180,6 +187,22 @@ IDTYPE get_new_id(IDTYPE move_ownership_to);
 void release_id(IDTYPE id);
 
 void free_signal_queue(struct libos_signal_queue* queue);
+
+/* Thread reuse (MicroVault notes/libos/THREAD-REUSE.md): exited threads' LibOS stacks and
+ * pollable events kept for the next thread, up to [svsm] thread_cache of each. */
+int init_thread_cache(void);
+/* Free everything the LibOS and the PAL keep for reuse; true if anything was freed. */
+bool thread_cache_trim(void);
+/* In a copy-on-write fork's child, at the start and the end of its after-fork steps: begin frees
+ * the child's copies and stops caching, end starts it again - a process only reuses what its own
+ * threads released, and the after-fork steps let go of copies of the parent's. */
+void thread_cache_fork_child_begin(void);
+void thread_cache_fork_child_end(void);
+/* The cap, for the pollable-event cache (libos_pollable_event.c); 0 while caching is suspended
+ * (a fork child's after-fork steps). */
+int thread_cache_cap(void);
+/* "/proc/mv_thread_cache": the LibOS's and the PAL's counters, one line. */
+int thread_cache_format(char* buf, size_t size);
 
 void get_signal_dispositions(struct libos_signal_dispositions* dispositions);
 void put_signal_dispositions(struct libos_signal_dispositions* dispositions);

@@ -1017,6 +1017,28 @@ void PalThreadYieldExecution(void);
 noreturn void PalThreadExit(int* clear_child_tid);
 
 /*!
+ * \brief Thread reuse (MicroVault notes/libos/THREAD-REUSE.md): the PAL's cache of exited
+ * threads' stacks.
+ *
+ * PalThreadCacheTrim frees every cached block (not from inside an upcall, where it does nothing).
+ * PalThreadCacheStats fills `out` with the counters below. Hosts without a cache trim nothing and
+ * report zeros.
+ */
+enum {
+    PAL_THREAD_CACHE_CAP = 0,     /* [svsm] thread_cache */
+    PAL_THREAD_CACHE_CACHED,      /* blocks in the cache now */
+    PAL_THREAD_CACHE_HITS,        /* creates served from the cache */
+    PAL_THREAD_CACHE_MISSES,      /* creates that allocated */
+    PAL_THREAD_CACHE_FULL,        /* exits whose block was freed: cache full */
+    PAL_THREAD_CACHE_TRIMMED,     /* blocks freed by a trim */
+    PAL_THREAD_CACHE_POISON_SEEN, /* debug: reused blocks that still carried the poison */
+    PAL_THREAD_CACHE_RESIDUE,     /* debug: reused blocks not all zero after the scrub */
+    PAL_THREAD_CACHE_NSTATS
+};
+void PalThreadCacheTrim(void);
+void PalThreadCacheStats(uint64_t out[PAL_THREAD_CACHE_NSTATS]);
+
+/*!
  * \brief Resume a thread.
  */
 int PalThreadResume(PAL_HANDLE thread);

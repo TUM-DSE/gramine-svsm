@@ -14,6 +14,7 @@
 #include "libos_handle.h"
 #include "libos_internal.h"
 #include "libos_table.h"
+#include "libos_thread.h"
 #include "libos_vma.h"
 #include "linux_abi/errors.h"
 #include "linux_abi/memory.h"
@@ -247,12 +248,20 @@ void* libos_syscall_mmap(void* addr, size_t length, int prot, int flags, int fd,
 
     if (!hdl) {
         ret = PalVirtualMemoryAlloc(addr, length, LINUX_PROT_TO_PAL(prot, flags));
+        /* Refused (the page pool): what the thread caches hold goes back first, and the mmap is
+         * tried once more - a cache is never the reason an allocation fails (THREAD-REUSE.md). */
+        if (ret < 0 && ret != -PAL_ERROR_DENIED && thread_cache_trim())
+            ret = PalVirtualMemoryAlloc(addr, length, LINUX_PROT_TO_PAL(prot, flags));
         if (ret < 0) {
             if (ret == -PAL_ERROR_DENIED) {
                 ret = -EPERM;
             } else {
                 ret = pal_to_unix_errno(ret);
             }
+        } else if (!(prot & (PROT_READ | PROT_WRITE | PROT_EXEC))) {
+            /* New anonymous memory nobody can reach yet (a MAP_FIXED's old memory was freed
+             * above): MADV_DONTNEED need not zero it (VMA_PRISTINE, THREAD-REUSE.md E). */
+            bkeep_mark_pristine(addr, length);
         }
     } else {
         ret = hdl->fs->fs_ops->mmap(hdl, addr, length, prot, flags, offset);

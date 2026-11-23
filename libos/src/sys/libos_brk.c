@@ -11,6 +11,7 @@
 #include "libos_internal.h"
 #include "libos_lock.h"
 #include "libos_table.h"
+#include "libos_thread.h"
 #include "libos_utils.h"
 #include "libos_vma.h"
 #include "pal.h"
@@ -188,6 +189,9 @@ void* libos_syscall_brk(void* _brk) {
     }
 
     int ret = PalVirtualMemoryAlloc(brk_current, size, PAL_PROT_READ | PAL_PROT_WRITE);
+    /* As mmap: the thread caches go back before a refusal is final (THREAD-REUSE.md). */
+    if (ret < 0 && ret != -PAL_ERROR_DENIED && thread_cache_trim())
+        ret = PalVirtualMemoryAlloc(brk_current, size, PAL_PROT_READ | PAL_PROT_WRITE);
     if (ret < 0) {
         if (bkeep_mmap_fixed(brk_current, brk_region.brk_end - brk_current, PROT_NONE,
                              MAP_FIXED | VMA_UNMAPPED, NULL, 0, "heap") < 0) {

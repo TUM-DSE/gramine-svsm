@@ -10,6 +10,28 @@
 #include "api.h"
 #include "libos_fs_pseudo.h"
 #include "libos_process.h"
+#include "libos_thread.h"
+
+/* "/proc/mv_thread_cache": the thread caches' counters, one line (MicroVault
+ * notes/libos/THREAD-REUSE.md; read by the lane's thread-reuse rows). Not a Linux file. */
+static int proc_mv_thread_cache_load(struct libos_dentry* dent, char** out_data, size_t* out_size) {
+    __UNUSED(dent);
+
+    size_t buffer_size = 1024;
+    char* buffer = malloc(buffer_size);
+    if (!buffer)
+        return -ENOMEM;
+
+    int ret = thread_cache_format(buffer, buffer_size);
+    if (ret < 0 || (size_t)ret >= buffer_size) {
+        free(buffer);
+        return ret < 0 ? ret : -EOVERFLOW;
+    }
+
+    *out_data = buffer;
+    *out_size = (size_t)ret;
+    return 0;
+}
 
 static int proc_pid_max_load(struct libos_dentry* dent, char** out_data, size_t* out_size) {
     __UNUSED(dent);
@@ -74,6 +96,7 @@ int init_procfs(void) {
     pseudo_add_str(kernel, "pid_max", &proc_pid_max_load);
 
     pseudo_add_str(root, "meminfo", &proc_meminfo_load);
+    pseudo_add_str(root, "mv_thread_cache", &proc_mv_thread_cache_load);
     pseudo_add_str(root, "cpuinfo", &proc_cpuinfo_load);
     pseudo_add_str(root, "stat", &proc_stat_load);
 

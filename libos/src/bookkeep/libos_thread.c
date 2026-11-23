@@ -32,6 +32,223 @@
 static LISTP_TYPE(libos_thread) g_thread_list = LISTP_INIT;
 struct libos_lock g_thread_list_lock;
 
+/*
+ * Thread reuse (MicroVault notes/libos/THREAD-REUSE.md, C; owner 2026-11-23).
+ *
+ * An exited thread's LibOS stack (7 pages + a guard) is kept, up to [svsm] thread_cache of them,
+ * and handed to the next thread: no VirtAlloc, no guard mprotect, no VirtFree. Its VMA stays
+ * bookkept as internal (not in /proc/self/maps) and its guard page stays PROT_NONE. The usable
+ * pages are zeroed on the way out, so a reused stack reads as a fresh one. In a debug vault they
+ * are poisoned on the way in, and the way out counts poison seen and residue after the zeroing
+ * (the lane's thread_kit_scrubbed row).
+ *
+ * The struct itself is not cached: it is refcounted and reachable from IPC, wait and signal paths
+ * until its last put_thread. With the real-time signal queues out of line (libos_thread.h) it is a
+ * slab object, reused the way any malloc is.
+ */
+static_assert(sizeof(struct libos_thread) <= 8192,
+              "struct libos_thread must stay within the slab's top class (THREAD-REUSE.md, A)");
+
+#define THREAD_CACHE_MAX    64
+#define THREAD_CACHE_POISON 0xA5
+static spinlock_t g_tc_lock = INIT_SPINLOCK_UNLOCKED;
+static int   g_tc_cap = 16;     /* [svsm] thread_cache; the PAL's default (pal_svsm.h) */
+static bool  g_tc_poison;       /* [svsm] debug */
+static void* g_tc_stacks[THREAD_CACHE_MAX];  /* the stacks' lowest address (the guard) */
+static int   g_tc_stacks_n;
+static struct {
+    uint64_t hits, misses, full, trimmed, poison_seen, residue;
+} g_tc_stat;
+
+static bool g_tc_suspended;     /* a fork child's after-fork steps: nothing is cached */
+/* A fork child's record (-1 until it forked): what the begin hook freed, and what all three
+ * caches held at the end hook - 0, or something of the parent's got through. */
+static long g_tc_fork_trimmed = -1, g_tc_fork_end_cached = -1;
+
+int thread_cache_cap(void) {
+    if (__atomic_load_n(&g_tc_suspended, __ATOMIC_RELAXED))
+        return 0;
+    return __atomic_load_n(&g_tc_cap, __ATOMIC_RELAXED);
+}
+
+/* The cap as configured, whatever the suspension (thread_cache = 0 is the old platform, which
+ * alloc_new_thread and the madvise skip ask about - not whether caching is paused). */
+static int thread_cache_configured(void) {
+    return __atomic_load_n(&g_tc_cap, __ATOMIC_RELAXED);
+}
+
+int init_thread_cache(void) {
+    int64_t cap = 16;
+    if (toml_int_in(g_manifest_root, "svsm.thread_cache", /*defaultval=*/16, &cap) < 0
+            || cap < 0 || cap > THREAD_CACHE_MAX) {
+        log_error("Cannot parse 'svsm.thread_cache' (an integer 0..%d)", THREAD_CACHE_MAX);
+        return -EINVAL;
+    }
+    bool debug = false;
+    if (toml_bool_in(g_manifest_root, "svsm.debug", /*defaultval=*/false, &debug) < 0) {
+        log_error("Cannot parse 'svsm.debug'");
+        return -EINVAL;
+    }
+    __atomic_store_n(&g_tc_cap, (int)cap, __ATOMIC_RELAXED);
+    g_tc_poison = debug;
+    return 0;
+}
+
+static void free_libos_stack(char* addr) {
+#ifdef ASAN
+    asan_unpoison_region((uintptr_t)addr, LIBOS_THREAD_LIBOS_STACK_SIZE);
+#endif
+    void* tmp_vma = NULL;
+    if (bkeep_munmap(addr, LIBOS_THREAD_LIBOS_STACK_SIZE, /*is_internal=*/true, &tmp_vma) < 0) {
+        log_error("[put_thread] Failed to remove bookkeeped memory at %p-%p!",
+                  addr, addr + LIBOS_THREAD_LIBOS_STACK_SIZE);
+        BUG();
+    }
+    if (PalVirtualMemoryFree(addr, LIBOS_THREAD_LIBOS_STACK_SIZE) < 0) {
+        BUG();
+    }
+    bkeep_remove_tmp_vma(tmp_vma);
+}
+
+static bool libos_stack_cache_push(char* addr) {
+    if (g_tc_poison) {
+#ifdef ASAN
+        asan_unpoison_region((uintptr_t)addr, LIBOS_THREAD_LIBOS_STACK_SIZE);
+#endif
+        memset(addr + PAGE_SIZE, THREAD_CACHE_POISON, LIBOS_THREAD_LIBOS_STACK_SIZE - PAGE_SIZE);
+    }
+    bool kept = false;
+    spinlock_lock(&g_tc_lock);
+    if (g_tc_stacks_n < thread_cache_cap()) {
+        g_tc_stacks[g_tc_stacks_n++] = addr;
+        kept = true;
+    } else {
+        g_tc_stat.full++;
+    }
+    spinlock_unlock(&g_tc_lock);
+    return kept;
+}
+
+static char* libos_stack_cache_pop(void) {
+    char* addr = NULL;
+    spinlock_lock(&g_tc_lock);
+    if (g_tc_stacks_n) {
+        addr = g_tc_stacks[--g_tc_stacks_n];
+        g_tc_stacks[g_tc_stacks_n] = NULL;
+        g_tc_stat.hits++;
+    } else {
+        g_tc_stat.misses++;
+    }
+    spinlock_unlock(&g_tc_lock);
+    if (!addr)
+        return NULL;
+
+    char* usable = addr + PAGE_SIZE;
+    size_t usable_size = LIBOS_THREAD_LIBOS_STACK_SIZE - PAGE_SIZE;
+#ifdef ASAN
+    asan_unpoison_region((uintptr_t)addr, LIBOS_THREAD_LIBOS_STACK_SIZE);
+#endif
+    bool poisoned = g_tc_poison && (uint8_t)usable[0] == THREAD_CACHE_POISON
+                    && (uint8_t)usable[usable_size - 1] == THREAD_CACHE_POISON;
+    /* The scrub: a reused stack reads as a fresh one. */
+    memset(usable, 0, usable_size);
+    bool residue = false;
+    if (g_tc_poison) {
+        const uint64_t* w = (const uint64_t*)usable;
+        for (size_t i = 0; i < usable_size / sizeof(*w); i++) {
+            if (w[i]) {
+                residue = true;
+                break;
+            }
+        }
+    }
+    spinlock_lock(&g_tc_lock);
+    if (poisoned)
+        g_tc_stat.poison_seen++;
+    if (residue)
+        g_tc_stat.residue++;
+    spinlock_unlock(&g_tc_lock);
+    return addr;
+}
+
+/* The LibOS's stacks only; the events and the PAL's blocks are trimmed by thread_cache_trim. */
+static size_t libos_stack_cache_trim(void) {
+    size_t freed = 0;
+    while (1) {
+        char* addr = NULL;
+        spinlock_lock(&g_tc_lock);
+        if (g_tc_stacks_n) {
+            addr = g_tc_stacks[--g_tc_stacks_n];
+            g_tc_stacks[g_tc_stacks_n] = NULL;
+            g_tc_stat.trimmed++;
+        }
+        spinlock_unlock(&g_tc_lock);
+        if (!addr)
+            break;
+        free_libos_stack(addr);
+        freed++;
+    }
+    return freed;
+}
+
+static size_t thread_cache_trim_count(void) {
+    uint64_t before[PAL_THREAD_CACHE_NSTATS];
+    uint64_t after[PAL_THREAD_CACHE_NSTATS];
+    PalThreadCacheStats(before);
+    size_t freed = libos_stack_cache_trim();
+    freed += pollable_event_cache_trim();
+    PalThreadCacheTrim();
+    PalThreadCacheStats(after);
+    freed += after[PAL_THREAD_CACHE_TRIMMED] - before[PAL_THREAD_CACHE_TRIMMED];
+    return freed;
+}
+
+bool thread_cache_trim(void) {
+    return thread_cache_trim_count() > 0;
+}
+
+void thread_cache_fork_child_begin(void) {
+    __atomic_store_n(&g_tc_suspended, true, __ATOMIC_RELAXED);
+    /* The child's copies of what the parent's threads released: freed in the child's address
+     * space. */
+    g_tc_fork_trimmed = (long)thread_cache_trim_count();
+}
+
+void thread_cache_fork_child_end(void) {
+    uint64_t pal[PAL_THREAD_CACHE_NSTATS];
+    struct pollable_event_cache_stats ev;
+    PalThreadCacheStats(pal);
+    pollable_event_cache_stats(&ev);
+    spinlock_lock(&g_tc_lock);
+    g_tc_fork_end_cached = g_tc_stacks_n + (long)ev.cached + (long)pal[PAL_THREAD_CACHE_CACHED];
+    spinlock_unlock(&g_tc_lock);
+    __atomic_store_n(&g_tc_suspended, false, __ATOMIC_RELAXED);
+}
+
+int thread_cache_format(char* buf, size_t size) {
+    uint64_t pal[PAL_THREAD_CACHE_NSTATS];
+    PalThreadCacheStats(pal);
+    struct pollable_event_cache_stats ev;
+    pollable_event_cache_stats(&ev);
+    spinlock_lock(&g_tc_lock);
+    int n = snprintf(buf, size,
+                     "cap %d libos_stack cached %d hits %lu misses %lu full %lu trimmed %lu"
+                     " poison_seen %lu residue %lu"
+                     " ; event cached %lu hits %lu misses %lu full %lu trimmed %lu drained %lu"
+                     " ; pal_block cap %lu cached %lu hits %lu misses %lu full %lu trimmed %lu"
+                     " poison_seen %lu residue %lu ; fork trimmed %ld end_cached %ld\n",
+                     thread_cache_configured(), g_tc_stacks_n, g_tc_stat.hits, g_tc_stat.misses,
+                     g_tc_stat.full, g_tc_stat.trimmed, g_tc_stat.poison_seen, g_tc_stat.residue,
+                     ev.cached, ev.hits, ev.misses, ev.full, ev.trimmed, ev.drained,
+                     pal[PAL_THREAD_CACHE_CAP], pal[PAL_THREAD_CACHE_CACHED],
+                     pal[PAL_THREAD_CACHE_HITS], pal[PAL_THREAD_CACHE_MISSES],
+                     pal[PAL_THREAD_CACHE_FULL], pal[PAL_THREAD_CACHE_TRIMMED],
+                     pal[PAL_THREAD_CACHE_POISON_SEEN], pal[PAL_THREAD_CACHE_RESIDUE],
+                     g_tc_fork_trimmed, g_tc_fork_end_cached);
+    spinlock_unlock(&g_tc_lock);
+    return n;
+}
+
 static struct libos_signal_dispositions* alloc_default_signal_dispositions(void) {
     struct libos_signal_dispositions* dispositions = malloc(sizeof(*dispositions));
     if (!dispositions) {
@@ -56,7 +273,19 @@ static struct libos_thread* alloc_new_thread(void) {
         return NULL;
     }
 
+    /* thread_cache = 0 is the platform as it was, for the A/B: the real-time queues then come with
+     * every thread, as they did when they were inline (one VirtAlloc and one VirtFree each). */
+    if (!thread_cache_configured()) {
+        thread->signal_queue.rt_signal_queues =
+            calloc(RT_SIGNAL_QUEUES_CNT, sizeof(*thread->signal_queue.rt_signal_queues));
+        if (!thread->signal_queue.rt_signal_queues) {
+            free(thread);
+            return NULL;
+        }
+    }
+
     if (!create_lock(&thread->lock)) {
+        free(thread->signal_queue.rt_signal_queues);
         free(thread);
         return NULL;
     }
@@ -64,6 +293,7 @@ static struct libos_thread* alloc_new_thread(void) {
     int ret = create_pollable_event(&thread->pollable_event);
     if (ret < 0) {
         destroy_lock(&thread->lock);
+        free(thread->signal_queue.rt_signal_queues);
         free(thread);
         return NULL;
     }
@@ -77,6 +307,13 @@ static struct libos_thread* alloc_new_thread(void) {
 
 int alloc_thread_libos_stack(struct libos_thread* thread) {
     assert(thread->libos_stack_bottom == NULL);
+
+    /* An exited thread's, scrubbed (thread reuse, above): bookkept, mapped and guarded already. */
+    char* cached = libos_stack_cache_pop();
+    if (cached) {
+        thread->libos_stack_bottom = cached + LIBOS_THREAD_LIBOS_STACK_SIZE;
+        return 0;
+    }
 
     void* addr = NULL;
     int prot = PROT_READ | PROT_WRITE;
@@ -240,6 +477,10 @@ static int init_main_thread(void) {
 }
 
 int init_threading(void) {
+    int ret = init_thread_cache();
+    if (ret < 0) {
+        return ret;
+    }
     if (!create_lock(&g_thread_list_lock)) {
         return -ENOMEM;
     }
@@ -364,20 +605,9 @@ void put_thread(struct libos_thread* thread) {
 
         if (thread->libos_stack_bottom) {
             char* addr = (char*)thread->libos_stack_bottom - LIBOS_THREAD_LIBOS_STACK_SIZE;
-#ifdef ASAN
-            asan_unpoison_region((uintptr_t)addr, LIBOS_THREAD_LIBOS_STACK_SIZE);
-#endif
-            void* tmp_vma = NULL;
-            if (bkeep_munmap(addr, LIBOS_THREAD_LIBOS_STACK_SIZE, /*is_internal=*/true,
-                             &tmp_vma) < 0) {
-                log_error("[put_thread] Failed to remove bookkeeped memory at %p-%p!",
-                          addr, (char*)addr + LIBOS_THREAD_LIBOS_STACK_SIZE);
-                BUG();
-            }
-            if (PalVirtualMemoryFree(addr, LIBOS_THREAD_LIBOS_STACK_SIZE) < 0) {
-                BUG();
-            }
-            bkeep_remove_tmp_vma(tmp_vma);
+            /* Kept for the next thread when there is room (thread reuse, above). */
+            if (!libos_stack_cache_push(addr))
+                free_libos_stack(addr);
         }
 
         free(thread->groups_info.groups);

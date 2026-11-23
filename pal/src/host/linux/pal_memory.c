@@ -34,6 +34,14 @@ int _PalLineageFsAttach(uint64_t pages, void** base, size_t* size) {
     return -PAL_ERROR_NOTIMPLEMENTED;   /* no lineages on this host */
 }
 
+void _PalThreadCacheTrim(void) {
+    /* no thread cache on this host */
+}
+
+void _PalThreadCacheStats(uint64_t out[PAL_THREAD_CACHE_NSTATS]) {
+    __UNUSED(out);   /* zeros, filled by the caller */
+}
+
 int _PalLineageSelf(uint64_t* out) {
     __UNUSED(out);
     return -PAL_ERROR_NOTIMPLEMENTED;   /* no lineages on this host */

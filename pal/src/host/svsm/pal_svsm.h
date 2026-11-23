@@ -398,6 +398,12 @@ void pal_svsm_pipes_child_after_fork(uint64_t self_serial);
 void pal_svsm_pipes_exit(void);
 /* The forker is the child's only thread (pal_threading.c). */
 void pal_svsm_threads_child_after_fork(void);
+/* Thread reuse (MicroVault notes/libos/THREAD-REUSE.md): the cache of exited
+ * threads' blocks, its cap ([svsm] thread_cache) and whether blocks are
+ * poisoned on the way in (a debug vault). */
+#define PAL_SVSM_THREAD_CACHE_DEFAULT 16
+#define PAL_SVSM_THREAD_CACHE_MAX     64
+void pal_svsm_thread_cache_init(int cap, bool poison);
 bool   pal_svsm_pipe_writable(PAL_HANDLE handle);
 bool   pal_svsm_pipe_peer_gone(PAL_HANDLE handle);
 bool   pal_svsm_pipe_hung_up(PAL_HANDLE handle);

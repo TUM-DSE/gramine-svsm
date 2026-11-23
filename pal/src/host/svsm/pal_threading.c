@@ -119,6 +119,115 @@ static inline PAL_HANDLE current_thread(void) {
 static void* g_stacks_deferred[PAL_SVSM_STACKS_DEFERRED];
 static int   g_stacks_deferred_n;
 
+/*
+ * Thread reuse (MicroVault notes/libos/THREAD-REUSE.md, D; owner 2026-11-23).
+ *
+ * A thread's block (alt stack + stack + TCB, _PalThreadCreate) is bigger than
+ * the slab's top class, so every malloc of one was a VirtAlloc and every free
+ * a VirtFree: ~84 us of monitor calls per thread, and the DSB C++ handlers
+ * start three threads per request (std::async). An exited thread's block now
+ * goes here, up to [svsm] thread_cache of them, and the next create takes it.
+ *
+ * What may be reused: only blocks this process's own threads released. The
+ * list is this process's memory; a fork child inherits a copy and the LibOS
+ * empties it in the child (thread_cache_after_cow_fork -> PalThreadCacheTrim).
+ * A zygote's list is in every clone, as all of the zygote's memory is; a clone
+ * then reuses what the zygote's threads released, which it holds anyway, and
+ * never anything of a sibling's.
+ *
+ * Scrubbed on reuse: _PalThreadCreate zeroes the whole block it takes, cached
+ * or new, as it always did, so a reused block reads exactly as a fresh one.
+ * In a debug vault a block is poisoned on the way in, and the way out counts
+ * whether the poison was there and whether any of it survived the zeroing -
+ * which is what the lane's thread_kit_scrubbed row reads.
+ *
+ * No lock: like g_stacks_deferred, this is PAL thread code, which is never
+ * preempted, on the process's one scheduler. Pushing needs no bookkeeping
+ * upcall, so it is safe inside an upcall too, where a free is not.
+ */
+#define SVSM_THREAD_BLOCK_SIZE (SVSM_ALT_STACK_SIZE + SVSM_THREAD_STACK_SIZE + sizeof(PAL_SVSM_TCB))
+#define SVSM_THREAD_CACHE_POISON 0xA5
+static void*    g_tc[PAL_SVSM_THREAD_CACHE_MAX];
+static int      g_tc_n;
+static int      g_tc_cap = PAL_SVSM_THREAD_CACHE_DEFAULT;
+static bool     g_tc_poison;
+static uint64_t g_tc_stat[PAL_THREAD_CACHE_NSTATS];
+
+void pal_svsm_thread_cache_init(int cap, bool poison) {
+    if (cap < 0)
+        cap = 0;
+    if (cap > PAL_SVSM_THREAD_CACHE_MAX)
+        cap = PAL_SVSM_THREAD_CACHE_MAX;
+    g_tc_cap    = cap;
+    g_tc_poison = poison;
+}
+
+static bool thread_cache_push(void* block) {
+    if (g_tc_n >= g_tc_cap) {
+        g_tc_stat[PAL_THREAD_CACHE_FULL]++;
+        return false;
+    }
+    if (g_tc_poison)
+        memset(block, SVSM_THREAD_CACHE_POISON, SVSM_THREAD_BLOCK_SIZE);
+    g_tc[g_tc_n++] = block;
+    return true;
+}
+
+static char* thread_cache_pop(void) {
+    if (!g_tc_n) {
+        g_tc_stat[PAL_THREAD_CACHE_MISSES]++;
+        return NULL;
+    }
+    char* block = g_tc[--g_tc_n];
+    g_tc[g_tc_n] = NULL;
+    g_tc_stat[PAL_THREAD_CACHE_HITS]++;
+    if (g_tc_poison && (uint8_t)block[0] == SVSM_THREAD_CACHE_POISON
+            && (uint8_t)block[SVSM_THREAD_BLOCK_SIZE - 1] == SVSM_THREAD_CACHE_POISON)
+        g_tc_stat[PAL_THREAD_CACHE_POISON_SEEN]++;
+    return block;
+}
+
+/* After the scrub: any byte that is not zero is residue (debug vaults only;
+ * the scan is a read of the block, ~100 KiB). */
+static void thread_cache_check_scrub(const char* block) {
+    if (!g_tc_poison)
+        return;
+    const uint64_t* w = (const uint64_t*)block;
+    for (size_t i = 0; i < SVSM_THREAD_BLOCK_SIZE / 8; i++) {
+        if (w[i]) {
+            g_tc_stat[PAL_THREAD_CACHE_RESIDUE]++;
+            return;
+        }
+    }
+    for (size_t i = SVSM_THREAD_BLOCK_SIZE & ~7ul; i < SVSM_THREAD_BLOCK_SIZE; i++) {
+        if (block[i]) {
+            g_tc_stat[PAL_THREAD_CACHE_RESIDUE]++;
+            return;
+        }
+    }
+}
+
+void _PalThreadCacheTrim(void) {
+    /* A free is the LibOS's VMA bookkeeping (see reap_stack): never from an
+     * upcall. The next ordinary trim gets them. */
+    PAL_HANDLE cur = g_current ? current_thread() : NULL;
+    if (cur && cur->thread.in_upcall)
+        return;
+    while (g_tc_n) {
+        void* block = g_tc[--g_tc_n];
+        g_tc[g_tc_n] = NULL;
+        free(block);
+        g_tc_stat[PAL_THREAD_CACHE_TRIMMED]++;
+    }
+}
+
+void _PalThreadCacheStats(uint64_t out[PAL_THREAD_CACHE_NSTATS]) {
+    for (int i = 0; i < PAL_THREAD_CACHE_NSTATS; i++)
+        out[i] = g_tc_stat[i];
+    out[PAL_THREAD_CACHE_CAP]    = (uint64_t)g_tc_cap;
+    out[PAL_THREAD_CACHE_CACHED] = (uint64_t)g_tc_n;
+}
+
 static void reap_stack(void) {
     /* The handover first, and unconditionally: a thread with no stack of its
      * own to free still has a LibOS waiter to release. */
@@ -134,6 +243,10 @@ static void reap_stack(void) {
      * the stack; the next reap from ordinary context frees it. */
     void* stack = g_stack_to_reap;
     g_stack_to_reap = NULL;
+    /* Kept for the next create when there is room (thread reuse, above);
+     * pushing is safe here even inside an upcall. */
+    if (stack && thread_cache_push(stack))
+        stack = NULL;
     if (current_thread()->thread.in_upcall) {
         if (stack) {
             if (g_stacks_deferred_n < PAL_SVSM_STACKS_DEFERRED)
@@ -945,13 +1058,18 @@ int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param) {
      * the bottom of the latter lands in a region of this block rather than
      * in whatever malloc handed out next.
      */
-    size_t block = SVSM_ALT_STACK_SIZE + SVSM_THREAD_STACK_SIZE + sizeof(PAL_SVSM_TCB);
-    char* stack = malloc(block);
+    size_t block = SVSM_THREAD_BLOCK_SIZE;
+    /* An exited thread's block when there is one (thread reuse, above). The
+     * memset below is its scrub, as it is a fresh block's zeroing. */
+    char* stack = thread_cache_pop();
+    if (!stack)
+        stack = malloc(block);
     if (!stack) {
         free(hdl);
         return -PAL_ERROR_NOMEM;
     }
     memset(stack, 0, block);
+    thread_cache_check_scrub(stack);
 
     PAL_SVSM_TCB* tcb = (PAL_SVSM_TCB*)(stack + SVSM_ALT_STACK_SIZE + SVSM_THREAD_STACK_SIZE);
     tcb->common.self  = &tcb->common;

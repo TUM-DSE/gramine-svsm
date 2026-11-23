@@ -140,7 +140,8 @@ static void recalc_pending_mask(struct libos_signal_queue* queue, int sig) {
             __sigdelset(&queue->pending_mask, sig);
         }
     } else {
-        if (is_rt_sq_empty(&queue->rt_signal_queues[sig - SIGRTMIN])) {
+        if (!queue->rt_signal_queues
+                || is_rt_sq_empty(&queue->rt_signal_queues[sig - SIGRTMIN])) {
             __sigdelset(&queue->pending_mask, sig);
         }
     }
@@ -217,7 +218,13 @@ static bool queue_append_signal(struct libos_signal_queue* queue, struct libos_s
     } else if (sig < SIGRTMIN) {
         ret = append_standard_signal(&queue->standard_signals[sig - 1], *signal);
     } else {
-        ret = append_rt_signal(&queue->rt_signal_queues[sig - SIGRTMIN], signal);
+        /* The real-time queues exist from the first real-time signal on (libos_thread.h). Not
+         * having memory for them is a full queue, which the callers already handle. */
+        if (!queue->rt_signal_queues)
+            queue->rt_signal_queues = calloc(RT_SIGNAL_QUEUES_CNT,
+                                             sizeof(*queue->rt_signal_queues));
+        if (queue->rt_signal_queues)
+            ret = append_rt_signal(&queue->rt_signal_queues[sig - SIGRTMIN], signal);
     }
 
     if (ret) {
@@ -261,7 +268,11 @@ static bool pop_standard_signal(struct libos_signal* queue_slot, struct libos_si
     return true;
 }
 
-static bool pop_rt_signal(struct libos_rt_signal_queue* queue, struct libos_signal** signal) {
+static bool pop_rt_signal(struct libos_rt_signal_queue* queues, int sig,
+                          struct libos_signal** signal) {
+    if (!queues)
+        return false;   /* never had a real-time signal: all empty */
+    struct libos_rt_signal_queue* queue = &queues[sig - SIGRTMIN];
     assert(queue->get_idx <= queue->put_idx);
 
     if (queue->get_idx < queue->put_idx) {
@@ -275,12 +286,16 @@ static bool pop_rt_signal(struct libos_rt_signal_queue* queue, struct libos_sign
 void free_signal_queue(struct libos_signal_queue* queue) {
     /* We ignore standard signals - they are stored by value. */
 
+    if (!queue->rt_signal_queues)
+        return;
     for (int sig = SIGRTMIN; sig <= SIGS_CNT; sig++) {
         struct libos_signal* signal;
-        while (pop_rt_signal(&queue->rt_signal_queues[sig - SIGRTMIN], &signal)) {
+        while (pop_rt_signal(queue->rt_signal_queues, sig, &signal)) {
             free(signal);
         }
     }
+    free(queue->rt_signal_queues);
+    queue->rt_signal_queues = NULL;
 }
 
 static void force_signal(siginfo_t* info) {
@@ -710,12 +725,12 @@ void pop_unblocked_signal(__sigset_t* mask, struct libos_signal* signal) {
                     }
                 } else {
                     struct libos_signal* signal_ptr = NULL;
-                    got = pop_rt_signal(&current->signal_queue.rt_signal_queues[sig - SIGRTMIN],
+                    got = pop_rt_signal(current->signal_queue.rt_signal_queues, sig,
                                         &signal_ptr);
                     if (!got) {
                         assert(signal_ptr == NULL);
                         got =
-                            pop_rt_signal(&g_process_signal_queue.rt_signal_queues[sig - SIGRTMIN],
+                            pop_rt_signal(g_process_signal_queue.rt_signal_queues, sig,
                                           &signal_ptr);
                         was_process = true;
                     }

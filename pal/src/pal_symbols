@@ -9,6 +9,8 @@ PalSetMemoryBookkeepingUpcalls
 PalThreadCreate
 PalThreadYieldExecution
 PalThreadExit
+PalThreadCacheTrim
+PalThreadCacheStats
 PalThreadResume
 PalThreadSetCpuAffinity
 PalThreadGetCpuAffinity

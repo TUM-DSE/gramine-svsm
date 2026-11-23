@@ -26,3 +26,11 @@ int create_pollable_event(struct libos_pollable_event* event);
 void destroy_pollable_event(struct libos_pollable_event* event);
 int set_pollable_event(struct libos_pollable_event* event);
 int clear_pollable_event(struct libos_pollable_event* event);
+
+/* Thread reuse (MicroVault notes/libos/THREAD-REUSE.md, B): destroyed events are kept, drained,
+ * up to [svsm] thread_cache of them, and the next create takes one. */
+struct pollable_event_cache_stats {
+    uint64_t cached, hits, misses, full, trimmed, drained;
+};
+size_t pollable_event_cache_trim(void);
+void pollable_event_cache_stats(struct pollable_event_cache_stats* out);
