@@ -307,6 +307,7 @@ static bool arm_lineage_kind(uint64_t arm) {
 }
 
 bool g_pal_svsm_o1_wake = true;
+bool g_pal_svsm_o1_cover = true;   /* C alone (svsm.o1_cover): the diagnosis of a stall */
 uint64_t g_pal_svsm_poll_scan_us = PW_SCAN_INTERVAL_US_DEFAULT;
 
 /* `skip_covered`: for a PARK only (O1-WAKE.md C) - a Notify ends a Park, so a
@@ -417,7 +418,8 @@ static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
 
 /* The arms for a Park (idle_until, pick_next): the covered threads' left out. */
 static size_t gather_park_arms(uint64_t* arms, size_t max, bool* partial) {
-    return gather_arms_counted(arms, max, partial, /*skip_covered=*/g_pal_svsm_o1_wake);
+    return gather_arms_counted(arms, max, partial,
+                               /*skip_covered=*/g_pal_svsm_o1_wake && g_pal_svsm_o1_cover);
 }
 
 size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial) {
@@ -922,7 +924,7 @@ static PAL_HANDLE pick_next(void) {
              * vault whose every waiter is notify-covered - parked on the
              * fallback bound, woken by its writers' Notify. Without any
              * covered thread it is the deadlock it always was. */
-            if (!n && !partial && !(g_pal_svsm_o1_wake && any_covered_waiter()))
+            if (!n && !partial && !(g_pal_svsm_o1_wake && g_pal_svsm_o1_cover && any_covered_waiter()))
                 return NULL;
             uint64_t pq0 = (prof && partial) ? pal_svsm_prof_now() : 0;
             bool parked = park_on(arms, n, partial ? SVSM_PARK_PARTIAL_US
@@ -1439,7 +1441,7 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
                                            PAL_SVSM_WAITER_MARKS);
     /* O1-WAKE.md C: does every handle of this wait wake the vault by itself?
      * Read before blocking, from the same watch set the count was made from. */
-    if (g_pal_svsm_o1_wake && g_current && g_current->thread.n_watch) {
+    if (g_pal_svsm_o1_wake && g_pal_svsm_o1_cover && g_current && g_current->thread.n_watch) {
         bool covered = true;
         for (size_t i = 0; i < g_current->thread.n_watch && covered; i++) {
             PAL_HANDLE h = g_current->thread.watch_handles[i];

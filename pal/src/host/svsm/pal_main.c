@@ -459,6 +459,8 @@ noreturn void pal_svsm_main(void)
      *                         # thread's arms go to the park (the A/B switch)
      *   poll_scan_us = 20     # while another context can run, blocked pollers
      *                         # are re-tested at most this often; 0 = every pass
+     *   o1_cover = true       # false: C off alone - every thread's arms go to the
+     *                         # park again, A and B stay (the diagnosis of a stall)
      */
     if (manifest_svsm_early) {
         bool o1 = true;
@@ -468,7 +470,11 @@ noreturn void pal_svsm_main(void)
         if (toml_int_in(manifest_svsm_early, "poll_scan_us", PW_SCAN_INTERVAL_US_DEFAULT, &scan) < 0
                 || scan < 0 || scan > 100000)
             pal_svsm_fail("svsm.poll_scan_us must be an integer 0..100000", 0);
+        bool cover = true;
+        if (toml_bool_in(manifest_svsm_early, "o1_cover", true, &cover) < 0)
+            pal_svsm_fail("svsm.o1_cover is not a boolean", 0);
         g_pal_svsm_o1_wake = o1;
+        g_pal_svsm_o1_cover = cover;
         g_pal_svsm_poll_scan_us = (uint64_t)scan;
     }
 

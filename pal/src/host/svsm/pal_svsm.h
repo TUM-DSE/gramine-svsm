@@ -339,6 +339,7 @@ void pal_svsm_poll_wake(void);
  * wake-all, every-pass re-test and arms of every thread) and svsm.poll_scan_us
  * (B's interval, default 20, 0 = every pass). */
 extern bool g_pal_svsm_o1_wake;
+extern bool g_pal_svsm_o1_cover;   /* svsm.o1_cover (default true): C alone */
 extern uint64_t g_pal_svsm_poll_scan_us;
 bool pal_svsm_sock_waiter_counted(PAL_HANDLE h);
 /* The Park arms of every blocked context (at most `max`); *partial if some
