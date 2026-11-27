@@ -16,6 +16,7 @@ struct thr {
     struct thr* next;
     int state;
     int pollwait;        /* blocked on the poll token */
+    int nowatch;         /* a token waiter with no watch set (pipe ring_wait, eventfd) */
     int ready;           /* what poller_ready would say */
     int has_deadline;
     unsigned long deadline;
@@ -25,6 +26,7 @@ struct thr {
 #define PW_T                   struct thr*
 #define PW_NEXT(t)             ((t)->next)
 #define PW_IS_POLLWAIT(t)      ((t)->state == BLOCKED && (t)->pollwait)
+#define PW_HAS_WATCH(t)        (!(t)->nowatch)
 #define PW_READY(t)            ((t)->ready)
 #define PW_DEADLINE_DUE(t, n)  ((t)->has_deadline && (n) >= (t)->deadline)
 #define PW_MAKE_RUNNABLE(t)    ((t)->state = RUNNABLE, (t)->switched_in++)
@@ -95,6 +97,18 @@ int main(void) {
         t[2].pollwait = 0; t[2].ready = 1;
         pw_wake_ready(&t[0], 0);
         CHECK(t[2].state == BLOCKED, "a non-poller was woken");
+        free(t);
+    }
+    /* a token waiter with NO watch set (a pipe writer waiting for room, an eventfd)
+     * cannot be tested in place: it is woken, as every token waiter was before -
+     * the vault_fork_inflight hang (2026-11-27) was this one left blocked */
+    {
+        size_t n = 6;
+        struct thr* t = ring(n);
+        t[3].nowatch = 1;            /* not "ready" by any test - must be woken anyway */
+        unsigned w = pw_wake_ready(&t[0], 0);
+        CHECK(w == 1 && t[3].state == RUNNABLE, "a watchless token waiter was left blocked (woke %u)", w);
+        CHECK(count_state(t, n, BLOCKED) == 4, "watched, unready pollers were woken too");
         free(t);
     }
     /* close-while-waiting: a parked recv whose socket another thread closed
