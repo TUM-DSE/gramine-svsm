@@ -56,6 +56,7 @@ PalSetExceptionHandler
 PalSegmentBaseGet
 PalProfileSyscallTable
 PalProfileThreadCycles
+PalProfileThreadRan
 PalSegmentBaseSet
 PalStreamChangeName
 PalStreamAttributesSetByHandle

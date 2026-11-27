@@ -1297,6 +1297,14 @@ uint64_t* PalProfileSyscallTable(void);
 void PalProfileThreadCycles(uint64_t* monitor, uint64_t* park);
 
 /*!
+ * \brief This thread's TSC ticks of actually RUNNING so far (the PAL's context switches charge
+ *        the outgoing thread; the current slice included), for the LibOS's per-call own CPU:
+ *        a blocking call's wall counts sibling threads' runs too, this does not. 0 when not
+ *        profiling.
+ */
+uint64_t PalProfileThreadRan(void);
+
+/*!
  * \brief Set segment register.
  *
  * \param reg   The register base to be set (#pal_segment_reg).

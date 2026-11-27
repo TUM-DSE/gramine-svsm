@@ -128,6 +128,29 @@ static inline void prof_account(uint64_t code, uint64_t ticks) {
         tcb->prof_monitor += ticks;
 }
 
+/* Own CPU (the DSB breakdown's Q2, owner 2026-11-27; the diagnostic gramine only): the
+ * PAL's threads are switched here, cooperatively, on the vault's one vCPU, so a thread's
+ * running time is the sum of its slices - charged when it is switched out, from the TSC
+ * it was switched in at. A blocking syscall's wall then splits into this thread's own
+ * slices and its siblings' (which the wall counts; park does not cover a PAL switch). */
+void pal_svsm_prof_switch(PAL_SVSM_TCB* prev, PAL_SVSM_TCB* next) {
+    uint64_t now = prof_tsc();
+    if (prev && prev->prof_on_since)
+        prev->prof_ran += now - prev->prof_on_since;
+    if (next)
+        next->prof_on_since = now;
+}
+
+uint64_t _PalProfileThreadRan(void) {
+    if (!g_pal_svsm_prof_on)
+        return 0;
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    uint64_t now = prof_tsc();
+    if (!tcb->prof_on_since)
+        tcb->prof_on_since = now;   /* first look: it runs from here */
+    return tcb->prof_ran + (now - tcb->prof_on_since);
+}
+
 uint64_t* _PalProfileSyscallTable(void) {
     return g_pal_svsm_prof_on ? &g_pal_svsm_prof.sys[0][0] : NULL;
 }
@@ -159,6 +182,7 @@ bool pal_svsm_profile_start(void) {
     monitor_call(&data);
     if (data.rcx != 0)
         return false;
+    pal_get_svsm_tcb()->prof_on_since = prof_tsc();   /* the starting thread runs from here */
     g_pal_svsm_prof_on = true;
     return true;
 }

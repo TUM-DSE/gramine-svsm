@@ -39,6 +39,10 @@ typedef struct pal_svsm_tcb {
          * in monitor calls and in parks/waits so far. */
         uint64_t   prof_monitor;
         uint64_t   prof_park;
+        /* ...and while it RAN (bd own CPU): charged at each context switch
+         * (pal_svsm_prof_switch), from prof_on_since, the TSC it last started. */
+        uint64_t   prof_ran;
+        uint64_t   prof_on_since;
     };
 } PAL_SVSM_TCB;
 
@@ -57,6 +61,9 @@ extern size_t g_pal_svsm_dbg_maps_n;
 extern bool g_pal_svsm_console_monitor;   /* [svsm] console = "monitor" */
 /* The syscall profile (LIBOS-SYSCALL-PROFILE.md): on only for a debug vault that asked. */
 extern bool g_pal_svsm_prof_on;
+/* The profile's own-CPU clock (pal_monitor_call.c): charge `prev` up to now and
+ * start `next` (NULL prev: the outgoing context is dead). Only when profiling. */
+void pal_svsm_prof_switch(PAL_SVSM_TCB* prev, PAL_SVSM_TCB* next);
 bool pal_svsm_profile_start(void);
 void pal_svsm_console_write(const void* buf, size_t size);   /* pal_monitor_call.c */
 void pal_svsm_threads_report_holds(int64_t foreign);

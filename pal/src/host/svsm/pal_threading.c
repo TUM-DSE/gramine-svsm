@@ -896,6 +896,8 @@ static void schedule(void) {
      */
     prev->thread.fsbase = rdfsbase();
 
+    if (__builtin_expect(g_pal_svsm_prof_on, 0))
+        pal_svsm_prof_switch(prev->thread.tcb, next->thread.tcb);
     pal_svsm_ctx_switch(&prev->thread.rsp, next->thread.rsp, (uint64_t)next->thread.tcb);
 
     /* Back on prev's stack, however long later. */
@@ -1220,6 +1222,8 @@ noreturn void _PalThreadExit(int* clear_child_tid) {
      * scratch word rather than into a handle that may already be freed, and
      * this context's FS is not worth saving. The thread we switch to puts
      * its own back on the far side of its own switch. */
+    if (__builtin_expect(g_pal_svsm_prof_on, 0))
+        pal_svsm_prof_switch(NULL, next->thread.tcb);
     pal_svsm_ctx_switch(&g_dead_rsp, next->thread.rsp, (uint64_t)next->thread.tcb);
 
     die_or_inf_loop();

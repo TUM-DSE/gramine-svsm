@@ -34,6 +34,28 @@ static inline uint64_t sysprof_tsc(void) {
     return __builtin_ia32_rdtsc();
 }
 
+/* Own CPU (the DSB breakdown's Q2, owner 2026-11-27; the diagnostic gramine only): for the
+ * calls that can block or switch threads, a SHADOW row at 480 + k whose count is the calls
+ * and whose wall word is this thread's own running time in them (PalProfileThreadRan less
+ * its parks) - their wall row counts the siblings that ran meanwhile. Rows 480..511 are no
+ * x86-64 syscall (the last is 469, file_setattr), so the monitor prints them as any row
+ * (VAULT_PROF "nr:count:wall:mon:park"); breakdown.py maps them back. 0 = no shadow. */
+#define SYSPROF_SHADOW_BASE 480
+static const uint16_t g_sysprof_shadow[] = {
+    0 /* read */, 1 /* write */, 7 /* poll */, 19 /* readv */, 20 /* writev */,
+    23 /* select */, 24 /* sched_yield */, 35 /* nanosleep */, 42 /* connect */,
+    43 /* accept */, 44 /* sendto */, 45 /* recvfrom */, 46 /* sendmsg */, 47 /* recvmsg */,
+    56 /* clone */, 61 /* wait4 */, 202 /* futex */, 230 /* clock_nanosleep */,
+    232 /* epoll_wait */, 270 /* pselect6 */, 271 /* ppoll */, 281 /* epoll_pwait */,
+    288 /* accept4 */, 435 /* clone3 */, 441 /* epoll_pwait2 */,
+};
+static inline int sysprof_shadow_row(unsigned long sysnr) {
+    for (size_t k = 0; k < ARRAY_SIZE(g_sysprof_shadow); k++)
+        if (g_sysprof_shadow[k] == sysnr)
+            return SYSPROF_SHADOW_BASE + (int)k;
+    return -1;
+}
+
 /* The body, specialised twice by `prof` (a constant at both call sites): the
  * profile-off copy is exactly the dispatcher without the profile - no extra
  * live values across the syscall, no spill - and the profiled one is out of
@@ -46,10 +68,11 @@ static inline __attribute__((always_inline)) noreturn void emulate_syscall(PAL_C
 
     unsigned long sysnr = pal_context_get_syscall(context);
     arch_syscall_arg_t ret = 0;
-    uint64_t prof_t0 = 0, prof_m0 = 0, prof_p0 = 0;
+    uint64_t prof_t0 = 0, prof_m0 = 0, prof_p0 = 0, prof_r0 = 0;
     if (prof) {
         prof_t0 = sysprof_tsc();
         PalProfileThreadCycles(&prof_m0, &prof_p0);
+        prof_r0 = PalProfileThreadRan();
     }
 
     if (sysnr == GRAMINE_CUSTOM_SYSCALL_NR) {
@@ -105,6 +128,14 @@ out:
         __atomic_fetch_add(&row[1], sysprof_tsc() - prof_t0, __ATOMIC_RELAXED);
         __atomic_fetch_add(&row[2], m1 - prof_m0, __ATOMIC_RELAXED);
         __atomic_fetch_add(&row[3], p1 - prof_p0, __ATOMIC_RELAXED);
+        int sh = sysprof_shadow_row(sysnr);
+        if (sh >= 0) {
+            uint64_t r1 = PalProfileThreadRan();
+            uint64_t ran = r1 - prof_r0, parked = p1 - prof_p0;
+            uint64_t* srow = &g_libos_sysprof[sh * 4];
+            __atomic_fetch_add(&srow[0], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&srow[1], ran > parked ? ran - parked : 0, __ATOMIC_RELAXED);
+        }
     }
 
     return_from_syscall(context);

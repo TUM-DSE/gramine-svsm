@@ -25,6 +25,10 @@ void PalProfileThreadCycles(uint64_t* monitor, uint64_t* park) {
     _PalProfileThreadCycles(monitor, park);
 }
 
+uint64_t PalProfileThreadRan(void) {
+    return _PalProfileThreadRan();
+}
+
 int PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr) {
     return _PalSegmentBaseGet(reg, addr);
 }
