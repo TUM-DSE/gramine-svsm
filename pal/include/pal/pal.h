@@ -1305,6 +1305,15 @@ void PalProfileThreadCycles(uint64_t* monitor, uint64_t* park);
 uint64_t PalProfileThreadRan(void);
 
 /*!
+ * \brief Charge this thread's own running time (ran less parks) to `word` from now until
+ *        PalProfileOwnEnd, incrementally - at each of its switch-outs and at the end - so a
+ *        call that blocks across a sample is charged to the window it ran in. No-ops when
+ *        not profiling; a nested Begin keeps the outer word.
+ */
+void PalProfileOwnBegin(uint64_t* word);
+void PalProfileOwnEnd(void);
+
+/*!
  * \brief Set segment register.
  *
  * \param reg   The register base to be set (#pal_segment_reg).

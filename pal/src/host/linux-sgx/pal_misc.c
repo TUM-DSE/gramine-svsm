@@ -825,3 +825,9 @@ void _PalProfileThreadCycles(uint64_t* monitor, uint64_t* park) {
 uint64_t _PalProfileThreadRan(void) {
     return 0;
 }
+
+void _PalProfileOwnBegin(uint64_t* word) {
+    (void)word;
+}
+
+void _PalProfileOwnEnd(void) {}

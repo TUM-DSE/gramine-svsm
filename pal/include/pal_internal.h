@@ -254,6 +254,8 @@ int _PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr);
 uint64_t* _PalProfileSyscallTable(void);
 void _PalProfileThreadCycles(uint64_t* monitor, uint64_t* park);
 uint64_t _PalProfileThreadRan(void);
+void _PalProfileOwnBegin(uint64_t* word);
+void _PalProfileOwnEnd(void);
 int _PalSegmentBaseSet(enum pal_segment_reg reg, uintptr_t addr);
 int _PalCpuIdRetrieve(uint32_t leaf, uint32_t subleaf, uint32_t values[4]);
 int _PalAttestationReport(const void* user_report_data, size_t* user_report_data_size,

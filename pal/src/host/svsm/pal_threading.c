@@ -390,7 +390,12 @@ static bool park_on(const uint64_t* arms, size_t n, uint64_t usec) {
 /* The words the vault's blocked contexts wait on, for a wait elsewhere that
  * must also wake on them (the lineage wait for a child, pal_process.c). */
 static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
-    return gather_arms_for(arms, max, partial, /*lineage=*/false);
+    if (__builtin_expect(!g_pal_svsm_prof_on, 1))
+        return gather_arms_for(arms, max, partial, /*lineage=*/false);
+    uint64_t t0 = pal_svsm_prof_now();
+    size_t n = gather_arms_for(arms, max, partial, /*lineage=*/false);
+    pal_svsm_prof_mc(PROF_ROW_GATHER, 1, pal_svsm_prof_now() - t0);
+    return n;
 }
 
 size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial) {
@@ -447,8 +452,12 @@ static void idle_until(uint64_t deadline_us) {
                 return;
             }
         }
-        if (park_on(arms, n, partial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US
-                                                                     : left)) {
+        uint64_t pp0 = (__builtin_expect(g_pal_svsm_prof_on, 0) && partial) ? pal_svsm_prof_now() : 0;
+        bool parked = park_on(arms, n, partial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US
+                                                                              : left);
+        if (pp0)
+            pal_svsm_prof_mc(PROF_ROW_PARTIAL_PARK, 1, pal_svsm_prof_now() - pp0);
+        if (parked) {
             /* RETURN, do not loop. A park can end because a watched word
              * moved, and that is a state change the waiter has to see -
              * looping here would re-park until the deadline passed and
@@ -505,12 +514,18 @@ static void idle_until(uint64_t deadline_us) {
          * of its own, and a whole slice before it looks again would make
          * every reply inside an invoke up to 100 us late. pick_next makes
          * the ready one runnable. */
+        uint64_t sp0 = __builtin_expect(g_pal_svsm_prof_on, 0) ? pal_svsm_prof_now() : 0;
         while (pal_svsm_now_usec() < until) {
             for (int i = 0; i < SVSM_IDLE_TEST_PAUSES; i++)
                 __asm__ volatile("pause");
-            if (any_watch_ready())
+            if (any_watch_ready()) {
+                if (sp0)
+                    pal_svsm_prof_mc(PROF_ROW_IDLE_SPIN, 1, pal_svsm_prof_now() - sp0);
                 return;
+            }
         }
+        if (sp0)
+            pal_svsm_prof_mc(PROF_ROW_IDLE_SPIN, 1, pal_svsm_prof_now() - sp0);
         pal_svsm_nop();
         /* One round per slice spun here. A slice is at most
          * SVSM_IDLE_SLICE_US, so the count bounds how long a client sat
@@ -778,8 +793,12 @@ static PAL_HANDLE pick_next(void) {
         uint64_t earliest = 0;
         bool have_deadline = false;
 
+        const bool prof = __builtin_expect(g_pal_svsm_prof_on, 0);
+        uint64_t scan0 = prof ? pal_svsm_prof_now() : 0, tests = 0;
         PAL_HANDLE t = g_current;
         do {
+            if (prof && t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch)
+                tests++;
             /* A poller whose handles have become ready is runnable NOW,
              * whatever its deadline says. Nothing else re-tests it: a
              * peer's send runs no code in this vault, and the only other
@@ -808,6 +827,10 @@ static PAL_HANDLE pick_next(void) {
             }
             t = t->thread.next;
         } while (t != g_current);
+        if (prof) {
+            pal_svsm_prof_mc(PROF_ROW_SCHED_PASS, 1, pal_svsm_prof_now() - scan0);
+            pal_svsm_prof_mc(PROF_ROW_POLLER_TEST, tests, 0);
+        }
 
         /* Round robin: start after whoever ran last, so a thread that yields
          * goes to the back. */
@@ -835,8 +858,12 @@ static PAL_HANDLE pick_next(void) {
             size_t n = gather_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
             if (!n && !partial)
                 return NULL;
-            if (park_on(arms, n, partial ? SVSM_PARK_PARTIAL_US
-                                         : SVSM_PARK_FALLBACK_US)) {
+            uint64_t pq0 = (prof && partial) ? pal_svsm_prof_now() : 0;
+            bool parked = park_on(arms, n, partial ? SVSM_PARK_PARTIAL_US
+                                                   : SVSM_PARK_FALLBACK_US);
+            if (pq0)
+                pal_svsm_prof_mc(PROF_ROW_PARTIAL_PARK, 1, pal_svsm_prof_now() - pq0);
+            if (parked) {
                 pal_svsm_poll_wake();
                 continue;
             }

@@ -68,11 +68,15 @@ static inline __attribute__((always_inline)) noreturn void emulate_syscall(PAL_C
 
     unsigned long sysnr = pal_context_get_syscall(context);
     arch_syscall_arg_t ret = 0;
-    uint64_t prof_t0 = 0, prof_m0 = 0, prof_p0 = 0, prof_r0 = 0;
+    uint64_t prof_t0 = 0, prof_m0 = 0, prof_p0 = 0;
+    int prof_sh = -1;
     if (prof) {
         prof_t0 = sysprof_tsc();
         PalProfileThreadCycles(&prof_m0, &prof_p0);
-        prof_r0 = PalProfileThreadRan();
+        /* own CPU, charged incrementally by the PAL from here to PalProfileOwnEnd */
+        prof_sh = sysnr < 512 ? sysprof_shadow_row(sysnr) : -1;
+        if (prof_sh >= 0)
+            PalProfileOwnBegin(&g_libos_sysprof[prof_sh * 4 + 1]);
     }
 
     if (sysnr == GRAMINE_CUSTOM_SYSCALL_NR) {
@@ -128,13 +132,9 @@ out:
         __atomic_fetch_add(&row[1], sysprof_tsc() - prof_t0, __ATOMIC_RELAXED);
         __atomic_fetch_add(&row[2], m1 - prof_m0, __ATOMIC_RELAXED);
         __atomic_fetch_add(&row[3], p1 - prof_p0, __ATOMIC_RELAXED);
-        int sh = sysprof_shadow_row(sysnr);
-        if (sh >= 0) {
-            uint64_t r1 = PalProfileThreadRan();
-            uint64_t ran = r1 - prof_r0, parked = p1 - prof_p0;
-            uint64_t* srow = &g_libos_sysprof[sh * 4];
-            __atomic_fetch_add(&srow[0], 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&srow[1], ran > parked ? ran - parked : 0, __ATOMIC_RELAXED);
+        if (prof_sh >= 0) {
+            PalProfileOwnEnd();
+            __atomic_fetch_add(&g_libos_sysprof[prof_sh * 4], 1, __ATOMIC_RELAXED);
         }
     }
 
