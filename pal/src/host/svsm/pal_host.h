@@ -132,6 +132,13 @@ struct pal_handle_inner {
              * or an in-process pipe/eventfd), so a park needs none of its arms
              * and it never makes the park partial. Set by pal_svsm_poll_block. */
             bool       notify_covered;
+            /* The missed-test check (O1-WAKE.md, 2026-11-27): o1_audit - woken by
+             * svsm.o1_audit_us although its scheduler test said "not ready";
+             * o1_timeout_scanned - its deadline fired in a pass whose scan tested
+             * it and said "not ready". Either way pal_svsm_poll_block then looks in
+             * its own context, and a ready handle there is a missed test. */
+            bool       o1_audit;
+            bool       o1_timeout_scanned;
             /* What a thread blocked in poll() is watching, so that the
              * scheduler can re-test it without a monitor call.
              *

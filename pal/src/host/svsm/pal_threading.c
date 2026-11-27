@@ -313,6 +313,12 @@ bool g_pal_svsm_o1_wake = true;
  * C to save. svsm.o1_cover = true turns it on (O1-WAKE.md, the open question). */
 bool g_pal_svsm_o1_cover = false;
 uint64_t g_pal_svsm_poll_scan_us = PW_SCAN_INTERVAL_US_DEFAULT;
+uint64_t g_pal_svsm_o1_audit_us = 0;
+/* The poll token (see pal_svsm_poll_block): defined here because pick_next's
+ * missed-test audit compares against it. */
+static const char g_poll_token_storage;
+#define POLL_TOKEN ((PAL_HANDLE)(void*)&g_poll_token_storage)
+static uint64_t g_last_o1_audit_us;
 
 /* `skip_covered`: for a PARK only (O1-WAKE.md C) - a Notify ends a Park, so a
  * thread whose every wait is notified needs no arm there. The Sleep fallback and
@@ -841,6 +847,15 @@ static PAL_HANDLE pick_next(void) {
             if (scan)
                 g_last_poll_scan_us = now;
         }
+        /* The missed-test audit (diagnosis, svsm.o1_audit_us): once per interval,
+         * every blocked watched poller the test below calls not ready is woken
+         * anyway, as the old wake-all did, and checks in its own context. */
+        bool audit = false;
+        if (g_pal_svsm_o1_wake && g_pal_svsm_o1_audit_us && scan
+                && now - g_last_o1_audit_us >= g_pal_svsm_o1_audit_us) {
+            audit = true;
+            g_last_o1_audit_us = now;
+        }
         PAL_HANDLE t = g_current;
         do {
             /* A poller whose handles have become ready is runnable NOW,
@@ -857,9 +872,17 @@ static PAL_HANDLE pick_next(void) {
                 t->thread.waiting_on = NULL;
                 t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
                 pal_svsm_preempt_update(true);
+            } else if (audit && t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
+                       && t->thread.waiting_on == POLL_TOKEN) {
+                PAL_SVSM_NET_CTR_INC(o1_audits);
+                t->thread.o1_audit   = true;
+                t->thread.waiting_on = NULL;
+                t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+                pal_svsm_preempt_update(true);
             }
             if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.has_deadline) {
                 if (now >= t->thread.deadline_us) {
+                    t->thread.o1_timeout_scanned = g_pal_svsm_o1_wake && scan && t->thread.n_watch;
                     t->thread.timed_out  = true;
                     t->thread.waiting_on = NULL;
                     t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
@@ -1392,8 +1415,7 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
  * may have consumed what it was woken for. It is never dereferenced - only
  * compared - and never handed to anything that would.
  */
-static const char g_poll_token_storage;
-#define POLL_TOKEN ((PAL_HANDLE)(void*)&g_poll_token_storage)
+/* (POLL_TOKEN is defined above, before pick_next, which the audit needs it in.) */
 
 enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
     /* Counted into the WAITERS of every socket ring this thread waits to read
@@ -1437,7 +1459,42 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
         }
         g_current->thread.notify_covered = covered;
     }
+    /* The missed-test check needs the watch set after the block, which
+     * pal_svsm_thread_block forgets; the arrays are the caller's and live on. */
+    PAL_HANDLE self = g_current;
+    PAL_HANDLE* wh = self ? self->thread.watch_handles : NULL;
+    const uint32_t* we = self ? self->thread.watch_events : NULL;
+    size_t wn = self ? self->thread.n_watch : 0;
+    uint64_t t0 = (g_pal_svsm_o1_wake && wn) ? pal_svsm_now_usec() : 0;
+    if (self) {
+        self->thread.o1_audit = false;
+        self->thread.o1_timeout_scanned = false;
+    }
     enum pal_svsm_wait_result r = pal_svsm_thread_block(POLL_TOKEN, deadline_us);
+    /* O1-WAKE.md, 2026-11-27: the scheduler's test said "not ready" and this
+     * thread was woken anyway (the audit) or by its deadline. A handle its own
+     * look calls ready that the scheduler-context test, run just before, still
+     * calls not ready is a MISSED TEST: under the ready-only wake it would have
+     * slept on to its deadline (or for ever). Counted by kind, never acted on. */
+    if (self && wn && (self->thread.o1_audit
+                       || (r == PAL_SVSM_WAIT_TIMEOUT && self->thread.o1_timeout_scanned))) {
+        self->thread.o1_audit = false;
+        self->thread.o1_timeout_scanned = false;
+        PAL_SVSM_NET_CTR_INC(o1_checked);
+        int k = pal_svsm_watch_miss_kind(wh, we, wn);
+        if (k >= 0 && k < O1K_N) {
+            uint64_t late = pal_svsm_now_usec() - t0;
+            PAL_SVSM_NET_CTR_INC(o1_miss[k]);
+            uint64_t m = __atomic_load_n(&g_pal_svsm_net_ctr.o1_miss_max_us, __ATOMIC_RELAXED);
+            if (late > m)
+                __atomic_store_n(&g_pal_svsm_net_ctr.o1_miss_max_us, late, __ATOMIC_RELAXED);
+#ifdef PROF_ROW_GATHER
+            /* the diagnostic gramine: live, per vault, in the monitor's VAULT_PROF */
+            pal_svsm_prof_mc(0x10 + (unsigned)k, 1, 0);
+            pal_svsm_prof_mc(0x18 + (unsigned)k, late, 0);
+#endif
+        }
+    }
     pal_svsm_sock_waiters_drop(marks, nmarks);
     return r;
 }
