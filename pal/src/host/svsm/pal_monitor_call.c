@@ -133,12 +133,52 @@ static inline void prof_account(uint64_t code, uint64_t ticks) {
  * running time is the sum of its slices - charged when it is switched out, from the TSC
  * it was switched in at. A blocking syscall's wall then splits into this thread's own
  * slices and its siblings' (which the wall counts; park does not cover a PAL switch). */
+void pal_svsm_prof_mc(unsigned row, uint64_t count, uint64_t ticks) {
+    if (!g_pal_svsm_prof_on || row >= 256)
+        return;
+    __atomic_fetch_add(&g_pal_svsm_prof.mc[row][0], count, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_pal_svsm_prof.mc[row][1], ticks, __ATOMIC_RELAXED);
+}
+
+/* Charge the profiled call this context is in with its own time since the last
+ * charge: ran less parked. `ran` is the context's ran clock at this moment. */
+static void prof_own_charge(PAL_SVSM_TCB* tcb, uint64_t ran) {
+    if (!tcb->prof_own_word)
+        return;
+    uint64_t dr = ran - tcb->prof_own_ran0, dp = tcb->prof_park - tcb->prof_own_park0;
+    if (dr > dp)
+        __atomic_fetch_add(tcb->prof_own_word, dr - dp, __ATOMIC_RELAXED);
+    tcb->prof_own_ran0 = ran;
+    tcb->prof_own_park0 = tcb->prof_park;
+}
+
 void pal_svsm_prof_switch(PAL_SVSM_TCB* prev, PAL_SVSM_TCB* next) {
     uint64_t now = prof_tsc();
-    if (prev && prev->prof_on_since)
+    if (prev && prev->prof_on_since) {
         prev->prof_ran += now - prev->prof_on_since;
+        prof_own_charge(prev, prev->prof_ran);
+    }
     if (next)
         next->prof_on_since = now;
+}
+
+void _PalProfileOwnBegin(uint64_t* word) {
+    if (!g_pal_svsm_prof_on)
+        return;
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    if (tcb->prof_own_word)
+        return;   /* nested (a signal handler's call): the outer one keeps charging */
+    tcb->prof_own_word = word;
+    tcb->prof_own_ran0 = _PalProfileThreadRan();
+    tcb->prof_own_park0 = tcb->prof_park;
+}
+
+void _PalProfileOwnEnd(void) {
+    if (!g_pal_svsm_prof_on)
+        return;
+    PAL_SVSM_TCB* tcb = pal_get_svsm_tcb();
+    prof_own_charge(tcb, _PalProfileThreadRan());
+    tcb->prof_own_word = NULL;
 }
 
 uint64_t _PalProfileThreadRan(void) {

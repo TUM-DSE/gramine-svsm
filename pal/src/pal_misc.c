@@ -29,6 +29,14 @@ uint64_t PalProfileThreadRan(void) {
     return _PalProfileThreadRan();
 }
 
+void PalProfileOwnBegin(uint64_t* word) {
+    _PalProfileOwnBegin(word);
+}
+
+void PalProfileOwnEnd(void) {
+    _PalProfileOwnEnd();
+}
+
 int PalSegmentBaseGet(enum pal_segment_reg reg, uintptr_t* addr) {
     return _PalSegmentBaseGet(reg, addr);
 }

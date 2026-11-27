@@ -43,6 +43,12 @@ typedef struct pal_svsm_tcb {
          * (pal_svsm_prof_switch), from prof_on_since, the TSC it last started. */
         uint64_t   prof_ran;
         uint64_t   prof_on_since;
+        /* ...charged to the running profiled call INCREMENTALLY (at each
+         * switch-out and at the call's end, PalProfileOwnBegin/End), so a call
+         * that blocked across a GetStat lands its own time in the right window. */
+        uint64_t*  prof_own_word;
+        uint64_t   prof_own_ran0;
+        uint64_t   prof_own_park0;
     };
 } PAL_SVSM_TCB;
 
@@ -64,6 +70,15 @@ extern bool g_pal_svsm_prof_on;
 /* The profile's own-CPU clock (pal_monitor_call.c): charge `prev` up to now and
  * start `next` (NULL prev: the outgoing context is dead). Only when profiling. */
 void pal_svsm_prof_switch(PAL_SVSM_TCB* prev, PAL_SVSM_TCB* next);
+/* The scheduler's counters (the breakdown's C2 check, owner 2026-11-27; the diag
+ * gramine only), as monitor-call rows whose low byte no call has: */
+#define PROF_ROW_SCHED_PASS   0x03   /* pick_next scans: count, ticks in the scan */
+#define PROF_ROW_POLLER_TEST  0x05   /* blocked-poller tests: count (per pass = the ring) */
+#define PROF_ROW_PARTIAL_PARK 0x06   /* parks bounded for partial arms: count, ticks parked */
+#define PROF_ROW_IDLE_SPIN    0x07   /* idle spin slices (Sleep refused): count, ticks spun */
+#define PROF_ROW_GATHER       0x08   /* gather_arms (the park path): count, ticks */
+void pal_svsm_prof_mc(unsigned row, uint64_t count, uint64_t ticks);
+static inline uint64_t pal_svsm_prof_now(void) { return __builtin_ia32_rdtsc(); }
 bool pal_svsm_profile_start(void);
 void pal_svsm_console_write(const void* buf, size_t size);   /* pal_monitor_call.c */
 void pal_svsm_threads_report_holds(int64_t foreign);

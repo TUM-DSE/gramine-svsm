@@ -57,6 +57,8 @@ PalSegmentBaseGet
 PalProfileSyscallTable
 PalProfileThreadCycles
 PalProfileThreadRan
+PalProfileOwnBegin
+PalProfileOwnEnd
 PalSegmentBaseSet
 PalStreamChangeName
 PalStreamAttributesSetByHandle
