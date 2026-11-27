@@ -458,6 +458,12 @@ static bool sock_chan_gone(PAL_HANDLE handle) {
  * and one after it sees the count and Notifies. Loads and stores on this
  * vault's own control pages; no heap (it runs where pal_svsm_poller_ready
  * does). */
+/* Would pal_svsm_sock_waiters_add count a READ wait on this socket (a channel
+ * of its own or the shared one, not a listener)? O1-WAKE.md C reads this. */
+bool pal_svsm_sock_waiter_counted(PAL_HANDLE h) {
+    return h && h->hdr.type == PAL_TYPE_SOCKET && !h->sock.listening && sock_has_chan(h);
+}
+
 size_t pal_svsm_sock_waiters_add(PAL_HANDLE* handles, const uint32_t* events, size_t count,
                                  struct pal_svsm_waiter* marks, size_t max) {
     size_t k = 0;

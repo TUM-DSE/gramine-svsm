@@ -313,6 +313,12 @@ int pal_svsm_parse_addr(const char* s, bool with_port, uint8_t ip[4], uint16_t* 
 bool pal_svsm_eventfd_readable(PAL_HANDLE handle);
 bool pal_svsm_eventfd_writable(PAL_HANDLE handle);
 void pal_svsm_poll_wake(void);
+/* O1-WAKE.md (owner GO 2026-11-27): svsm.o1_wake (default true; false = the old
+ * wake-all, every-pass re-test and arms of every thread) and svsm.poll_scan_us
+ * (B's interval, default 20, 0 = every pass). */
+extern bool g_pal_svsm_o1_wake;
+extern uint64_t g_pal_svsm_poll_scan_us;
+bool pal_svsm_sock_waiter_counted(PAL_HANDLE h);
 /* The Park arms of every blocked context (at most `max`); *partial if some
  * were left out. */
 size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial);

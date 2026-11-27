@@ -14,6 +14,7 @@
 #include "pal_internal.h"
 #include "pal_monitor_call.h"
 #include "pal_svsm.h"
+#include "pal_svsm_wake.h"
 #include "pal_rtld.h"
 #include "toml_utils.h"
 
@@ -448,6 +449,27 @@ noreturn void pal_svsm_main(void)
                 pal_svsm_fail("svsm.debug is not a boolean", 0);
         }
         pal_svsm_thread_cache_init((int)cap, debug);
+    }
+
+    /* O(1) wake (MicroVault notes/libos/O1-WAKE.md; owner GO 2026-11-27):
+     *
+     *   [svsm]
+     *   o1_wake = true        # false: the old scheduler - a wake readies every
+     *                         # poller, every pass re-tests them all, and every
+     *                         # thread's arms go to the park (the A/B switch)
+     *   poll_scan_us = 20     # while another context can run, blocked pollers
+     *                         # are re-tested at most this often; 0 = every pass
+     */
+    if (manifest_svsm_early) {
+        bool o1 = true;
+        int64_t scan = PW_SCAN_INTERVAL_US_DEFAULT;
+        if (toml_bool_in(manifest_svsm_early, "o1_wake", true, &o1) < 0)
+            pal_svsm_fail("svsm.o1_wake is not a boolean", 0);
+        if (toml_int_in(manifest_svsm_early, "poll_scan_us", PW_SCAN_INTERVAL_US_DEFAULT, &scan) < 0
+                || scan < 0 || scan > 100000)
+            pal_svsm_fail("svsm.poll_scan_us must be an integer 0..100000", 0);
+        g_pal_svsm_o1_wake = o1;
+        g_pal_svsm_poll_scan_us = (uint64_t)scan;
     }
 
     /* Raw `syscall` fast paths (MicroVault notes/sched/SYSCALL-FASTPATH.md;

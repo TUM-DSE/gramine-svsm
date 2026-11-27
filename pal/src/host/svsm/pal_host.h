@@ -127,6 +127,11 @@ struct pal_handle_inner {
             uint64_t   arms[PAL_SVSM_THREAD_ARMS];
             uint8_t    n_arms;
             bool       arms_partial;
+            /* Every handle it waits on wakes this vault by itself (O1-WAKE.md C:
+             * a counted READ waiter on a channel socket - its writer Notifies -
+             * or an in-process pipe/eventfd), so a park needs none of its arms
+             * and it never makes the park partial. Set by pal_svsm_poll_block. */
+            bool       notify_covered;
             /* What a thread blocked in poll() is watching, so that the
              * scheduler can re-test it without a monitor call.
              *

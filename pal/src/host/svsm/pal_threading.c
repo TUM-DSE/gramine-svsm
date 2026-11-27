@@ -43,6 +43,7 @@
 #include "pal_rtld.h"
 #include "pal_svsm.h"
 #include "pal_svsm_chan.h"
+#include "pal_svsm_wake.h"   /* O1-WAKE.md policy; pw_wake_ready is included again below */
 
 /* Same shape as the Linux PAL's: 64 KiB is enough for LibOS and PAL frames,
  * and an application thread runs on the stack its clone() named, not this
@@ -305,11 +306,22 @@ static bool arm_lineage_kind(uint64_t arm) {
            || which == PAL_SVSM_LW_ARM_LWORD_FS;
 }
 
-static size_t gather_arms_for(uint64_t* arms, size_t max, bool* partial, bool lineage) {
+bool g_pal_svsm_o1_wake = true;
+uint64_t g_pal_svsm_poll_scan_us = PW_SCAN_INTERVAL_US_DEFAULT;
+
+/* `skip_covered`: for a PARK only (O1-WAKE.md C) - a Notify ends a Park, so a
+ * thread whose every wait is notified needs no arm there. The Sleep fallback and
+ * the lineage wait keep every arm: that a Notify ends them is not relied on. */
+static size_t gather_arms_for(uint64_t* arms, size_t max, bool* partial, bool lineage,
+                              bool skip_covered) {
     size_t n = 0;
     *partial = false;
     PAL_HANDLE t = g_current;
     do {
+        if (skip_covered && t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.notify_covered) {
+            t = t->thread.next;
+            continue;
+        }
         if (t->thread.state == PAL_SVSM_THREAD_BLOCKED) {
             if (t->thread.arms_partial)
                 *partial = true;
@@ -390,7 +402,13 @@ static bool park_on(const uint64_t* arms, size_t n, uint64_t usec) {
 /* The words the vault's blocked contexts wait on, for a wait elsewhere that
  * must also wake on them (the lineage wait for a child, pal_process.c). */
 static size_t gather_arms(uint64_t* arms, size_t max, bool* partial) {
-    return gather_arms_for(arms, max, partial, /*lineage=*/false);
+    return gather_arms_for(arms, max, partial, /*lineage=*/false, /*skip_covered=*/false);
+}
+
+/* The arms for a Park (idle_until, pick_next): the covered threads' left out. */
+static size_t gather_park_arms(uint64_t* arms, size_t max, bool* partial) {
+    return gather_arms_for(arms, max, partial, /*lineage=*/false,
+                           /*skip_covered=*/g_pal_svsm_o1_wake);
 }
 
 size_t pal_svsm_gather_arms(uint64_t* arms, size_t max, bool* partial) {
@@ -422,7 +440,7 @@ static void idle_until(uint64_t deadline_us) {
          * the spin that were here before are still what happens. */
         uint64_t arms[PAL_SVSM_PARK_ARMS];
         bool partial = false;
-        size_t n = gather_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
+        size_t n = gather_park_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
         /* Partial: a word that was left out can move unseen, so the park is
          * bounded the way the Sleep below is. Before the gather stopped at
          * the monitor's three, a fourth arm got the whole park refused, and
@@ -440,7 +458,8 @@ static void idle_until(uint64_t deadline_us) {
              * arms rather than Park's three. */
             uint64_t larms[PAL_SVSM_LINEAGE_ARMS];
             bool lpartial = false;
-            size_t ln = gather_arms_for(larms, PAL_SVSM_LINEAGE_ARMS, &lpartial, /*lineage=*/true);
+            size_t ln = gather_arms_for(larms, PAL_SVSM_LINEAGE_ARMS, &lpartial, /*lineage=*/true,
+                                        /*skip_covered=*/false);
             uint64_t lw = lpartial && left > SVSM_PARK_PARTIAL_US ? SVSM_PARK_PARTIAL_US : left;
             if (pal_svsm_lineage_wait(ln ? larms : NULL, ln, 0, lw, NULL) >= 0) {
                 pal_svsm_poll_wake();
@@ -459,6 +478,10 @@ static void idle_until(uint64_t deadline_us) {
             pal_svsm_poll_wake();
             return;
         }
+        /* The Sleep below takes every thread's arms (O1-WAKE.md C covers a
+         * Park only). */
+        if (g_pal_svsm_o1_wake)
+            n = gather_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
         /* The Park was refused: no service slot, so this vault has
          * nothing the scheduler could park it in. Sleep instead - but
          * sleep the SAME WAY, watching the same words and bounded, so a
@@ -770,6 +793,32 @@ static void stall_report(uint64_t now) {
  * Expires deadlines on the way past, and waits for the nearest one if that is
  * the only thing that can change the answer.
  */
+/* O1-WAKE.md B: when the blocked pollers were last re-tested. */
+static uint64_t g_last_poll_scan_us;
+
+/* Can anything other than a blocked context run - the current one, or another
+ * already runnable? (A state load per context; no re-test.) */
+static bool others_runnable(void) {
+    PAL_HANDLE t = g_current;
+    do {
+        if (t->thread.state == PAL_SVSM_THREAD_RUNNABLE || t->thread.state == PAL_SVSM_THREAD_RUNNING)
+            return true;
+        t = t->thread.next;
+    } while (t != g_current);
+    return false;
+}
+
+/* Is a blocked thread waiting notify-covered (O1-WAKE.md C)? */
+static bool any_covered_waiter(void) {
+    PAL_HANDLE t = g_current;
+    do {
+        if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.notify_covered)
+            return true;
+        t = t->thread.next;
+    } while (t != g_current);
+    return false;
+}
+
 static PAL_HANDLE pick_next(void) {
     assert(g_current);
 
@@ -778,6 +827,15 @@ static PAL_HANDLE pick_next(void) {
         uint64_t earliest = 0;
         bool have_deadline = false;
 
+        /* O1-WAKE.md B: while another context can run, the blocked pollers
+         * are re-tested at most every svsm.poll_scan_us; with none - the only
+         * case that can end in a park - every pass. */
+        bool scan = true;
+        if (g_pal_svsm_o1_wake) {
+            scan = pw_scan_due(now, g_last_poll_scan_us, g_pal_svsm_poll_scan_us, others_runnable());
+            if (scan)
+                g_last_poll_scan_us = now;
+        }
         PAL_HANDLE t = g_current;
         do {
             /* A poller whose handles have become ready is runnable NOW,
@@ -788,7 +846,7 @@ static PAL_HANDLE pick_next(void) {
              * control words - no monitor call - so this costs two loads
              * per watched socket per scheduler pass, and only while
              * something is actually blocked in poll(). */
-            if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
+            if (scan && t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
                     && pal_svsm_poller_ready(t)) {
                 PAL_SVSM_NET_CTR_INC(pollers_ready);
                 t->thread.waiting_on = NULL;
@@ -832,8 +890,12 @@ static PAL_HANDLE pick_next(void) {
             stall_report(now);
             uint64_t arms[PAL_SVSM_PARK_ARMS];
             bool partial = false;
-            size_t n = gather_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
-            if (!n && !partial)
+            size_t n = gather_park_arms(arms, PAL_SVSM_PARK_ARMS, &partial);
+            /* Nothing armed, nothing partial: with o1_wake that is also a
+             * vault whose every waiter is notify-covered - parked on the
+             * fallback bound, woken by its writers' Notify. Without any
+             * covered thread it is the deadlock it always was. */
+            if (!n && !partial && !(g_pal_svsm_o1_wake && any_covered_waiter()))
                 return NULL;
             if (park_on(arms, n, partial ? SVSM_PARK_PARTIAL_US
                                          : SVSM_PARK_FALLBACK_US)) {
@@ -1272,6 +1334,7 @@ void pal_svsm_current_clear_interrupted(void) {
 static void wait_forget(PAL_HANDLE self) {
     self->thread.n_arms        = 0;
     self->thread.arms_partial  = false;
+    self->thread.notify_covered = false;
     self->thread.n_watch       = 0;
     self->thread.watch_handles = NULL;
     self->thread.watch_events  = NULL;
@@ -1339,6 +1402,36 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
                                            g_current->thread.watch_events,
                                            g_current->thread.n_watch, marks,
                                            PAL_SVSM_WAITER_MARKS);
+    /* O1-WAKE.md C: does every handle of this wait wake the vault by itself?
+     * Read before blocking, from the same watch set the count was made from. */
+    if (g_pal_svsm_o1_wake && g_current && g_current->thread.n_watch) {
+        bool covered = true;
+        for (size_t i = 0; i < g_current->thread.n_watch && covered; i++) {
+            PAL_HANDLE h = g_current->thread.watch_handles[i];
+            uint32_t ev  = g_current->thread.watch_events[i];
+            if (!h)
+                continue;
+            enum pw_entry_kind kind = PW_ENTRY_OTHER;
+            bool counted = false;
+            switch (h->hdr.type) {
+                case PAL_TYPE_SOCKET:
+                    kind = PW_ENTRY_SOCKET;
+                    counted = pal_svsm_sock_waiter_counted(h);
+                    break;
+                case PAL_TYPE_PIPE:
+                case PAL_TYPE_PIPECLI:
+                    kind = pal_svsm_pipe_is_shared(h) ? PW_ENTRY_OTHER : PW_ENTRY_LOCAL;
+                    break;
+                case PAL_TYPE_EVENTFD:
+                    kind = PW_ENTRY_LOCAL;
+                    break;
+                default:
+                    break;
+            }
+            covered = pw_entry_covered(kind, ev & PAL_WAIT_READ, ev & PAL_WAIT_WRITE, counted);
+        }
+        g_current->thread.notify_covered = covered;
+    }
     enum pal_svsm_wait_result r = pal_svsm_thread_block(POLL_TOKEN, deadline_us);
     pal_svsm_sock_waiters_drop(marks, nmarks);
     return r;
@@ -1400,8 +1493,29 @@ bool pal_svsm_others_runnable(uint64_t now_us, uint64_t* next_us) {
     return false;
 }
 
+/* O1-WAKE.md A: ready the pollers that have something - each tested in place,
+ * two loads per watched socket - and leave the others blocked. It used to ready
+ * every one (wake_all of the token), and each unready poller was switched in,
+ * re-tested its set, re-armed and blocked again: a herd per wake. */
+#define PW_T                  PAL_HANDLE
+#define PW_NEXT(t)            ((t)->thread.next)
+#define PW_IS_POLLWAIT(t)     ((t)->thread.state == PAL_SVSM_THREAD_BLOCKED \
+                               && (t)->thread.waiting_on == POLL_TOKEN)
+#define PW_READY(t)           ((t)->thread.n_watch && pal_svsm_poller_ready(t))
+#define PW_DEADLINE_DUE(t, n) ((t)->thread.has_deadline && (n) >= (t)->thread.deadline_us)
+#define PW_MAKE_RUNNABLE(t)   do { (t)->thread.waiting_on = NULL; \
+                                   (t)->thread.state = PAL_SVSM_THREAD_RUNNABLE; } while (0)
+#include "pal_svsm_wake.h"
+
 void pal_svsm_poll_wake(void) {
-    pal_svsm_thread_wake_all(POLL_TOKEN);
+    if (!g_pal_svsm_o1_wake) {
+        pal_svsm_thread_wake_all(POLL_TOKEN);
+        return;
+    }
+    if (!g_current)
+        return;
+    if (pw_wake_ready(g_current, pal_svsm_now_usec()))
+        refresh_preempt_wanted();
 }
 
 void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on) {
