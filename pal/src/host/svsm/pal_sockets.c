@@ -3741,6 +3741,23 @@ pal_wait_flags_t pal_svsm_sock_wait_ready(PAL_HANDLE handle, pal_wait_flags_t wa
         return over;
     if (!sock_has_chan(handle) || handle->sock.closed)
         return PAL_WAIT_ERROR;          /* closed under it: let it look */
+    /* A SHARED socket's room and credit come in frames at the mux head (a
+     * CREDIT, a FIN, an RST), which change this socket's state only once
+     * somebody ROUTES the head - and a writer waiting for credit asks nothing
+     * that routes. The old wake readied every poller, so the writer ran and
+     * its own send loop routed (mux_poll_route); with O1-WAKE.md A a poller is
+     * readied only by this test, so the test routes - as `readable` already
+     * does for a reader. Without it a vault whose only waiter is a writer (the
+     * SeBS uploader streaming to storage through netsvc) sat on an unrouted
+     * credit until its PAL_SOCK_PARK_US bound (200 ms). Safe here: the router
+     * defers what needs the heap (g_pal_svsm_sched_deferred) to the thread. */
+    if (sock_shares(handle) && (want & (PAL_WAIT_WRITE | PAL_SVSM_WAIT_CREDIT))) {
+        struct pal_chan_ring rin;
+        ring_for(handle, &rin, NULL);
+        (void)mux_poll_route(handle, &rin);
+        if ((want & (PAL_WAIT_WRITE | PAL_SVSM_WAIT_CREDIT)) && sock_wr_over(handle))
+            return want & (PAL_WAIT_WRITE | PAL_SVSM_WAIT_CREDIT);   /* a FIN/RST it routed */
+    }
     pal_wait_flags_t got = 0;
     bool ended = handle->sock.broken;
     if (want & PAL_WAIT_READ) {
