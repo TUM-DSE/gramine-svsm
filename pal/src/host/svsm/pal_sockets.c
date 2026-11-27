@@ -3715,6 +3715,17 @@ bool pal_svsm_sock_writable(PAL_HANDLE handle) {
      * socket with a full ring was never writable at all. */
     if (sock_wr_over(handle) || handle->sock.broken || sock_chan_gone(handle))
         return true;
+    /* The same as pal_svsm_sock_wait_ready's (O1-WAKE.md A, 2026-11-27): on a
+     * SHARED socket the credit is a frame at the mux head, so route it before
+     * asking - a poll(POLLOUT)/epoll writer (Go netpoll, asyncio, nginx) is
+     * otherwise readied only when some reader happens to route the head. */
+    if (sock_shares(handle) && sock_no_credit(handle)) {
+        struct pal_chan_ring rin;
+        ring_for(handle, &rin, NULL);
+        (void)mux_poll_route(handle, &rin);
+        if (sock_wr_over(handle) || handle->sock.broken || sock_chan_gone(handle))
+            return true;
+    }
     if (sock_no_credit(handle))
         return false;
     return sock_ring_room(handle);
