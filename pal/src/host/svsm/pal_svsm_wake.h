@@ -23,6 +23,9 @@
  * The includer defines, for its thread pointer type PW_T:
  *   PW_NEXT(t)             the next context on the round-robin ring
  *   PW_IS_POLLWAIT(t)      blocked on the poll token (a poll() or a socket wait)
+ *   PW_HAS_WATCH(t)        it left a watch set (poll, a socket wait); the token's
+ *                          OTHER waiters - a pipe's ring_wait, an eventfd - have
+ *                          none and re-test only in their own context
  *   PW_READY(t)            is anything it watches ready now (loads only)
  *   PW_DEADLINE_DUE(t, n)  it has a deadline and `n` is past it
  *   PW_MAKE_RUNNABLE(t)    unblock it (its re-test in its own context follows)
@@ -84,7 +87,10 @@ static inline unsigned pw_wake_ready(PW_T start, uint64_t now) {
     unsigned n = 0;
     PW_T t = start;
     do {
-        if (PW_IS_POLLWAIT(t) && (PW_READY(t) || PW_DEADLINE_DUE(t, now))) {
+        /* A waiter with no watch set cannot be tested here, so it is woken as
+         * every token waiter was before (vault_fork_inflight, 2026-11-27: a pipe
+         * writer waiting for room was never woken by the reader's poll_wake). */
+        if (PW_IS_POLLWAIT(t) && (!PW_HAS_WATCH(t) || PW_READY(t) || PW_DEADLINE_DUE(t, now))) {
             PW_MAKE_RUNNABLE(t);
             n++;
         }

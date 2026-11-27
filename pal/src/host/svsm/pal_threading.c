@@ -1536,7 +1536,8 @@ bool pal_svsm_others_runnable(uint64_t now_us, uint64_t* next_us) {
 #define PW_NEXT(t)            ((t)->thread.next)
 #define PW_IS_POLLWAIT(t)     ((t)->thread.state == PAL_SVSM_THREAD_BLOCKED \
                                && (t)->thread.waiting_on == POLL_TOKEN)
-#define PW_READY(t)           ((t)->thread.n_watch && pal_svsm_poller_ready(t))
+#define PW_HAS_WATCH(t)       ((t)->thread.n_watch != 0)
+#define PW_READY(t)           pal_svsm_poller_ready(t)
 #define PW_DEADLINE_DUE(t, n) ((t)->thread.has_deadline && (n) >= (t)->thread.deadline_us)
 #define PW_MAKE_RUNNABLE(t)   do { (t)->thread.waiting_on = NULL; \
                                    (t)->thread.state = PAL_SVSM_THREAD_RUNNABLE; } while (0)
