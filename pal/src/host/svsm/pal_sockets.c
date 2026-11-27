@@ -193,7 +193,8 @@ void pal_svsm_net_ctr_report(void) {
     }
 #line 89
     if (!(c.sends | c.eagain_credit | c.eagain_ring | c.idle_rounds | c.pollers_ready
-          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop | c.head_moved | refused))
+          | c.credit_lost | c.fin_lost | c.dgrams | c.udp_q_drop | c.head_moved | refused
+          | __atomic_load_n(&g_pal_svsm_net_ctr.o1_checked, __ATOMIC_RELAXED)))
         return;
     log_always("pal_net: sends %lu eagain_credit %lu eagain_ring %lu idle_rounds %lu "
                "pollers_ready %lu credit_lost %lu credits_owed_retried %lu fin_lost %lu "
@@ -207,6 +208,20 @@ void pal_svsm_net_ctr_report(void) {
                c.connect_refused[3], c.connect_refused[4], c.connect_refused[5],
                c.connect_refused[6], c.connect_refused[7]);
 #line 96
+    /* The missed-test check (O1-WAKE.md, 2026-11-27): printed whenever it
+     * looked, so a lane can assert "looked, and missed nothing". */
+    uint64_t o1c = __atomic_load_n(&g_pal_svsm_net_ctr.o1_checked, __ATOMIC_RELAXED);
+    if (o1c) {
+        uint64_t m[8], tot = 0;
+        for (int i = 0; i < 8; i++)
+            tot += (m[i] = __atomic_load_n(&g_pal_svsm_net_ctr.o1_miss[i], __ATOMIC_RELAXED));
+        log_always("pal_net: o1_checked %lu o1_audits %lu o1_miss %lu sock_direct %lu "
+                   "sock_shared %lu listener %lu sock_other %lu pipe_local %lu pipe_shared %lu "
+                   "eventfd %lu other %lu max_us %lu",
+                   o1c, __atomic_load_n(&g_pal_svsm_net_ctr.o1_audits, __ATOMIC_RELAXED), tot,
+                   m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                   __atomic_load_n(&g_pal_svsm_net_ctr.o1_miss_max_us, __ATOMIC_RELAXED));
+    }
     uint64_t ca = __atomic_load_n(&g_pal_svsm_net_ctr.conn_async, __ATOMIC_RELAXED);
     if (ca)
         log_always("pal_net: conn_async %lu ok %lu failed %lu retries %lu", ca,
@@ -3676,6 +3691,14 @@ static bool sock_ring_room(PAL_HANDLE handle) {
     struct pal_chan_ring out;
     ring_for(handle, NULL, &out);
     return pal_chan_writable(&out);
+}
+
+int pal_svsm_sock_o1_kind(PAL_HANDLE h) {
+    if (h->sock.listening)
+        return O1K_LISTENER;
+    if (!sock_has_chan(h))
+        return O1K_SOCK_OTHER;
+    return sock_shares(h) ? O1K_SOCK_SHARED : O1K_SOCK_DIRECT;
 }
 
 bool pal_svsm_sock_writable(PAL_HANDLE handle) {

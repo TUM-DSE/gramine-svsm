@@ -136,6 +136,43 @@ bool pal_svsm_poller_ready(PAL_HANDLE thread) {
     return ready;
 }
 
+static int o1_kind(PAL_HANDLE h) {
+    switch (h->hdr.type) {
+        case PAL_TYPE_SOCKET:
+            return pal_svsm_sock_o1_kind(h);
+        case PAL_TYPE_PIPE:
+        case PAL_TYPE_PIPECLI:
+            return pal_svsm_pipe_is_shared(h) ? O1K_PIPE_SHARED : O1K_PIPE_LOCAL;
+        case PAL_TYPE_EVENTFD:
+            return O1K_EVENTFD;
+        default:
+            return O1K_OTHER;
+    }
+}
+
+/* The missed-test check (pal_svsm_poll_block; O1-WAKE.md 2026-11-27). Per
+ * handle: the scheduler-context test first (what pal_svsm_poller_ready
+ * computes - if THAT says ready now, the data simply arrived meanwhile and it
+ * is no miss), then this context's own poll_one. Ready only by the second is
+ * readiness the scheduler cannot see: under the ready-only wake, a thread
+ * waiting on it sleeps on to its deadline. */
+int pal_svsm_watch_miss_kind(PAL_HANDLE* handles, const uint32_t* events, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        PAL_HANDLE h = handles[i];
+        if (!h)
+            continue;
+        g_pal_svsm_sched_ctx++;
+        g_pal_svsm_sched_deferred = false;
+        bool sched_ready = poll_one(h, events[i]) != 0 || g_pal_svsm_sched_deferred;
+        g_pal_svsm_sched_ctx--;
+        if (sched_ready)
+            continue;
+        if (poll_one(h, events[i]))
+            return o1_kind(h);
+    }
+    return -1;
+}
+
 /*
  * Wait until one of these handles has one of these events, or the timeout
  * runs out.

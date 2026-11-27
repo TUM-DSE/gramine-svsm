@@ -341,6 +341,19 @@ void pal_svsm_poll_wake(void);
 extern bool g_pal_svsm_o1_wake;
 extern bool g_pal_svsm_o1_cover;   /* svsm.o1_cover (default false since 2026-11-27): C */
 extern uint64_t g_pal_svsm_poll_scan_us;
+extern uint64_t g_pal_svsm_o1_audit_us;   /* svsm.o1_audit_us (default 0 = off) */
+
+/* Kinds of a handle the missed-test check reports (pal_net o1_miss, the bd
+ * profile's mc rows 0x10+kind count / 0x18+kind lateness us). */
+enum pal_svsm_o1_kind {
+    O1K_SOCK_DIRECT, O1K_SOCK_SHARED, O1K_LISTENER, O1K_SOCK_OTHER,
+    O1K_PIPE_LOCAL, O1K_PIPE_SHARED, O1K_EVENTFD, O1K_OTHER, O1K_N
+};
+/* Own-context look at a watch set the scheduler's test called not ready: the
+ * kind of the first handle that the scheduler-context test still calls not
+ * ready but poll_one in this context calls ready, -1 if none (pal_object.c). */
+int pal_svsm_watch_miss_kind(PAL_HANDLE* handles, const uint32_t* events, size_t n);
+int pal_svsm_sock_o1_kind(PAL_HANDLE h);   /* pal_sockets.c */
 bool pal_svsm_sock_waiter_counted(PAL_HANDLE h);
 /* The Park arms of every blocked context (at most `max`); *partial if some
  * were left out. */
@@ -366,6 +379,12 @@ struct pal_svsm_net_ctr {
     uint64_t dgram_frames;         /* ... and the channel frames they came in */
     uint64_t udp_q_drop;           /* a datagram frame for a socket whose queue was full */
     uint64_t head_moved;           /* the head was routed while a buffer was taken for it */
+    /* The missed-test check (O1-WAKE.md, 2026-11-27): looks made, misses by
+     * kind, the largest miss's blocked time, and the audit wakes. */
+    uint64_t o1_checked;
+    uint64_t o1_miss[8];
+    uint64_t o1_miss_max_us;
+    uint64_t o1_audits;
     /* Connects the network service refused, by its reason (the reply's
      * detail, netsvc mvnet.h MVNET_REF_*; [0] a service that does not say). */
     uint64_t connect_refused[8];

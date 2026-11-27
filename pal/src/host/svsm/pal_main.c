@@ -477,6 +477,14 @@ noreturn void pal_svsm_main(void)
         g_pal_svsm_o1_wake = o1;
         g_pal_svsm_o1_cover = cover;
         g_pal_svsm_poll_scan_us = (uint64_t)scan;
+        /* o1_audit_us = N: diagnosis only - every N us wake the blocked pollers
+         * the scheduler's test calls not ready and count those whose own look
+         * says ready (pal_net o1_miss). 0 = off. */
+        int64_t audit = 0;
+        if (toml_int_in(manifest_svsm_early, "o1_audit_us", 0, &audit) < 0
+                || audit < 0 || audit > 10000000)
+            pal_svsm_fail("svsm.o1_audit_us must be an integer 0..10000000", 0);
+        g_pal_svsm_o1_audit_us = (uint64_t)audit;
     }
 
     /* Raw `syscall` fast paths (MicroVault notes/sched/SYSCALL-FASTPATH.md;
