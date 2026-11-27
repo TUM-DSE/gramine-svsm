@@ -307,7 +307,11 @@ static bool arm_lineage_kind(uint64_t arm) {
 }
 
 bool g_pal_svsm_o1_wake = true;
-bool g_pal_svsm_o1_cover = true;   /* C alone (svsm.o1_cover): the diagnosis of a stall */
+/* C (notify-covered parks) is OFF by default (owner 2026-11-27): with it the DSB
+ * smokes showed stalls of 0.3-1 s in 3 of 7 R200 reps and none without it, and
+ * with A a partial park costs one ready-only re-test per 20 ms - little left for
+ * C to save. svsm.o1_cover = true turns it on (O1-WAKE.md, the open question). */
+bool g_pal_svsm_o1_cover = false;
 uint64_t g_pal_svsm_poll_scan_us = PW_SCAN_INTERVAL_US_DEFAULT;
 
 /* `skip_covered`: for a PARK only (O1-WAKE.md C) - a Notify ends a Park, so a
