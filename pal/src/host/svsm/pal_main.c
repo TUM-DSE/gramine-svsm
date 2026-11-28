@@ -454,9 +454,12 @@ noreturn void pal_svsm_main(void)
     /* O(1) wake (MicroVault notes/libos/O1-WAKE.md; owner GO 2026-11-27):
      *
      *   [svsm]
-     *   o1_wake = true        # false: the old scheduler - a wake readies every
-     *                         # poller, every pass re-tests them all, and every
-     *                         # thread's arms go to the park (the A/B switch)
+     *   o1_wake = false       # the DEFAULT since 2026-11-28 (owner): the old
+     *                         # scheduler - a wake readies every poller, every pass
+     *                         # re-tests them all, every thread's arms go to the
+     *                         # park; true opts in to the O(1) wake (A + B). The
+     *                         # mux-credit routings (a67a819d, 864f12ef) are not
+     *                         # behind it: correctness fixes, always on
      *   poll_scan_us = 20     # while another context can run, blocked pollers
      *                         # are re-tested at most this often; 0 = every pass
      *   o1_cover = false      # C, notify-covered parks: OFF by default (owner
@@ -464,9 +467,9 @@ noreturn void pal_svsm_main(void)
      *                         # smokes with it); true turns it on
      */
     if (manifest_svsm_early) {
-        bool o1 = true;
+        bool o1 = false;   /* off by default (owner 2026-11-28); see g_pal_svsm_o1_wake */
         int64_t scan = PW_SCAN_INTERVAL_US_DEFAULT;
-        if (toml_bool_in(manifest_svsm_early, "o1_wake", true, &o1) < 0)
+        if (toml_bool_in(manifest_svsm_early, "o1_wake", false, &o1) < 0)
             pal_svsm_fail("svsm.o1_wake is not a boolean", 0);
         if (toml_int_in(manifest_svsm_early, "poll_scan_us", PW_SCAN_INTERVAL_US_DEFAULT, &scan) < 0
                 || scan < 0 || scan > 100000)
