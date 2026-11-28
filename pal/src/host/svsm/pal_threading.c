@@ -320,10 +320,10 @@ static const char g_poll_token_storage;
 #define POLL_TOKEN ((PAL_HANDLE)(void*)&g_poll_token_storage)
 
 /* Step 3 of the O1 stall hunt (2026-11-28; the bd profile, DIAGNOSIS ONLY): when a thread became
- * runnable, so the switch that runs it can say how long it waited for the vCPU (VAULT_PROF mc
- * 0xE0+b: [1 us << b, 1 us << (b+1)), b 15 = 32.8 ms and over), and how long a WATCHLESS block - an
- * event, mutex or condvar, anything not on the poll token - took to be woken (mc 0xD0+b: [64 us << b,
- * 64 us << (b+1)), b 15 = 2 s and over; mc 0xF0 those that ended on their deadline). */
+ * runnable, so the switch that runs it can say how long it waited for the vCPU (PROF_ROW_RQ(b): [1 us << b,
+ * 1 us << (b+1)), b 15 = 32.8 ms and over), and how long a WATCHLESS block - an event, mutex or condvar,
+ * anything not on the poll token - took to be woken (PROF_ROW_WL(b): [64 us << b, 64 us << (b+1)), b 15 =
+ * 2 s and over; PROF_ROW_WL_DEADLINE those that ended on their deadline). Rows: pal_svsm_prof_rows.h. */
 #ifdef PROF_ROW_GATHER
 #define PROF_RUNNABLE(t) do { if (__builtin_expect(g_pal_svsm_prof_on, 0)) (t)->thread.prof_runnable_us = pal_svsm_now_usec(); } while (0)
 static inline unsigned prof_log2_bucket(uint64_t v, uint64_t base) {
@@ -893,7 +893,8 @@ static PAL_HANDLE pick_next(void) {
         static bool o1_marked;
         if (!o1_marked && g_pal_svsm_prof_on) {
             o1_marked = true;
-            pal_svsm_prof_mc(0x22, 1, 0);   /* the missed-test check is in this vault */
+            pal_svsm_prof_mc(PROF_ROW_MARKER, 1, 0);   /* the missed-test check is in this vault */
+            pal_svsm_prof_mc(PROF_ROW_LAYOUT, 2, 0);   /* the rows are pal_svsm_prof_rows.h layout 2 */
         }
 #endif
         bool audit = false;
@@ -925,7 +926,7 @@ static PAL_HANDLE pick_next(void) {
                        && t->thread.waiting_on == POLL_TOKEN) {
                 PAL_SVSM_NET_CTR_INC(o1_audits);
 #ifdef PROF_ROW_GATHER
-                pal_svsm_prof_mc(0x21, 1, 0);
+                pal_svsm_prof_mc(PROF_ROW_AUDITS, 1, 0);
 #endif
                 t->thread.o1_audit   = true;
                 t->thread.waiting_on = NULL;
@@ -1055,7 +1056,7 @@ static void schedule(void) {
         if (next->thread.prof_runnable_us) {
             uint64_t d = pal_svsm_now_usec() - next->thread.prof_runnable_us;
             next->thread.prof_runnable_us = 0;
-            pal_svsm_prof_mc(0xE0 + prof_log2_bucket(d, 1), 1, 0);
+            pal_svsm_prof_mc(PROF_ROW_RQ(prof_log2_bucket(d, 1)), 1, 0);
         }
 #endif
     }
@@ -1473,9 +1474,9 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
 
 #ifdef PROF_ROW_GATHER
     if (wl0) {
-        pal_svsm_prof_mc(0xD0 + prof_log2_bucket(pal_svsm_now_usec() - wl0, 64), 1, 0);
+        pal_svsm_prof_mc(PROF_ROW_WL(prof_log2_bucket(pal_svsm_now_usec() - wl0, 64)), 1, 0);
         if (self->thread.timed_out)
-            pal_svsm_prof_mc(0xF0, 1, 0);
+            pal_svsm_prof_mc(PROF_ROW_WL_DEADLINE, 1, 0);
     }
 #endif
     self->thread.waiting_on   = NULL;
@@ -1569,7 +1570,7 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
         self->thread.o1_timeout_scanned = false;
         PAL_SVSM_NET_CTR_INC(o1_checked);
 #ifdef PROF_ROW_GATHER
-        pal_svsm_prof_mc(0x20, 1, 0);   /* looked (so "0 misses" is not "never looked") */
+        pal_svsm_prof_mc(PROF_ROW_LOOKS, 1, 0);   /* looked (so "0 misses" is not "never looked") */
         uint64_t adv0[4];
         pal_svsm_sock_advances(adv0);
 #endif
@@ -1582,7 +1583,7 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
         pal_svsm_sock_advances(adv1);
         for (unsigned i = 0; i < 4; i++)
             if (adv1[i] != adv0[i])
-                pal_svsm_prof_mc(0x2A + i, 1, 0);
+                pal_svsm_prof_mc(PROF_ROW_ADV(i), 1, 0);
 #endif
         if (k >= 0 && k < O1K_N) {
             uint64_t late = pal_svsm_now_usec() - t0;
@@ -1592,8 +1593,8 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
                 __atomic_store_n(&g_pal_svsm_net_ctr.o1_miss_max_us, late, __ATOMIC_RELAXED);
 #ifdef PROF_ROW_GATHER
             /* the diagnostic gramine: live, per vault, in the monitor's VAULT_PROF */
-            pal_svsm_prof_mc(0x10 + (unsigned)k, 1, 0);
-            pal_svsm_prof_mc(0x18 + (unsigned)k, late, 0);
+            pal_svsm_prof_mc(PROF_ROW_MISS((unsigned)k), 1, 0);
+            pal_svsm_prof_mc(PROF_ROW_MISS_US((unsigned)k), late, 0);
 #endif
         }
     }
@@ -1601,22 +1602,15 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
     /* The blocked-time histogram (the O1 stall hunt, 2026-11-28; DIAGNOSIS ONLY): every watched wait,
      * by its kind (its first handle's), how it ended and how long it took. Where the time goes in a
      * partial breakdown, whether or not the scheduler's test was wrong:
-     *   mc 0x30+kind  waits that ended on their deadline (count)
-     *   mc 0x38+kind  waits with no deadline at all - poll/epoll_wait(-1) (count)
-     *   mc 0x40 + kind*16 + b  waits of kind that blocked [64 us << b, 64 us << (b+1)); b 15 = 2 s and over */
+     *   rows: pal_svsm_prof_rows.h (layout 2) - PROF_ROW_BT_DEADLINE / _NODL / PROF_ROW_BT(kind, bucket) */
     if (self && wn && t0 && g_pal_svsm_prof_on) {
         uint64_t us = pal_svsm_now_usec() - t0;
         unsigned k = (unsigned)pal_svsm_watch_kind(wh, wn) & 7;
-        unsigned b = 0;
-        while (b < 15 && us >= (64ull << (b + 1)))
-            b++;
-        if (us < 64)
-            b = 0;
-        pal_svsm_prof_mc(0x40 + k * 16 + b, 1, 0);
+        pal_svsm_prof_mc(PROF_ROW_BT(k, prof_bt_bucket(us)), 1, 0);
         if (r == PAL_SVSM_WAIT_TIMEOUT)
-            pal_svsm_prof_mc(0x30 + k, 1, 0);
+            pal_svsm_prof_mc(PROF_ROW_BT_DEADLINE(k), 1, 0);
         if (!deadline_us)
-            pal_svsm_prof_mc(0x38 + k, 1, 0);
+            pal_svsm_prof_mc(PROF_ROW_BT_NODL(k), 1, 0);
     }
 #endif
     pal_svsm_sock_waiters_drop(marks, nmarks);

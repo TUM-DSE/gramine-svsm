@@ -136,6 +136,11 @@ static inline void prof_account(uint64_t code, uint64_t ticks) {
 void pal_svsm_prof_mc(unsigned row, uint64_t count, uint64_t ticks) {
     if (!g_pal_svsm_prof_on || row >= 256)
         return;
+    /* A pseudo row on a real monitor call's row corrupts both (pal_svsm_prof_rows.h): refused, and said. */
+    if (prof_row_is_real(row)) {
+        __atomic_fetch_add(&g_pal_svsm_prof.mc[PROF_ROW_REFUSED][0], 1, __ATOMIC_RELAXED);
+        return;
+    }
     __atomic_fetch_add(&g_pal_svsm_prof.mc[row][0], count, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_pal_svsm_prof.mc[row][1], ticks, __ATOMIC_RELAXED);
 }

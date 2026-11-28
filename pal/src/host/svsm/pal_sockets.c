@@ -1957,7 +1957,7 @@ static int connect_go_pending(PAL_HANDLE handle, const struct pal_sock_grant* re
     handle->sock.conn_pending = true;
     PAL_SVSM_NET_CTR_INC(conn_async);
 #ifdef PROF_ROW_GATHER
-    pal_svsm_prof_mc(0x26, 1, 0);   /* a connect went pending (its first grant was refused: busy or rate) */
+    pal_svsm_prof_mc(PROF_ROW_CONN_PENDING, 1, 0);   /* a connect went pending (its first grant was refused: busy or rate) */
 #endif
     sock_report_local(handle, out_local_addr);
     if (out_inprogress)
@@ -1978,7 +1978,7 @@ static void connect_pending_end(PAL_HANDLE handle, bool failed) {
                            __ATOMIC_ACQ_REL);
         PAL_SVSM_NET_CTR_INC(conn_async_failed);
 #ifdef PROF_ROW_GATHER
-        pal_svsm_prof_mc(0x28, 1, 0);
+        pal_svsm_prof_mc(PROF_ROW_CONN_FAILED, 1, 0);
 #endif
     } else {
         PAL_SVSM_NET_CTR_INC(conn_async_ok);
@@ -1989,7 +1989,7 @@ static void connect_pending_end(PAL_HANDLE handle, bool failed) {
         unsigned b = 0;
         while (b < 15 && us >= (32ull << (b + 1)))
             b++;
-        pal_svsm_prof_mc(0xB0 + b, 1, 0);
+        pal_svsm_prof_mc(PROF_ROW_CONN_EST(b), 1, 0);
 #endif
     }
 }
@@ -2020,7 +2020,7 @@ int pal_svsm_sock_connect_state(PAL_HANDLE handle) {
                                                : el < PAL_GRANT_BUSY_FAST_US ? 200 : 1000);
             PAL_SVSM_NET_CTR_INC(conn_async_retries);
 #ifdef PROF_ROW_GATHER
-            pal_svsm_prof_mc(0x27, 1, 0);
+            pal_svsm_prof_mc(PROF_ROW_CONN_RETRY, 1, 0);
 #endif
             return 1;
         }

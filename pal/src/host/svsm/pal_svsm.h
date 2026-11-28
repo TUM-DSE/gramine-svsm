@@ -78,6 +78,7 @@ void pal_svsm_prof_switch(PAL_SVSM_TCB* prev, PAL_SVSM_TCB* next);
 #define PROF_ROW_IDLE_SPIN    0x07   /* idle spin slices (Sleep refused): count, ticks spun */
 #define PROF_ROW_GATHER       0x08   /* gather_arms (the park path): count, ticks */
 void pal_svsm_prof_mc(unsigned row, uint64_t count, uint64_t ticks);
+#include "pal_svsm_prof_rows.h"
 static inline uint64_t pal_svsm_prof_now(void) { return __builtin_ia32_rdtsc(); }
 bool pal_svsm_profile_start(void);
 void pal_svsm_console_write(const void* buf, size_t size);   /* pal_monitor_call.c */

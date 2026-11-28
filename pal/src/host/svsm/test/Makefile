@@ -4,10 +4,11 @@ CC      ?= cc
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=gnu11 -Wall -Wextra -Werror -fsanitize=undefined -fno-sanitize-recover=all
 
-check: chan_accept_test random_test wake_test
+check: chan_accept_test random_test wake_test prof_rows_test
 	./chan_accept_test
 	./random_test
 	./wake_test
+	./prof_rows_test
 
 chan_accept_test: chan_accept_test.c ../pal_svsm_chan.h
 	$(CC) $(CFLAGS) -o $@ chan_accept_test.c
@@ -18,7 +19,10 @@ random_test: random_test.c ../pal_svsm_random.h
 wake_test: wake_test.c ../pal_svsm_wake.h
 	$(CC) $(CFLAGS) -o $@ wake_test.c
 
+prof_rows_test: prof_rows_test.c ../pal_svsm_prof_rows.h
+	$(CC) $(CFLAGS) -o $@ prof_rows_test.c
+
 clean:
-	rm -f chan_accept_test random_test wake_test
+	rm -f chan_accept_test random_test wake_test prof_rows_test
 
 .PHONY: check clean
