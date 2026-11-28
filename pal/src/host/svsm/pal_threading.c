@@ -1544,6 +1544,28 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
 #endif
         }
     }
+#ifdef PROF_ROW_GATHER
+    /* The blocked-time histogram (the O1 stall hunt, 2026-11-28; DIAGNOSIS ONLY): every watched wait,
+     * by its kind (its first handle's), how it ended and how long it took. Where the time goes in a
+     * partial breakdown, whether or not the scheduler's test was wrong:
+     *   mc 0x30+kind  waits that ended on their deadline (count)
+     *   mc 0x38+kind  waits with no deadline at all - poll/epoll_wait(-1) (count)
+     *   mc 0x40 + kind*16 + b  waits of kind that blocked [64 us << b, 64 us << (b+1)); b 15 = 2 s and over */
+    if (self && wn && t0 && g_pal_svsm_prof_on) {
+        uint64_t us = pal_svsm_now_usec() - t0;
+        unsigned k = (unsigned)pal_svsm_watch_kind(wh, wn) & 7;
+        unsigned b = 0;
+        while (b < 15 && us >= (64ull << (b + 1)))
+            b++;
+        if (us < 64)
+            b = 0;
+        pal_svsm_prof_mc(0x40 + k * 16 + b, 1, 0);
+        if (r == PAL_SVSM_WAIT_TIMEOUT)
+            pal_svsm_prof_mc(0x30 + k, 1, 0);
+        if (!deadline_us)
+            pal_svsm_prof_mc(0x38 + k, 1, 0);
+    }
+#endif
     pal_svsm_sock_waiters_drop(marks, nmarks);
     return r;
 }

@@ -150,6 +150,14 @@ static int o1_kind(PAL_HANDLE h) {
     }
 }
 
+/* The kind of a watch set, for the blocked-time histogram: its first handle's. */
+int pal_svsm_watch_kind(PAL_HANDLE* handles, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (handles[i])
+            return o1_kind(handles[i]);
+    return O1K_OTHER;
+}
+
 /* The missed-test check (pal_svsm_poll_block; O1-WAKE.md 2026-11-27). Per
  * handle: the scheduler-context test first (what pal_svsm_poller_ready
  * computes - if THAT says ready now, the data simply arrived meanwhile and it
