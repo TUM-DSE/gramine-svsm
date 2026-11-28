@@ -872,6 +872,13 @@ static PAL_HANDLE pick_next(void) {
         /* The missed-test audit (diagnosis, svsm.o1_audit_us): once per interval,
          * every blocked watched poller the test below calls not ready is woken
          * anyway, as the old wake-all did, and checks in its own context. */
+#ifdef PROF_ROW_GATHER
+        static bool o1_marked;
+        if (!o1_marked && g_pal_svsm_prof_on) {
+            o1_marked = true;
+            pal_svsm_prof_mc(0x22, 1, 0);   /* the missed-test check is in this vault */
+        }
+#endif
         bool audit = false;
         if (g_pal_svsm_o1_wake && g_pal_svsm_o1_audit_us && scan
                 && now - g_last_o1_audit_us >= g_pal_svsm_o1_audit_us) {
@@ -899,6 +906,9 @@ static PAL_HANDLE pick_next(void) {
             } else if (audit && t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
                        && t->thread.waiting_on == POLL_TOKEN) {
                 PAL_SVSM_NET_CTR_INC(o1_audits);
+#ifdef PROF_ROW_GATHER
+                pal_svsm_prof_mc(0x21, 1, 0);
+#endif
                 t->thread.o1_audit   = true;
                 t->thread.waiting_on = NULL;
                 t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
@@ -1517,6 +1527,9 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
         self->thread.o1_audit = false;
         self->thread.o1_timeout_scanned = false;
         PAL_SVSM_NET_CTR_INC(o1_checked);
+#ifdef PROF_ROW_GATHER
+        pal_svsm_prof_mc(0x20, 1, 0);   /* looked (so "0 misses" is not "never looked") */
+#endif
         int k = pal_svsm_watch_miss_kind(wh, we, wn);
         if (k >= 0 && k < O1K_N) {
             uint64_t late = pal_svsm_now_usec() - t0;
