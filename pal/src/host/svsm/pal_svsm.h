@@ -355,6 +355,7 @@ enum pal_svsm_o1_kind {
 int pal_svsm_watch_miss_kind(PAL_HANDLE* handles, const uint32_t* events, size_t n);
 int pal_svsm_sock_o1_kind(PAL_HANDLE h);   /* pal_sockets.c */
 int pal_svsm_watch_kind(PAL_HANDLE* handles, size_t n);   /* pal_object.c */
+void pal_svsm_sock_advances(uint64_t out[4]);              /* pal_sockets.c */
 bool pal_svsm_sock_waiter_counted(PAL_HANDLE h);
 /* The Park arms of every blocked context (at most `max`); *partial if some
  * were left out. */

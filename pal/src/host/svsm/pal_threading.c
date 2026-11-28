@@ -1570,8 +1570,20 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
         PAL_SVSM_NET_CTR_INC(o1_checked);
 #ifdef PROF_ROW_GATHER
         pal_svsm_prof_mc(0x20, 1, 0);   /* looked (so "0 misses" is not "never looked") */
+        uint64_t adv0[4];
+        pal_svsm_sock_advances(adv0);
 #endif
         int k = pal_svsm_watch_miss_kind(wh, we, wn);
+#ifdef PROF_ROW_GATHER
+        /* What this look ADVANCED (the discriminator): mc 0x2A a pending connect completed, 0x2B a
+         * shared-channel frame routed, 0x2C a credit sent, 0x2D an owed FIN sent - work only a look
+         * does, which the old wake-all's runs supplied for free. Counted once per look that did it. */
+        uint64_t adv1[4];
+        pal_svsm_sock_advances(adv1);
+        for (unsigned i = 0; i < 4; i++)
+            if (adv1[i] != adv0[i])
+                pal_svsm_prof_mc(0x2A + i, 1, 0);
+#endif
         if (k >= 0 && k < O1K_N) {
             uint64_t late = pal_svsm_now_usec() - t0;
             PAL_SVSM_NET_CTR_INC(o1_miss[k]);

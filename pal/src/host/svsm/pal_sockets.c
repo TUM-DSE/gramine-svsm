@@ -169,6 +169,14 @@ static bool g_mux_granting;  /* a connect is asking for the vault's channel (_Pa
  * or idled prints nothing, so ordinary vaults' output is unchanged. A vault
  * the host deletes rather than one that exits never reaches here, and
  * prints nothing either. */
+/* The discriminator (the O1 stall hunt, 2026-11-28; read by pal_svsm_poll_block's own-look check):
+ * monotonic counts of what a look can ADVANCE - a pending connect completed, a shared-channel frame
+ * routed, a credit frame sent, an owed FIN sent. Plain counters, one vCPU. */
+static uint64_t g_adv_conn_ok, g_adv_routed, g_adv_credit, g_adv_fin;
+void pal_svsm_sock_advances(uint64_t out[4]) {
+    out[0] = g_adv_conn_ok; out[1] = g_adv_routed; out[2] = g_adv_credit; out[3] = g_adv_fin;
+}
+
 void pal_svsm_net_ctr_report(void) {
     struct pal_svsm_net_ctr c;
     c.sends         = __atomic_load_n(&g_pal_svsm_net_ctr.sends, __ATOMIC_RELAXED);
@@ -995,6 +1003,7 @@ static void mux_credit_maybe(PAL_HANDLE h) {
      * data to send and is being dispatched. The client waits on data, which is
      * still notified. */
     if (pal_chan_send2(&out, &mh, PAL_MVMUX_HDR_BYTES, &want, 4) == 0) {
+        g_adv_credit++;
         h->sock.rx_advert = want;
         if (h->sock.credit_owed) {
             h->sock.credit_owed = false;
@@ -1067,6 +1076,7 @@ static void mux_fin_flush(void) {
     for (int i = sent; i < g_fin_owed_n; i++)
         g_fin_owed[i - sent] = g_fin_owed[i];
     g_fin_owed_n -= sent;
+    g_adv_fin += (uint64_t)sent;
     for (int i = 0; i < sent; i++)
         PAL_SVSM_NET_CTR_INC(fin_resent);
 }
@@ -1946,6 +1956,9 @@ static int connect_go_pending(PAL_HANDLE handle, const struct pal_sock_grant* re
     handle->sock.conn_failed  = false;
     handle->sock.conn_pending = true;
     PAL_SVSM_NET_CTR_INC(conn_async);
+#ifdef PROF_ROW_GATHER
+    pal_svsm_prof_mc(0x26, 1, 0);   /* a connect went pending (its first grant was refused: busy or rate) */
+#endif
     sock_report_local(handle, out_local_addr);
     if (out_inprogress)
         *out_inprogress = true;
@@ -1964,8 +1977,20 @@ static void connect_pending_end(PAL_HANDLE handle, bool failed) {
         __atomic_sub_fetch(&g_pal_svsm_peers[handle->sock.conn_peer - 1].conns, 1,
                            __ATOMIC_ACQ_REL);
         PAL_SVSM_NET_CTR_INC(conn_async_failed);
+#ifdef PROF_ROW_GATHER
+        pal_svsm_prof_mc(0x28, 1, 0);
+#endif
     } else {
         PAL_SVSM_NET_CTR_INC(conn_async_ok);
+        g_adv_conn_ok++;
+#ifdef PROF_ROW_GATHER
+        /* pending -> established: mc 0xB0+b, [32 us << b, 32 us << (b+1)), b 15 = 1.05 s and over */
+        uint64_t us = pal_svsm_now_usec() - handle->sock.conn_t0_us;
+        unsigned b = 0;
+        while (b < 15 && us >= (32ull << (b + 1)))
+            b++;
+        pal_svsm_prof_mc(0xB0 + b, 1, 0);
+#endif
     }
 }
 
@@ -1994,6 +2019,9 @@ int pal_svsm_sock_connect_state(PAL_HANDLE handle) {
             handle->sock.conn_next_us = now + (win == PAL_SVSM_STATUS_RATE_LIMITED ? PAL_GRANT_TOKEN_US
                                                : el < PAL_GRANT_BUSY_FAST_US ? 200 : 1000);
             PAL_SVSM_NET_CTR_INC(conn_async_retries);
+#ifdef PROF_ROW_GATHER
+            pal_svsm_prof_mc(0x27, 1, 0);
+#endif
             return 1;
         }
     }
@@ -3587,6 +3615,8 @@ static bool mux_poll_route(PAL_HANDLE handle, struct pal_chan_ring* in) {
         return false;
     for (int i = 0; i < PAL_MUX_POLL_STEPS; i++) {
         enum mux_head mh = mux_head_step(handle, in, /*was_full=*/false);
+        if (mh == MUX_HEAD_MOVED || mh == MUX_HEAD_MINE)
+            g_adv_routed++;
         if (mh == MUX_HEAD_MINE)
             return true;                 /* its own data is at the head */
         if (mh != MUX_HEAD_MOVED)
