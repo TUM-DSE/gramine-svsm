@@ -206,6 +206,9 @@ noreturn void pal_svsm_exception_deliver(uint64_t event, uintptr_t addr, PAL_CON
          */
         {
             PAL_HANDLE self = pal_get_svsm_tcb()->handle;
+#ifdef PROF_ROW_GATHER
+            pal_svsm_prof_mc(PROF_ROW_PREEMPTS, 1, 0);
+#endif
             self->thread.in_upcall++;
             _PalThreadYieldExecution();
             self->thread.in_upcall--;

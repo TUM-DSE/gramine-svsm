@@ -138,6 +138,7 @@ struct pal_handle_inner {
              * it and said "not ready". Either way pal_svsm_poll_block then looks in
              * its own context, and a ready handle there is a missed test. */
             uint64_t   prof_runnable_us;   /* the bd profile: when it last became runnable (0: not stamped) */
+            uint64_t   prof_slice_us;      /* the bd profile: when its current slice began (0: not running) */
             bool       o1_audit;
             bool       o1_timeout_scanned;
             /* What a thread blocked in poll() is watching, so that the

@@ -1053,11 +1053,20 @@ static void schedule(void) {
     if (__builtin_expect(g_pal_svsm_prof_on, 0)) {
         pal_svsm_prof_switch(prev->thread.tcb, next->thread.tcb);
 #ifdef PROF_ROW_GATHER
+        uint64_t sw_now = pal_svsm_now_usec();
         if (next->thread.prof_runnable_us) {
-            uint64_t d = pal_svsm_now_usec() - next->thread.prof_runnable_us;
+            uint64_t d = sw_now - next->thread.prof_runnable_us;
             next->thread.prof_runnable_us = 0;
             pal_svsm_prof_mc(PROF_ROW_RQ(prof_log2_bucket(d, 1)), 1, 0);
         }
+        /* prev's slice, by how it ended: still runnable (a yield or a preemption) or not */
+        if (prev->thread.prof_slice_us) {
+            unsigned sb = prof_slice_bucket(sw_now - prev->thread.prof_slice_us);
+            pal_svsm_prof_mc(prev->thread.state == PAL_SVSM_THREAD_RUNNABLE ? PROF_ROW_SLICE_RUNNABLE(sb)
+                                                                            : PROF_ROW_SLICE_BLOCKED(sb), 1, 0);
+        }
+        prev->thread.prof_slice_us = 0;
+        next->thread.prof_slice_us = sw_now;
 #endif
     }
     pal_svsm_ctx_switch(&prev->thread.rsp, next->thread.rsp, (uint64_t)next->thread.tcb);
