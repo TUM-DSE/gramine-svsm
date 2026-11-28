@@ -53,6 +53,13 @@ static inline bool pw_scan_due(uint64_t now_us, uint64_t last_us, uint64_t inter
     return now_us - last_us >= interval_us;
 }
 
+/* The park linger (owner GO 2026-11-28; svsm.park_linger_us, default 0 = off): with nothing runnable, keep
+ * re-testing the blocked waiters for up to `linger_us` before parking - what the old wake-all's herd gave a
+ * front end for free (nginx parked ~35% more per request under the O(1) wake). Go on while this is true. */
+static inline bool pw_linger_more(uint64_t now_us, uint64_t start_us, uint64_t linger_us) {
+    return linger_us && now_us - start_us < linger_us;
+}
+
 /* C: does one waited entry wake this vault on its own, so that its arm is not
  * needed for the park? */
 enum pw_entry_kind {

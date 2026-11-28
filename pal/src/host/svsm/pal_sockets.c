@@ -222,6 +222,11 @@ void pal_svsm_net_ctr_report(void) {
                    m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
                    __atomic_load_n(&g_pal_svsm_net_ctr.o1_miss_max_us, __ATOMIC_RELAXED));
     }
+    uint64_t lf = __atomic_load_n(&g_pal_svsm_net_ctr.linger_found, __ATOMIC_RELAXED);
+    uint64_t lp = __atomic_load_n(&g_pal_svsm_net_ctr.linger_parked, __ATOMIC_RELAXED);
+    if (lf | lp)
+        log_always("pal_net: linger found %lu parked %lu rounds %lu", lf, lp,
+                   __atomic_load_n(&g_pal_svsm_net_ctr.linger_rounds, __ATOMIC_RELAXED));
     uint64_t ca = __atomic_load_n(&g_pal_svsm_net_ctr.conn_async, __ATOMIC_RELAXED);
     if (ca)
         log_always("pal_net: conn_async %lu ok %lu failed %lu retries %lu", ca,

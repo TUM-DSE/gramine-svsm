@@ -320,6 +320,7 @@ extern bool g_pal_svsm_o1_wake;
 extern bool g_pal_svsm_o1_cover;   /* svsm.o1_cover (default false since 2026-11-27): C */
 extern uint64_t g_pal_svsm_poll_scan_us;
 extern uint64_t g_pal_svsm_o1_audit_us;   /* svsm.o1_audit_us (default 0 = off) */
+extern uint64_t g_pal_svsm_park_linger_us;   /* svsm.park_linger_us (default 0 = off) */
 
 /* Kinds of a handle the missed-test check reports (pal_net o1_miss, the bd
  * profile's mc rows 0x10+kind count / 0x18+kind lateness us). */
@@ -363,6 +364,11 @@ struct pal_svsm_net_ctr {
     uint64_t o1_miss[8];
     uint64_t o1_miss_max_us;
     uint64_t o1_audits;
+    /* The park linger (svsm.park_linger_us): lingers that found a waiter ready (no park), that parked after
+     * all, and the re-test rounds they spent. */
+    uint64_t linger_found;
+    uint64_t linger_parked;
+    uint64_t linger_rounds;
     /* Connects the network service refused, by its reason (the reply's
      * detail, netsvc mvnet.h MVNET_REF_*; [0] a service that does not say). */
     uint64_t connect_refused[8];

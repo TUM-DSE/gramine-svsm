@@ -133,6 +133,10 @@ int main(void) {
     CHECK(!pw_scan_due(100, 90, 20, true), "runnable, 10 us since: must skip");
     CHECK(pw_scan_due(110, 90, 20, true), "runnable, 20 us since: must scan");
     CHECK(pw_scan_due(100, 99, 0, true), "interval 0: every pass");
+    /* the park linger: off at 0, on for exactly linger_us */
+    CHECK(!pw_linger_more(100, 100, 0), "linger 0 must not linger");
+    CHECK(pw_linger_more(129, 100, 30), "29 us into a 30 us linger: go on");
+    CHECK(!pw_linger_more(130, 100, 30), "30 us into a 30 us linger: park");
     /* C: which waits cover themselves */
     CHECK(pw_entry_covered(PW_ENTRY_SOCKET, 1, 0, 1), "counted READ socket must be covered");
     CHECK(!pw_entry_covered(PW_ENTRY_SOCKET, 1, 0, 0), "uncounted socket (no channel, listener) covered");
