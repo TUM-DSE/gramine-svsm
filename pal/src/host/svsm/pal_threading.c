@@ -318,6 +318,7 @@ bool g_pal_svsm_o1_wake = false;
 bool g_pal_svsm_o1_cover = false;
 uint64_t g_pal_svsm_poll_scan_us = PW_SCAN_INTERVAL_US_DEFAULT;
 uint64_t g_pal_svsm_o1_audit_us = 0;
+uint64_t g_pal_svsm_park_linger_us = 0;
 /* The poll token (see pal_svsm_poll_block): defined here because pick_next's
  * missed-test audit compares against it. */
 static const char g_poll_token_storage;
@@ -971,6 +972,41 @@ static PAL_HANDLE pick_next(void) {
         /* Nobody else wants it and we are still able to run: carry on. */
         if (g_current->thread.state == PAL_SVSM_THREAD_RUNNING)
             return g_current;
+
+        /* The park linger (svsm.park_linger_us, default 0 = off; owner GO 2026-11-28): nothing can run, so
+         * before giving the processor back re-test the blocked waiters - their watch sets and deadlines - for
+         * up to the linger. A waiter found ready is made runnable and the loop picks it; otherwise the park
+         * below happens as before, `linger_us` later. Loads only (pal_svsm_poller_ready), no monitor call. */
+        if (g_pal_svsm_park_linger_us) {
+            uint64_t l0 = pal_svsm_now_usec(), ln = l0;
+            bool found = false;
+            while (!found && pw_linger_more(ln, l0, g_pal_svsm_park_linger_us)) {
+                PAL_SVSM_NET_CTR_INC(linger_rounds);
+                PAL_HANDLE w = g_current;
+                do {
+                    if (w->thread.state == PAL_SVSM_THREAD_BLOCKED) {
+                        if (w->thread.has_deadline && ln >= w->thread.deadline_us) {
+                            found = true;            /* the loop's deadline pass takes it */
+                        } else if (w->thread.n_watch && pal_svsm_poller_ready(w)) {
+                            w->thread.waiting_on = NULL;
+                            w->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+                            found = true;
+                        }
+                    }
+                    w = w->thread.next;
+                } while (w != g_current && !found);
+                if (!found) {
+                    __asm__ volatile("pause");
+                    ln = pal_svsm_now_usec();
+                }
+            }
+            if (found) {
+                PAL_SVSM_NET_CTR_INC(linger_found);
+                pal_svsm_preempt_update(true);
+                continue;
+            }
+            PAL_SVSM_NET_CTR_INC(linger_parked);
+        }
 
         if (!have_deadline) {
             /* No deadline. Before this that was a deadlock by

@@ -488,6 +488,13 @@ noreturn void pal_svsm_main(void)
                 || audit < 0 || audit > 10000000)
             pal_svsm_fail("svsm.o1_audit_us must be an integer 0..10000000", 0);
         g_pal_svsm_o1_audit_us = (uint64_t)audit;
+        /* park_linger_us = N: with nothing runnable, re-test the blocked waiters for up to N us before a
+         * park (owner GO 2026-11-28: a front end - nginx - parked ~35% more per request under the O(1)
+         * wake). 0 = off, the default: no change. */
+        int64_t linger = 0;
+        if (toml_int_in(manifest_svsm_early, "park_linger_us", 0, &linger) < 0 || linger < 0 || linger > 1000000)
+            pal_svsm_fail("svsm.park_linger_us must be an integer 0..1000000", 0);
+        g_pal_svsm_park_linger_us = (uint64_t)linger;
     }
 
     /* Raw `syscall` fast paths (MicroVault notes/sched/SYSCALL-FASTPATH.md;
