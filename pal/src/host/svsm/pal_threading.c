@@ -318,6 +318,23 @@ uint64_t g_pal_svsm_o1_audit_us = 0;
  * missed-test audit compares against it. */
 static const char g_poll_token_storage;
 #define POLL_TOKEN ((PAL_HANDLE)(void*)&g_poll_token_storage)
+
+/* Step 3 of the O1 stall hunt (2026-11-28; the bd profile, DIAGNOSIS ONLY): when a thread became
+ * runnable, so the switch that runs it can say how long it waited for the vCPU (VAULT_PROF mc
+ * 0xE0+b: [1 us << b, 1 us << (b+1)), b 15 = 32.8 ms and over), and how long a WATCHLESS block - an
+ * event, mutex or condvar, anything not on the poll token - took to be woken (mc 0xD0+b: [64 us << b,
+ * 64 us << (b+1)), b 15 = 2 s and over; mc 0xF0 those that ended on their deadline). */
+#ifdef PROF_ROW_GATHER
+#define PROF_RUNNABLE(t) do { if (__builtin_expect(g_pal_svsm_prof_on, 0)) (t)->thread.prof_runnable_us = pal_svsm_now_usec(); } while (0)
+static inline unsigned prof_log2_bucket(uint64_t v, uint64_t base) {
+    unsigned b = 0;
+    while (b < 15 && v >= (base << (b + 1)))
+        b++;
+    return b;
+}
+#else
+#define PROF_RUNNABLE(t) do { } while (0)
+#endif
 static uint64_t g_last_o1_audit_us;
 
 /* `skip_covered`: for a PARK only (O1-WAKE.md C) - a Notify ends a Park, so a
@@ -902,6 +919,7 @@ static PAL_HANDLE pick_next(void) {
                 PAL_SVSM_NET_CTR_INC(pollers_ready);
                 t->thread.waiting_on = NULL;
                 t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+                PROF_RUNNABLE(t);
                 pal_svsm_preempt_update(true);
             } else if (audit && t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.n_watch
                        && t->thread.waiting_on == POLL_TOKEN) {
@@ -912,6 +930,7 @@ static PAL_HANDLE pick_next(void) {
                 t->thread.o1_audit   = true;
                 t->thread.waiting_on = NULL;
                 t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+                PROF_RUNNABLE(t);
                 pal_svsm_preempt_update(true);
             }
             if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.has_deadline) {
@@ -920,6 +939,7 @@ static PAL_HANDLE pick_next(void) {
                     t->thread.timed_out  = true;
                     t->thread.waiting_on = NULL;
                     t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+                    PROF_RUNNABLE(t);
                     pal_svsm_preempt_update(true);
                 } else if (!have_deadline || t->thread.deadline_us < earliest) {
                     earliest      = t->thread.deadline_us;
@@ -1011,6 +1031,7 @@ static void schedule(void) {
 
     if (prev->thread.state == PAL_SVSM_THREAD_RUNNING)
         prev->thread.state = PAL_SVSM_THREAD_RUNNABLE;
+        PROF_RUNNABLE(prev);
     next->thread.state = PAL_SVSM_THREAD_RUNNING;
     g_current = next;
 
@@ -1028,8 +1049,16 @@ static void schedule(void) {
      */
     prev->thread.fsbase = rdfsbase();
 
-    if (__builtin_expect(g_pal_svsm_prof_on, 0))
+    if (__builtin_expect(g_pal_svsm_prof_on, 0)) {
         pal_svsm_prof_switch(prev->thread.tcb, next->thread.tcb);
+#ifdef PROF_ROW_GATHER
+        if (next->thread.prof_runnable_us) {
+            uint64_t d = pal_svsm_now_usec() - next->thread.prof_runnable_us;
+            next->thread.prof_runnable_us = 0;
+            pal_svsm_prof_mc(0xE0 + prof_log2_bucket(d, 1), 1, 0);
+        }
+#endif
+    }
     pal_svsm_ctx_switch(&prev->thread.rsp, next->thread.rsp, (uint64_t)next->thread.tcb);
 
     /* Back on prev's stack, however long later. */
@@ -1241,6 +1270,7 @@ int _PalThreadCreate(PAL_HANDLE* handle, int (*callback)(void*), void* param) {
     hdl->thread.tcb   = tcb;
     hdl->thread.rsp   = sp;
     hdl->thread.state = PAL_SVSM_THREAD_RUNNABLE;
+    PROF_RUNNABLE(hdl);
 
     ring_insert_after(g_current, hdl);
 
@@ -1372,6 +1402,7 @@ int _PalThreadResume(PAL_HANDLE thread_handle) {
     if (thread_handle->thread.state == PAL_SVSM_THREAD_BLOCKED) {
         thread_handle->thread.waiting_on = NULL;
         thread_handle->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+        PROF_RUNNABLE(thread_handle);
         refresh_preempt_wanted();
     }
     return 0;
@@ -1434,9 +1465,19 @@ enum pal_svsm_wait_result pal_svsm_thread_block(PAL_HANDLE waiting_on,
     if (g_pal_svsm_stall_report)
         self->thread.blocked_at_us = pal_svsm_now_usec();
     refresh_preempt_wanted();
+#ifdef PROF_ROW_GATHER
+    uint64_t wl0 = (g_pal_svsm_prof_on && waiting_on != POLL_TOKEN) ? pal_svsm_now_usec() : 0;
+#endif
 
     schedule();
 
+#ifdef PROF_ROW_GATHER
+    if (wl0) {
+        pal_svsm_prof_mc(0xD0 + prof_log2_bucket(pal_svsm_now_usec() - wl0, 64), 1, 0);
+        if (self->thread.timed_out)
+            pal_svsm_prof_mc(0xF0, 1, 0);
+    }
+#endif
     self->thread.waiting_on   = NULL;
     self->thread.has_deadline = false;
     wait_forget(self);
@@ -1638,7 +1679,7 @@ bool pal_svsm_others_runnable(uint64_t now_us, uint64_t* next_us) {
 #define PW_READY(t)           pal_svsm_poller_ready(t)
 #define PW_DEADLINE_DUE(t, n) ((t)->thread.has_deadline && (n) >= (t)->thread.deadline_us)
 #define PW_MAKE_RUNNABLE(t)   do { (t)->thread.waiting_on = NULL; \
-                                   (t)->thread.state = PAL_SVSM_THREAD_RUNNABLE; } while (0)
+                                   (t)->thread.state = PAL_SVSM_THREAD_RUNNABLE; PROF_RUNNABLE(t); } while (0)
 #include "pal_svsm_wake.h"
 
 void pal_svsm_poll_wake(void) {
@@ -1661,6 +1702,7 @@ void pal_svsm_thread_wake_all(PAL_HANDLE waiting_on) {
         if (t->thread.state == PAL_SVSM_THREAD_BLOCKED && t->thread.waiting_on == waiting_on) {
             t->thread.waiting_on = NULL;
             t->thread.state      = PAL_SVSM_THREAD_RUNNABLE;
+            PROF_RUNNABLE(t);
         }
         t = t->thread.next;
     } while (t != g_current);
