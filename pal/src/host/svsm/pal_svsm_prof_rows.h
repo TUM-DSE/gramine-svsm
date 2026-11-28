@@ -55,6 +55,18 @@ static inline bool prof_row_is_real(unsigned r) {
 #define PROF_ROW_WL(b)          (0x80 + (b))        /* b 0..15: watchless block-to-wake, 64 us << b */
 #define PROF_ROW_RQ(b)          (0x90 + (b))        /* b 0..15: run-queue delay, 1 us << b */
 #define PROF_ROW_WL_DEADLINE    0xF0
+/* what holds the vCPU (the O1 stall hunt, 2026-11-28): every slice a thread ran, switch-in to switch-out,
+ * by how it ended, in 8 buckets x4 apart from 1 us (1 4 16 64 256 us, 1.02 4.1 ms, >= 16.4 ms) */
+#define PROF_SLICE_BUCKETS      8
+#define PROF_ROW_SLICE_BLOCKED(b)  (0xC2 + (b))     /* it blocked (or exited): 0xC2..0xC9 */
+#define PROF_ROW_SLICE_RUNNABLE(b) (0xCA + (b))     /* it stayed runnable - yielded or preempted: 0xCA..0xD1 */
+#define PROF_ROW_PREEMPTS       0xD2                /* preemptions delivered (the monitor's tick, PAL_EVENT_INTERRUPTED) */
+static inline unsigned prof_slice_bucket(uint64_t us) {
+    unsigned b = 0;
+    while (b < PROF_SLICE_BUCKETS - 1 && us >= (1ull << (2 * (b + 1))))
+        b++;
+    return b;
+}
 
 /* [64us << 2b, 64us << 2(b+1)), b 7 = 1.05 s and over */
 static inline unsigned prof_bt_bucket(uint64_t us) {

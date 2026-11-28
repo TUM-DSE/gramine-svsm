@@ -51,6 +51,13 @@ int main(void) {
         claim(PROF_ROW_RQ(b), "run-queue");
     }
     claim(PROF_ROW_WL_DEADLINE, "watchless deadline");
+    for (unsigned b = 0; b < PROF_SLICE_BUCKETS; b++) {
+        claim(PROF_ROW_SLICE_BLOCKED(b), "slice blocked");
+        claim(PROF_ROW_SLICE_RUNNABLE(b), "slice runnable");
+    }
+    claim(PROF_ROW_PREEMPTS, "preempts");
+    CHECK(prof_slice_bucket(3) == 0 && prof_slice_bucket(4) == 1 && prof_slice_bucket(4095) == 5
+          && prof_slice_bucket(4096) == 6 && prof_slice_bucket(16384) == 7, "slice bucket edges");
     /* the real rows the guard knows: Park and Sleep among them */
     CHECK(prof_row_is_real(0xE1) && prof_row_is_real(0xDE), "Park/Sleep not known as real");
     /* the x4 blocked-time buckets */
