@@ -464,9 +464,9 @@ noreturn void pal_svsm_main(void)
      *                         # smokes with it); true turns it on
      */
     if (manifest_svsm_early) {
-        bool o1 = true;
+        bool o1 = false;   /* base-diag: the old scheduler unless the manifest says otherwise */
         int64_t scan = PW_SCAN_INTERVAL_US_DEFAULT;
-        if (toml_bool_in(manifest_svsm_early, "o1_wake", true, &o1) < 0)
+        if (toml_bool_in(manifest_svsm_early, "o1_wake", false, &o1) < 0)
             pal_svsm_fail("svsm.o1_wake is not a boolean", 0);
         if (toml_int_in(manifest_svsm_early, "poll_scan_us", PW_SCAN_INTERVAL_US_DEFAULT, &scan) < 0
                 || scan < 0 || scan > 100000)

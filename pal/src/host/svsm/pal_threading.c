@@ -306,7 +306,10 @@ static bool arm_lineage_kind(uint64_t arm) {
            || which == PAL_SVSM_LW_ARM_LWORD_FS;
 }
 
-bool g_pal_svsm_o1_wake = true;
+/* base-diag (the O1 stall hunt's decisive comparison, 2026-11-28; DIAGNOSIS ONLY): the OLD scheduler - O1
+ * off by default (wake-all, a scan every pass, no covered parks, no audit, no missed-test check) - with the
+ * same layout-2 rows (blocked-time, run-queue, watchless, connects) as ryan/bd-o1-gramine bfd7c4c3. */
+bool g_pal_svsm_o1_wake = false;
 /* C (notify-covered parks) is OFF by default (owner 2026-11-27): with it the DSB
  * smokes showed stalls of 0.3-1 s in 3 of 7 R200 reps and none without it, and
  * with A a partial park costs one ready-only re-test per 20 ms - little left for
@@ -1553,7 +1556,8 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
     PAL_HANDLE* wh = self ? self->thread.watch_handles : NULL;
     const uint32_t* we = self ? self->thread.watch_events : NULL;
     size_t wn = self ? self->thread.n_watch : 0;
-    uint64_t t0 = (g_pal_svsm_o1_wake && wn) ? pal_svsm_now_usec() : 0;
+    /* the wait's start: for the missed-test check (O1) and for the blocked-time histogram (the profile) */
+    uint64_t t0 = ((g_pal_svsm_o1_wake || g_pal_svsm_prof_on) && wn) ? pal_svsm_now_usec() : 0;
     if (self) {
         self->thread.o1_audit = false;
         self->thread.o1_timeout_scanned = false;
