@@ -1000,6 +1000,10 @@ static PAL_HANDLE pick_next(void) {
                     ln = pal_svsm_now_usec();
                 }
             }
+#ifdef PROF_ROW_GATHER
+            pal_svsm_prof_mc(found ? PROF_ROW_LINGER_FOUND : PROF_ROW_LINGER_PARKED, 1, 0);
+            pal_svsm_prof_mc(PROF_ROW_LINGER_US, pal_svsm_now_usec() - l0, 0);
+#endif
             if (found) {
                 PAL_SVSM_NET_CTR_INC(linger_found);
                 pal_svsm_preempt_update(true);
@@ -1602,7 +1606,8 @@ enum pal_svsm_wait_result pal_svsm_poll_block(const uint64_t* deadline_us) {
     PAL_HANDLE* wh = self ? self->thread.watch_handles : NULL;
     const uint32_t* we = self ? self->thread.watch_events : NULL;
     size_t wn = self ? self->thread.n_watch : 0;
-    uint64_t t0 = (g_pal_svsm_o1_wake && wn) ? pal_svsm_now_usec() : 0;
+    /* the wait's start: for the missed-test check (O1) and for the blocked-time histogram (the profile) */
+    uint64_t t0 = ((g_pal_svsm_o1_wake || g_pal_svsm_prof_on) && wn) ? pal_svsm_now_usec() : 0;
     if (self) {
         self->thread.o1_audit = false;
         self->thread.o1_timeout_scanned = false;

@@ -56,6 +56,9 @@ int main(void) {
         claim(PROF_ROW_SLICE_RUNNABLE(b), "slice runnable");
     }
     claim(PROF_ROW_PREEMPTS, "preempts");
+    claim(PROF_ROW_LINGER_FOUND, "linger found");
+    claim(PROF_ROW_LINGER_PARKED, "linger parked");
+    claim(PROF_ROW_LINGER_US, "linger us");
     CHECK(prof_slice_bucket(3) == 0 && prof_slice_bucket(4) == 1 && prof_slice_bucket(4095) == 5
           && prof_slice_bucket(4096) == 6 && prof_slice_bucket(16384) == 7, "slice bucket edges");
     /* the real rows the guard knows: Park and Sleep among them */

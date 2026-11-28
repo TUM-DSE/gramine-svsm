@@ -61,6 +61,10 @@ static inline bool prof_row_is_real(unsigned r) {
 #define PROF_ROW_SLICE_BLOCKED(b)  (0xC2 + (b))     /* it blocked (or exited): 0xC2..0xC9 */
 #define PROF_ROW_SLICE_RUNNABLE(b) (0xCA + (b))     /* it stayed runnable - yielded or preempted: 0xCA..0xD1 */
 #define PROF_ROW_PREEMPTS       0xD2                /* preemptions delivered (the monitor's tick, PAL_EVENT_INTERRUPTED) */
+/* the park linger (svsm.park_linger_us; the nginx-park A/B, owner 2026-11-28) */
+#define PROF_ROW_LINGER_FOUND   0xA0                /* lingers that found a waiter ready: no park */
+#define PROF_ROW_LINGER_PARKED  0xA1                /* lingers that found nothing: the park followed */
+#define PROF_ROW_LINGER_US      0xA2                /* us spent lingering, in the count column */
 static inline unsigned prof_slice_bucket(uint64_t us) {
     unsigned b = 0;
     while (b < PROF_SLICE_BUCKETS - 1 && us >= (1ull << (2 * (b + 1))))
