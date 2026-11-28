@@ -306,7 +306,11 @@ static bool arm_lineage_kind(uint64_t arm) {
            || which == PAL_SVSM_LW_ARM_LWORD_FS;
 }
 
-bool g_pal_svsm_o1_wake = true;
+/* The O(1) wake (O1-WAKE.md) is OFF by default (owner 2026-11-28): the media knee probes put O1's knee at
+ * 580 against the old scheduler's 640 (nginx parks ~35% more per request under it). `[svsm] o1_wake = true`
+ * opts in. The two mux-credit routings it brought (a67a819d, 864f12ef) are correctness fixes and are NOT
+ * behind this switch - they stay on for every vault. */
+bool g_pal_svsm_o1_wake = false;
 /* C (notify-covered parks) is OFF by default (owner 2026-11-27): with it the DSB
  * smokes showed stalls of 0.3-1 s in 3 of 7 R200 reps and none without it, and
  * with A a partial park costs one ready-only re-test per 20 ms - little left for
